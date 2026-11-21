@@ -71,7 +71,7 @@ import {
 } from './background-shells.js'
 import { normalizeClaudeTuiToolResponse } from './claude-tui-tool-response.js'
 import { scrubTerminalText } from './claude-tui/diagnostic-tail.js'
-import { claudeSettingSourcesValueFor, projectSettingsAllowed } from './claude-setting-sources.js'
+import { claudeSettingSourcesValueFor, projectSettingsAllowedAsync, projectSettingsDecidedWithoutScan } from './claude-setting-sources.js'
 // #5559 — PTY-write / paste-throttle layer + interactive-form driver carved out
 // into focused modules. The empirically-pinned helpers, constants and methods
 // are moved byte-identically; the *Mixin classes carry the write/form methods,
@@ -2890,7 +2890,9 @@ export class ClaudeTuiSession extends BaseSession {
   _emitConfiguredMcpServers() {
     try {
       const { servers, warnings } = discoverConfiguredMcpServers(this.cwd, {
-        includeProjectFile: projectSettingsAllowed(this.cwd),
+        // What the RUNNING process was launched with (the decision its spawn took), so this
+        // listing matches what it loaded and never scans the folder again.
+        includeProjectFile: this._launchedWithProject === true,
       })
       for (const warning of warnings) {
         ;(this._log || log).warn(`MCP config: ${warning}`)
@@ -3736,7 +3738,10 @@ export class ClaudeTuiSession extends BaseSession {
     const cwdReal = realpathSync(this.cwd)
     // The ONE project-settings decision for this spawn: it picks `--setting-sources`
     // and whether the per-session settings file enables `.mcp.json` servers.
-    const projectAllowed = projectSettingsAllowed(cwdReal)
+    // A folder with no trust record is decided at once; a trusted one is verified by a
+    // fresh scan off the main thread.
+    const projectAllowed = projectSettingsDecidedWithoutScan(cwdReal) ?? await projectSettingsAllowedAsync(cwdReal)
+    if (this._destroying) return
     this._launchedWithProject = projectAllowed
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary

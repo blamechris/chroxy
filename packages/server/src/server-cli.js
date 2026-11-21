@@ -1355,6 +1355,11 @@ export async function startCliServer(config) {
     // (and all timers are .unref()'d, so they never block process exit anyway).
     statusLineManager.stopSession(sessionId)
   })
+  // A session whose folder is no longer trusted stops showing the status line that
+  // came from the folder's own settings (Stop trusting, or an edit that revoked it).
+  sessionManager.on('folder_trust_lost', ({ sessionId }) => {
+    statusLineManager.clearProjectOutput(sessionId)
+  })
   // Turn-boundary refresh for immediacy (mirrors Claude Code's "new assistant
   // message" trigger); the periodic loop in StatusLineManager covers the rest.
   sessionManager.on('session_event', ({ sessionId, event }) => {

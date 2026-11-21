@@ -262,7 +262,7 @@ export const AUDITED_SINKS = [
   {
     file: 'claude-tui-session.js',
     match: 'claudeSettingSourcesValueFor(projectAllowed)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {
     file: 'claude-tui-session.js',
@@ -304,7 +304,7 @@ export const AUDITED_SINKS = [
   {
     file: 'cli-session.js',
     match: 'claudeSettingSourcesValueFor(allowed)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {
     file: 'cli-session.js',
@@ -689,8 +689,8 @@ export const AUDITED_SINKS = [
   // ── web-task-manager.js ──
   {
     file: 'web-task-manager.js',
-    match: 'claudeSettingSourcesValue(cwd)',
-    reason: "the value is claudeSettingSourcesValue() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
+    match: 'claudeSettingSourcesValueFor(projectAllowed === true)',
+    reason: "the value is claudeSettingSourcesValueFor() from claude-setting-sources.js: one of two fixed server-side strings ('user' or 'user,project', chosen by the folder-trust decision for the session's own cwd), built from no client input.",
   },
   {
     file: 'web-task-manager.js',

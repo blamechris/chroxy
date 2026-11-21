@@ -1,7 +1,7 @@
 import { assistantResponseText, sdkDeclarationEligible } from './assistant-response.js'
 import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { claudeSettingSources } from './claude-setting-sources.js'
+import { claudeSettingSourcesFor, projectSettingsAllowedAsync, projectSettingsDecidedWithoutScan } from './claude-setting-sources.js'
 import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
@@ -1107,6 +1107,15 @@ export class SdkSession extends BaseSession {
     }
 
     this._isBusy = true
+    // The project-settings decision for this turn, taken before any query state is
+    // set up. A folder with no trust record is decided at once; a trusted one is
+    // verified by a fresh scan in a worker thread (busy is already set, so a
+    // follow-up queues meanwhile).
+    const projectAllowed = projectSettingsDecidedWithoutScan(this.cwd) ?? await projectSettingsAllowedAsync(this.cwd)
+    if (this._destroying) {
+      this._isBusy = false
+      return
+    }
     // #7376: a turn starts with no Stop requested, whatever the last one did.
     this._stopRequestedThisTurn = false
     this._stopCancelledToolUseIds.clear() // #8363
@@ -1181,7 +1190,7 @@ export class SdkSession extends BaseSession {
       cwd: this.cwd,
       permissionMode: sdkPermMode,
       includePartialMessages: true,
-      settingSources: claudeSettingSources(this.cwd),
+      settingSources: claudeSettingSourcesFor(projectAllowed),
       systemPrompt,
       tools: { type: 'preset', preset: 'claude_code' },
       // The environment for the `claude` child query() spawns, built per turn

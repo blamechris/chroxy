@@ -26,8 +26,9 @@
  *
  * Incompleteness is always HARD and fails closed: any error other than "absent",
  * a non-regular file, a dangling or circular link, a file over the per-file limit,
- * or any budget exceeded (bytes, files, directories, entries, depth, or the
- * wall-clock budget of the nested search). The folder is untrusted and cannot be
+ * or any budget exceeded (bytes, files, directories, entries, depth; a display scan
+ * also has a wall-clock budget for the nested search, a launch scan does not, so its
+ * answer does not depend on load). The folder is untrusted and cannot be
  * trusted. What is NOT covered by the digest: files that settings merely refer to
  * (hook scripts, for example), `CLAUDE.md` and rules. Trusting a folder trusts its code.
  *
@@ -37,8 +38,8 @@
  */
 
 import {
-  closeSync, constants as fsConstants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync,
-  readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync,
+  readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
@@ -70,8 +71,10 @@ export const MAX_NESTED_DIRS = 20_000
 export const MAX_NESTED_ENTRIES = 200_000
 /** Deepest level of the nested search (HARD beyond). */
 export const MAX_NESTED_DEPTH = 32
-/** Wall-clock budget of the nested search (HARD beyond). */
+/** Wall-clock budget of the nested search in a DISPLAY scan (HARD beyond). Launch scans have none. */
 export const NESTED_BUDGET_MS = 1500
+/** Limits of a display scan: the entry and depth bounds plus the wall-clock budget. */
+const DISPLAY_LIMITS = Object.freeze({ nestedBudgetMs: NESTED_BUDGET_MS })
 /** Largest config file parsed for the summary; a larger one is still hashed. */
 export const MAX_PARSE_BYTES = 256 * 1024
 /** Cache lifetime of a scan, for display and for the status line's folder-level check. */
@@ -111,7 +114,7 @@ function newScan(limits = {}) {
       maxFileBytes: limits.maxFileBytes ?? MAX_FILE_BYTES,
       maxTotalBytes: limits.maxTotalBytes ?? MAX_TOTAL_BYTES,
       maxFiles: limits.maxFiles ?? MAX_SCANNED_FILES,
-      nestedBudgetMs: limits.nestedBudgetMs ?? NESTED_BUDGET_MS,
+      nestedBudgetMs: limits.nestedBudgetMs ?? Infinity,
     },
     // Directory-enumeration budgets: every directory and entry is counted as it is read.
     content: { dirs: 0, entries: 0, maxDirs: limits.maxContentDirs ?? MAX_CONTENT_DIRS, maxEntries: limits.maxContentEntries ?? MAX_CONTENT_ENTRIES },
@@ -519,7 +522,8 @@ function summarizeConfig(config, summary) {
  * Scan the command-bearing settings files that apply to `cwd`.
  *
  * @param {string} cwd
- * @param {object} [limits] - test seam: maxFileBytes, maxTotalBytes, maxFiles, maxNestedDirs
+ * @param {object} [limits] - maxFileBytes, maxTotalBytes, maxFiles, maxNestedDirs, ...; `nestedBudgetMs`
+ *   (wall clock of the nested search) is unset by default, so the result depends only on the folder
  * @returns {{
  *   realPath: string,
  *   files: { path: string, sha256: string }[],
@@ -705,31 +709,43 @@ function lockIsStale(lockPath, content) {
   }
 }
 
+/** A `.reclaim` guard older than this is itself abandoned (a reclaim takes microseconds; waiters give up at LOCK_WAIT_MS). */
+const RECLAIM_GUARD_STALE_MS = 5_000
+
 /**
- * Claim a stale lock: rename it away to a name only this claimant has, then check
- * that what was moved is the stale lock that was judged (not a fresh one a faster
- * claimant created in between; that one is put back).
+ * Remove a lock that was judged stale, without ever vacating a live one. Only one
+ * process at a time reclaims: it holds a short-lived guard (`<lock>.reclaim`,
+ * created `O_EXCL`), and under it re-reads the lock and removes it only if it is
+ * still exactly the content that was judged. A lock somebody created since is left
+ * alone. The caller then retries the normal `O_EXCL` claim.
  */
-function reclaimStale(lockPath, judged) {
-  const moved = `${lockPath}.stale.${process.pid}.${randomBytes(6).toString('hex')}`
+export function reclaimStale(lockPath, judged) {
+  const guard = `${lockPath}.reclaim`
   try {
-    renameSync(lockPath, moved)
-  } catch {
-    return // someone else reclaimed it first
+    writeFileSync(guard, `${process.pid}\n`, { mode: 0o600, flag: 'wx' })
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      // Another process is reclaiming; only a guard that has been there for a long
+      // time is treated as abandoned.
+      try {
+        if (Date.now() - statSync(guard).mtimeMs > RECLAIM_GUARD_STALE_MS) unlinkSync(guard)
+      } catch { /* gone, or not ours to judge */ }
+    }
+    return
   }
   try {
-    if (readLock(moved) !== judged) {
-      try { linkSync(moved, lockPath) } catch { /* a newer lock already exists */ }
+    if (readLock(lockPath) === judged) {
+      try { unlinkSync(lockPath) } catch { /* already gone */ }
     }
   } finally {
-    try { unlinkSync(moved) } catch { /* nothing to do */ }
+    try { unlinkSync(guard) } catch { /* nothing to do */ }
   }
 }
 
 /**
  * Hold an `O_EXCL` lock file for the store (other daemon processes share ~/.chroxy).
- * The file holds `pid`, then a token unique to this holder; release removes it only
- * if it still holds that token.
+ * The file holds `pid`, then a token unique to this holder; after the claim the token
+ * is read back, and release removes the file only if it still holds that token.
  */
 export async function withInterprocessLock(storePath, fn) {
   const lockPath = `${storePath}.lock`
@@ -738,10 +754,12 @@ export async function withInterprocessLock(storePath, fn) {
   const deadline = Date.now() + LOCK_WAIT_MS
   const token = `${process.pid}.${randomBytes(8).toString('hex')}`
   const body = `${process.pid}\n${token}\n${Date.now()}\n`
+  const isOurs = (content) => content !== null && content.includes(`\n${token}\n`)
   for (;;) {
     try {
       writeFileSync(lockPath, body, { mode: 0o600, flag: 'wx' })
-      break
+      if (isOurs(readLock(lockPath))) break
+      // The file is not what was just written: it is not ours to run under or to remove.
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err
       const content = readLock(lockPath)
@@ -749,15 +767,14 @@ export async function withInterprocessLock(storePath, fn) {
         reclaimStale(lockPath, content)
         continue
       }
-      if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
-      await sleep(20)
     }
+    if (Date.now() > deadline) throw new Error('folder trust store is locked by another process')
+    await sleep(20)
   }
   try {
     return await fn()
   } finally {
-    const held = readLock(lockPath)
-    if (held !== null && held.includes(`\n${token}\n`)) {
+    if (isOurs(readLock(lockPath))) {
       try { unlinkSync(lockPath) } catch { /* already gone */ }
     }
   }
@@ -779,85 +796,206 @@ export function invalidateFolderTrustCache() {
   scanCache.clear()
 }
 
+const freshHit = (realPath) => {
+  const hit = scanCache.get(realPath)
+  return hit && Date.now() - hit.at <= SCAN_CACHE_TTL_MS ? hit.scan : null
+}
+
 function scanCached(cwd, useCache) {
-  const now = Date.now()
   if (useCache) {
     const r = resolveRealPath(cwd)
-    const hit = r.error ? null : scanCache.get(r.path)
-    if (hit && now - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
+    const hit = r.error ? null : freshHit(r.path)
+    if (hit) return hit
   }
   // A launch decision never reads the cache; its scan does feed it for display callers.
   const scan = scanFolderSettings(cwd)
-  if (!scan.hardIncomplete) scanCache.set(scan.realPath, { at: Date.now(), scan })
+  scanCache.set(scan.realPath, { at: Date.now(), scan })
   return scan
 }
 
-// ── Off-thread scans (display only) ─────────────────────────────────────
+// ── Off-thread scans ─────────────────────────────────────────────────────
+//
+// Two lanes, each with its own worker thread and one scan at a time: `display`
+// (cacheable, shared per folder) and `launch` (a fresh scan per decision, never
+// cached or shared). A scan that does not answer within WORKER_SCAN_TIMEOUT_MS has
+// its worker terminated; the next request gets a fresh worker.
 
-let worker = null
-let nextId = 1
-const pending = new Map()
-const inflight = new Map()
+/** Longest one off-thread scan may run before its worker is terminated. */
+export const WORKER_SCAN_TIMEOUT_MS = 5000
 
-function dropWorker(err) {
-  worker = null
-  for (const { reject } of pending.values()) reject(err)
-  pending.clear()
+let workerUrl = new URL('./folder-trust-worker.js', import.meta.url)
+let workerTimeoutMs = WORKER_SCAN_TIMEOUT_MS
+/** Test seam: the worker script and the per-scan timeout. Call with no argument to restore. */
+export function setWorkerForTest({ url, timeoutMs } = {}) {
+  workerUrl = url ?? new URL('./folder-trust-worker.js', import.meta.url)
+  workerTimeoutMs = timeoutMs ?? WORKER_SCAN_TIMEOUT_MS
+  for (const lane of [displayLane, launchLane]) {
+    const rec = lane.rec
+    lane.rec = null
+    if (rec) {
+      rec.w.terminate().catch(() => {})
+      settleActive(rec, new Error('scan worker replaced'))
+    }
+  }
 }
 
+const workerError = (code, message) => Object.assign(new Error(message), { code })
+
+const newLane = () => ({ rec: null, queue: [] })
+const displayLane = newLane()
+const launchLane = newLane()
+
 let workerScans = 0
-/** Test seam: how many scans have been handed to the worker. */
+/** Test seam: how many scans have been handed to a worker. */
 export function workerScanCountForTest() {
   return workerScans
 }
 
-function scanInWorker(cwd) {
-  workerScans += 1
-  if (!worker) {
-    const w = new Worker(new URL('./folder-trust-worker.js', import.meta.url), { env: SHARE_ENV })
-    w.on('message', ({ id, scan }) => {
-      const p = pending.get(id)
-      pending.delete(id)
-      if (pending.size === 0) w.unref() // idle: never keeps the process alive
-      if (p) (scan ? p.resolve(scan) : p.reject(new Error('scan failed')))
-    })
-    w.on('error', (err) => dropWorker(err))
-    w.on('exit', () => dropWorker(new Error('scan worker exited')))
-    // After the listeners: adding a 'message' listener would otherwise re-ref the worker's port.
-    w.unref()
-    worker = w
-  }
-  return new Promise((resolve, reject) => {
-    const id = nextId++
-    pending.set(id, { resolve, reject })
-    worker.ref() // a scan in flight keeps the process alive until it answers
-    worker.postMessage({ id, cwd })
-  })
+/** Settle the request a worker record is running, once. */
+function settleActive(rec, err, scan) {
+  const req = rec.active
+  if (!req) return
+  rec.active = null
+  clearTimeout(req.timer)
+  if (err) req.reject(err)
+  else req.resolve(scan)
 }
 
 /**
+ * A worker record has stopped (error, exit, timeout). It rejects ITS OWN request
+ * only, and replaces the lane's worker only if it is still the lane's current one:
+ * a late event from an older worker cannot touch its replacement.
+ */
+function retire(lane, rec, err) {
+  if (lane.rec === rec) lane.rec = null
+  settleActive(rec, err)
+  pump(lane)
+}
+
+function startWorker(lane) {
+  const w = new Worker(workerUrl, { env: SHARE_ENV })
+  const rec = { w, active: null }
+  w.on('message', ({ id, scan }) => {
+    if (!rec.active || rec.active.id !== id) return
+    if (lane.rec === rec) w.unref() // idle: never keeps the process alive
+    settleActive(rec, scan ? null : workerError('WORKER_SCAN_FAILED', 'scan failed'), scan)
+    pump(lane)
+  })
+  w.on('error', (err) => retire(lane, rec, err))
+  w.on('exit', () => retire(lane, rec, new Error('scan worker exited')))
+  // After the listeners: adding a 'message' listener would otherwise re-ref the worker's port.
+  w.unref()
+  lane.rec = rec
+  return rec
+}
+
+let nextId = 1
+/** Hand the next queued request to the lane's worker when it is idle. */
+function pump(lane) {
+  if (lane.queue.length === 0) return
+  if (lane.rec?.active) return
+  let rec = lane.rec
+  const req = lane.queue.shift()
+  try {
+    rec ??= startWorker(lane)
+  } catch (err) {
+    req.reject(workerError('WORKER_UNAVAILABLE', err?.message || 'scan worker could not be created'))
+    pump(lane)
+    return
+  }
+  workerScans += 1
+  rec.active = req
+  req.id = nextId++
+  req.timer = setTimeout(() => {
+    // Only this worker is stopped; whatever is queued behind runs on a fresh one.
+    rec.w.terminate().catch(() => {})
+    retire(lane, rec, workerError('WORKER_TIMEOUT', 'scan timed out'))
+  }, workerTimeoutMs)
+  rec.w.ref() // a scan in flight keeps the process alive until it answers
+  rec.w.postMessage({ id: req.id, cwd: req.cwd, limits: req.limits })
+}
+
+/**
+ * Run one scan in the lane's worker. Rejects with `code` WORKER_TIMEOUT when it does
+ * not answer in time, WORKER_SCAN_FAILED when the scan itself failed, otherwise (the
+ * worker could not be created, or died) with a plain error.
+ */
+function scanInWorker(lane, cwd, limits) {
+  return new Promise((resolve, reject) => {
+    lane.queue.push({ cwd, limits, resolve, reject, id: 0, timer: null })
+    pump(lane)
+  })
+}
+
+/** What a display caller sees for a scan that timed out: not reviewable, never trusted. */
+function incompleteScan(cwd, why) {
+  const files = []
+  return {
+    realPath: resolveRealPath(cwd).path,
+    files,
+    digest: sha256Hex(canonicalJson(files)),
+    summary: {
+      files: [], mcpServers: [], hooks: [], statusLine: [], enabledPlugins: [],
+      counts: { agents: 0, skills: 0, commands: 0 },
+      warnings: [why], hasCommandBearingFiles: false, untrustable: true,
+    },
+    hasCommandBearingFiles: false,
+    hardIncomplete: true,
+  }
+}
+
+const inflight = new Map()
+
+/**
  * Scan for DISPLAY without blocking the main thread: a fresh cached scan, else one
- * run in a worker thread (the in-thread scan only if the worker is unavailable).
- * Concurrent requests for one folder share one scan. Never used for a launch decision.
+ * run in a worker thread (the in-thread scan only if the worker is unavailable or
+ * died; a scan that TIMED OUT is shown as not reviewable, never re-run here).
+ * Concurrent requests for one folder share one scan. Any result, an incomplete one
+ * included, is cached for SCAN_CACHE_TTL_MS. Never used for a launch decision.
  */
 async function scanForDisplay(cwd) {
   const r = resolveRealPath(cwd)
-  const hit = r.error ? null : scanCache.get(r.path)
-  if (hit && Date.now() - hit.at <= SCAN_CACHE_TTL_MS) return hit.scan
+  const hit = r.error ? null : freshHit(r.path)
+  if (hit) return hit
   let pendingScan = inflight.get(r.path)
   if (!pendingScan) {
     const generation = cacheGeneration
-    pendingScan = scanInWorker(cwd)
-      .catch(() => scanFolderSettings(cwd))
+    const promise = scanInWorker(displayLane, cwd, DISPLAY_LIMITS)
+      .catch((err) => (err?.code === 'WORKER_TIMEOUT'
+        ? incompleteScan(cwd, 'This folder is too large to review (the search took too long)')
+        : scanFolderSettings(cwd, DISPLAY_LIMITS)))
       .then((scan) => {
         // A trust change while this ran invalidated the cache: do not store a stale scan.
-        if (generation === cacheGeneration && !scan.hardIncomplete) scanCache.set(scan.realPath, { at: Date.now(), scan })
+        if (generation === cacheGeneration) scanCache.set(scan.realPath, { at: Date.now(), scan })
         return scan
       })
-      .finally(() => { inflight.delete(r.path) })
-    inflight.set(r.path, pendingScan)
+      .finally(() => { if (inflight.get(r.path) === promise) inflight.delete(r.path) })
+    pendingScan = promise
+    inflight.set(r.path, promise)
   }
   return pendingScan
+}
+
+/**
+ * The trust state of `cwd` for a LAUNCH decision, computed off the main thread: a
+ * fresh scan started now, in the launch lane. It never reads or writes the display
+ * cache and is never shared with another request. A timeout or a failed scan is
+ * reported as `untrusted` (fail closed); the in-thread scan runs only when the
+ * worker cannot be created or died.
+ * @returns {Promise<{ status: 'trusted'|'untrusted', realPath: string, digest: string, summary: object }>}
+ */
+export async function getFolderTrustStateForLaunch(cwd) {
+  let scan
+  try {
+    scan = await scanInWorker(launchLane, cwd, {})
+  } catch (err) {
+    if (err?.code === 'WORKER_TIMEOUT' || err?.code === 'WORKER_SCAN_FAILED') {
+      scan = incompleteScan(cwd, 'This folder could not be reviewed in time')
+    } else {
+      scan = scanFolderSettings(cwd)
+    }
+  }
+  return { status: statusOf(scan), realPath: scan.realPath, digest: scan.digest, summary: scan.summary }
 }
 
 /** The trust state of `cwd` for display, computed off-thread. Same shape as getFolderTrustState. */
@@ -872,9 +1010,9 @@ export async function getFolderTrustStateForDisplay(cwd) {
  */
 export function getFolderTrustStateIfCached(cwd) {
   const r = resolveRealPath(cwd)
-  const hit = r.error ? null : scanCache.get(r.path)
-  if (hit && Date.now() - hit.at <= SCAN_CACHE_TTL_MS) {
-    return { status: statusOf(hit.scan), realPath: hit.scan.realPath, digest: hit.scan.digest, summary: hit.scan.summary }
+  const hit = r.error ? null : freshHit(r.path)
+  if (hit) {
+    return { status: statusOf(hit), realPath: hit.realPath, digest: hit.digest, summary: hit.summary }
   }
   scanForDisplay(cwd).catch(() => {})
   return null

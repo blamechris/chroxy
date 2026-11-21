@@ -6,9 +6,10 @@ import { readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import {
-  claudeSettingSources,
-  claudeSettingSourcesArgs,
-  projectSettingsAllowed,
+  claudeSettingSourcesFor,
+  claudeSettingSourcesValueFor,
+  projectSettingsAllowedAsync,
+  projectSettingsDecidedWithoutScan,
 } from '../src/claude-setting-sources.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { buildClaudeCliArgs, CliSession } from '../src/cli-session.js'
@@ -16,7 +17,13 @@ import { defaultRunOneShot } from '../src/summarize-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { WebTaskManager, buildRemoteTaskArgs } from '../src/web-task-manager.js'
 import { StatusLineManager, statusLineSettingsPaths } from '../src/statusline.js'
-import { invalidateFolderTrustCache, scanCountForTest } from '../src/folder-trust.js'
+import {
+  getFolderTrustStateForDisplay,
+  invalidateFolderTrustCache,
+  scanCountForTest,
+  setWorkerForTest,
+  workerScanCountForTest,
+} from '../src/folder-trust.js'
 import { trustReviewed } from './helpers/trust-folder.js'
 import { writeHookSettings } from '../src/claude-tui-session.js'
 import { isFlooredTarget } from '../src/permission-floor.js'
@@ -54,6 +61,8 @@ function projectWithMcp(prefix) {
   return dir
 }
 
+const HANG_WORKER = new URL('./fixtures/folder-trust-hang-worker.mjs', import.meta.url)
+
 const tmpDirs = []
 function tmp(prefix) {
   const d = mkdtempSync(join(tmpdir(), prefix))
@@ -65,36 +74,86 @@ after(() => {
 })
 
 describe('claude-setting-sources helper', () => {
-  it('decides an untrusted folder without scanning it', () => {
+  it('decides an untrusted folder without scanning it', async () => {
     const dir = projectWithMcp('setting-sources-noscan-')
     const before = scanCountForTest()
-    assert.equal(projectSettingsAllowed(dir), false)
-    assert.deepEqual(claudeSettingSources(dir), ['user'])
+    const workerBefore = workerScanCountForTest()
+    assert.equal(projectSettingsDecidedWithoutScan(dir), false)
+    assert.equal(await projectSettingsAllowedAsync(dir), false)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(dir)), ['user'])
     assert.equal(scanCountForTest(), before, 'no record for the folder, so no scan')
+    assert.equal(workerScanCountForTest(), workerBefore, 'and no worker scan either')
   })
 
   it('still scans a folder that has a record, and a changed folder is untrusted', async () => {
     const dir = projectWithMcp('setting-sources-scan-')
     await trustReviewed(dir)
-    const before = scanCountForTest()
-    assert.equal(projectSettingsAllowed(dir), true)
-    assert.ok(scanCountForTest() > before, 'a recorded folder is verified by a scan')
+    assert.equal(projectSettingsDecidedWithoutScan(dir), null, 'a recorded folder needs a scan')
+    const before = workerScanCountForTest()
+    assert.equal(await projectSettingsAllowedAsync(dir), true)
+    assert.ok(workerScanCountForTest() > before, 'a recorded folder is verified by a scan')
     writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { s: { command: 'y' } } }))
-    assert.equal(projectSettingsAllowed(dir), false)
+    assert.equal(await projectSettingsAllowedAsync(dir), false)
   })
 
-  it('an untrusted folder gets only the user scope', () => {
+  it('an untrusted folder gets only the user scope', async () => {
     const dir = projectWithMcp('setting-sources-helper-')
-    assert.deepEqual(claudeSettingSources(dir), ['user'])
-    assert.deepEqual(claudeSettingSourcesArgs(dir), ['--setting-sources', 'user'])
-    assert.equal(projectSettingsAllowed(dir), false)
+    assert.deepEqual(claudeSettingSourcesFor(await projectSettingsAllowedAsync(dir)), ['user'])
+    assert.equal(claudeSettingSourcesValueFor(await projectSettingsAllowedAsync(dir)), 'user')
+    assert.equal(await projectSettingsAllowedAsync(dir), false)
   })
 
   it('a trusted folder gets user and project, never local', async () => {
     const dir = projectWithMcp('setting-sources-helper-trusted-')
     await trustReviewed(dir)
-    assert.deepEqual(claudeSettingSources(dir), ['user', 'project'])
-    assert.deepEqual(claudeSettingSourcesArgs(dir), ['--setting-sources', 'user,project'])
+    const sources = claudeSettingSourcesFor(await projectSettingsAllowedAsync(dir))
+    assert.deepEqual(sources, ['user', 'project'])
+    assert.equal(claudeSettingSourcesValueFor(await projectSettingsAllowedAsync(dir)), 'user,project')
+  })
+
+  it('a launch decision is not answered from a display scan that is still cached', async () => {
+    const dir = projectWithMcp('setting-sources-nocache-')
+    await trustReviewed(dir)
+    assert.equal((await getFolderTrustStateForDisplay(dir)).status, 'trusted') // warms the display cache
+    writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { s: { command: 'edited' } } }))
+    assert.equal((await getFolderTrustStateForDisplay(dir)).status, 'trusted', 'display may be stale')
+    assert.equal(await projectSettingsAllowedAsync(dir), false, 'the launch decision sees the edit')
+  })
+
+  it('a launch decision runs off the main thread (a timer fires while it runs) and still sees an edit', async () => {
+    const dir = projectWithMcp('setting-sources-offthread-')
+    // A large trusted tree: enough directories that the walk takes a visible time.
+    for (let i = 0; i < 400; i++) {
+      mkdirSync(join(dir, 'big', `d${i}`), { recursive: true })
+      for (let j = 0; j < 5; j++) writeFileSync(join(dir, 'big', `d${i}`, `f${j}`), '')
+    }
+    await trustReviewed(dir)
+    writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { s: { command: 'edited' } } }))
+    const before = workerScanCountForTest()
+    const inThreadBefore = scanCountForTest()
+    let ticks = 0
+    const timer = setInterval(() => { ticks += 1 }, 1)
+    try {
+      assert.equal(await projectSettingsAllowedAsync(dir), false)
+    } finally {
+      clearInterval(timer)
+    }
+    assert.equal(workerScanCountForTest(), before + 1, 'the scan ran in the worker')
+    assert.equal(scanCountForTest(), inThreadBefore, 'and not in this thread')
+    assert.ok(ticks > 0, 'the main thread stayed responsive during the decision')
+  })
+
+  it('a launch decision that times out, or whose worker cannot run, is handled: timeout is not allowed, no worker falls back in-thread', async () => {
+    const dir = projectWithMcp('setting-sources-hang-')
+    await trustReviewed(dir)
+    try {
+      setWorkerForTest({ url: HANG_WORKER, timeoutMs: 100 })
+      assert.equal(await projectSettingsAllowedAsync(dir), false, 'timeout fails closed')
+      setWorkerForTest({ url: new URL('./fixtures/does-not-exist-worker.mjs', import.meta.url) })
+      assert.equal(await projectSettingsAllowedAsync(dir), true, 'a worker that cannot run falls back to an in-thread scan')
+    } finally {
+      setWorkerForTest()
+    }
   })
 })
 
@@ -139,14 +198,9 @@ describe('CLI session argv', () => {
     return args[i + 1]
   }
 
-  it('buildClaudeCliArgs carries --setting-sources user for an untrusted folder', () => {
-    assert.equal(sourcesOf(buildClaudeCliArgs({ ...base, cwd: projectWithMcp('setting-sources-cli-untrusted-') })), 'user')
-  })
-
-  it('buildClaudeCliArgs carries user,project for a trusted folder', async () => {
-    const dir = projectWithMcp('setting-sources-cli-trusted-')
-    await trustReviewed(dir)
-    assert.equal(sourcesOf(buildClaudeCliArgs({ ...base, cwd: dir })), 'user,project')
+  it('buildClaudeCliArgs carries --setting-sources user unless the decision passed in allows the project', () => {
+    assert.equal(sourcesOf(buildClaudeCliArgs({ ...base, projectAllowed: false })), 'user')
+    assert.equal(sourcesOf(buildClaudeCliArgs({ ...base, projectAllowed: true })), 'user,project')
   })
 
   // The session threads ITS OWN cwd into the helper, so a trusted folder is what gets user,project.
@@ -156,6 +210,8 @@ describe('CLI session argv', () => {
     session._spawnPersistentProcess = (args) => { spawned = args }
     try {
       session.start()
+      // A trusted folder is verified by a scan off the main thread first.
+      for (let i = 0; i < 200 && !spawned; i++) await new Promise((r) => setTimeout(r, 10))
     } finally {
       session.destroy()
     }
@@ -178,6 +234,7 @@ describe('CLI session argv', () => {
       try {
         assert.equal(session.launchedWithProject, undefined, 'unknown before launch')
         session.start()
+        for (let i = 0; i < 200 && session.launchedWithProject === undefined; i++) await new Promise((r) => setTimeout(r, 10))
         return session.launchedWithProject
       } finally {
         session.destroy()
@@ -188,7 +245,20 @@ describe('CLI session argv', () => {
     assert.equal(await launch(), true)
   })
 
-  it('buildClaudeCliArgs without a cwd is untrusted', () => {
+  it('a CliSession stopped or destroyed while its trusted folder is being verified never launches', async () => {
+    const dir = projectWithMcp('setting-sources-cli-destroyed-')
+    await trustReviewed(dir)
+    const session = new CliSession({ cwd: dir, stateFilePath: join(tmp('setting-sources-cli-state-'), 'state.json') })
+    let spawned = false
+    session._spawnPersistentProcess = () => { spawned = true }
+    session.start()
+    session.start() // a second start while one is pending does not start a second process
+    session.destroy()
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(spawned, false)
+  })
+
+  it('buildClaudeCliArgs without a decision is untrusted', () => {
     assert.equal(sourcesOf(buildClaudeCliArgs(base)), 'user')
   })
 })
@@ -209,14 +279,12 @@ describe('summarize one-shot options', () => {
 
 describe('web task argv', () => {
   it('buildRemoteTaskArgs carries --setting-sources user before the -- separator for an untrusted folder', () => {
-    const args = buildRemoteTaskArgs('do it', projectWithMcp('setting-sources-web-'))
-    assert.deepEqual(args, ['--setting-sources', 'user', '--remote', '--', 'do it'])
+    assert.deepEqual(buildRemoteTaskArgs('do it', false), ['--setting-sources', 'user', '--remote', '--', 'do it'])
+    assert.deepEqual(buildRemoteTaskArgs('do it'), ['--setting-sources', 'user', '--remote', '--', 'do it'])
   })
 
-  it('buildRemoteTaskArgs carries user,project for a trusted folder', async () => {
-    const dir = projectWithMcp('setting-sources-web-trusted-')
-    await trustReviewed(dir)
-    assert.deepEqual(buildRemoteTaskArgs('do it', dir), ['--setting-sources', 'user,project', '--remote', '--', 'do it'])
+  it('buildRemoteTaskArgs carries user,project when the decision allows the project', () => {
+    assert.deepEqual(buildRemoteTaskArgs('do it', true), ['--setting-sources', 'user,project', '--remote', '--', 'do it'])
   })
 
   // The real launch calls execFile on the resolved binary, so a recording
@@ -396,7 +464,11 @@ describe('Agent SDK call sites choose setting sources explicitly', () => {
       assert.ok(lines.length > 0, `${p} calls query() without setting settingSources`)
       assert.ok(lines.length >= calls.length, `${p} has ${calls.length} query() calls but ${lines.length} settingSources values`)
       for (const l of lines) {
-        assert.match(l, /settingSources\s*:\s*(claudeSettingSources\(|\[\])/, `${p}: ${l.trim()}`)
+        assert.match(l, /settingSources\s*:\s*(claudeSettingSourcesFor\(|\[\])/, `${p}: ${l.trim()}`)
+      }
+      // A decision built from anything but the launch decision would defeat the point.
+      if (lines.some((l) => /claudeSettingSourcesFor\(/.test(l))) {
+        assert.match(text, /projectSettingsAllowedAsync\(/, `${p} must take its decision from projectSettingsAllowedAsync`)
       }
     }
   })

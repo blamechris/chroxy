@@ -7,7 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { tmpdir } from 'os'
 import { claudeConfigDir } from './utils/claude-config-dir.js'
-import { claudeSettingSourcesValueFor, projectSettingsAllowed } from './claude-setting-sources.js'
+import { claudeSettingSourcesValueFor, projectSettingsAllowedAsync, projectSettingsDecidedWithoutScan } from './claude-setting-sources.js'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
@@ -159,10 +159,10 @@ export function stderrIndicatesUnknownResumeCompacted(lines, windowLines = 10) {
  * @param {string[]} opts.allowedTools
  * @param {string} opts.skillsText
  * @param {string|null} opts.resumeSessionId
- * @param {string} [opts.cwd] - session working directory; decides whether project settings load (claude-setting-sources.js)
+ * @param {boolean} [opts.projectAllowed] - the launch decision for the session folder (claude-setting-sources.js); absent means not allowed
  * @returns {string[]}
  */
-export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId, cwd, projectAllowed } = {}) {
+export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId, projectAllowed } = {}) {
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -170,7 +170,7 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
     '--verbose',
     '--include-partial-messages',
   ]
-  const allowed = typeof projectAllowed === 'boolean' ? projectAllowed : projectSettingsAllowed(cwd)
+  const allowed = projectAllowed === true
   args.push('--setting-sources', claudeSettingSourcesValueFor(allowed))
 
   if (model) {
@@ -581,6 +581,32 @@ export class CliSession extends BaseSession {
     // _buildChildEnv() reads `_permissionModeFile` to point the child at it.
     this._ensurePermissionModeSidecar()
 
+    // One project-settings decision per launch: it picks the argv and is what is
+    // reported as loaded in this running process. A folder with no trust record is
+    // decided at once; a trusted one is verified by a fresh scan off the main
+    // thread, and the process is launched when that answers (unless the session
+    // was stopped or destroyed meanwhile).
+    const decided = projectSettingsDecidedWithoutScan(this.cwd)
+    if (decided !== null) {
+      this._launchPersistent(decided)
+      return
+    }
+    if (this._startPending) return
+    this._startPending = true
+    projectSettingsAllowedAsync(this.cwd).then((allowed) => {
+      this._startPending = false
+      if (this._destroying || this._stoppedByUser) return
+      try {
+        this._launchPersistent(allowed)
+      } catch (err) {
+        ;(this._log || log).error(`Start failed: ${err.message}`)
+        this.emit('error', { message: `Failed to start the Claude process: ${err.message}` })
+      }
+    })
+  }
+
+  /** Build the argv for the decided project-settings scope and spawn the persistent process. */
+  _launchPersistent(projectAllowed) {
     // Skills MVP (#2957) — append shared skills to the Claude CLI system prompt.
     const skillsText = this._buildSystemPrompt()
 
@@ -590,9 +616,6 @@ export class CliSession extends BaseSession {
     // would otherwise lose every prior turn in the model's context window and
     // the user would see the dashboard transcript replay correctly while the
     // model itself starts cold mid-conversation.
-    // One project-settings decision per launch: it picks the argv and is what is
-    // reported as loaded in this running process.
-    const projectAllowed = projectSettingsAllowed(this.cwd)
     this._launchedWithProject = projectAllowed
     const args = buildClaudeCliArgs({
       model: this.model,
@@ -600,7 +623,6 @@ export class CliSession extends BaseSession {
       allowedTools: this.allowedTools,
       skillsText,
       resumeSessionId: this._sessionId,
-      cwd: this.cwd,
       projectAllowed,
     })
 

@@ -831,7 +831,7 @@ describe('outgoing roster is exhaustive: every real server frame is classified e
     'ws-file-ops/git.js': [10, 'git_create_pr_result built by prResult() (denied)'],
     'ws-file-ops/memory.js': [2, 'memory frames with an optional requestId merged in (denied)'],
     'ws-file-ops/reader.js': [2, 'file frames with an optional requestId merged in (denied)'],
-    'ws-forwarding.js': [10, 'relays of provider events normalized elsewhere and tagged with a session (all denied session broadcasts)'],
+    'ws-forwarding.js': [11, 'relays of provider events normalized elsewhere and tagged with a session (all denied session broadcasts), and the folder_trust_state frame sent when a ready scan resolves (denied for a principal)'],
     'folder-trust-wire.js': [1, 'folder_trust_state frames built by buildFolderTrustStateMessage and fanned out to the sessions of one folder (denied for a principal)'],
     'ws-history.js': [7, 'replayed history entries and snapshots, the tool_input_backfill frames replayHistory sends from the backfill list, and the folder_trust_state frame (all denied for a principal, which is sent no replay)'],
     'ws-message-handlers.js': [1, 'the adapter relays a frame its handler built'],

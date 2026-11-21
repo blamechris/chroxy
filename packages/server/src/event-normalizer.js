@@ -8,7 +8,7 @@ import { turnOutcomeField } from './turn-outcome.js'
 import { permissionScope } from './permission-scope.js'
 import { resolvedByField } from './permission-resolved-by.js'
 import { buildThinkingLevelChanged } from './thinking-level-wire.js'
-import { buildFolderTrustStateMessageIfCached } from './folder-trust-wire.js'
+import { buildFolderTrustStateMessageIfCached, folderTrustFrameApplies } from './folder-trust-wire.js'
 
 const log = createLogger('event-normalizer')
 
@@ -107,6 +107,7 @@ Object.assign(EVENT_MAP, {
     // reconnect mid-orchestration doesn't present the session as fully idle.
     const bgFields = backgroundTaskFields(ctx)
     const messages = [{ msg: { type: 'claude_ready', ...(bgFields || {}) } }]
+    const sideEffects = []
     const entry = ctx.getSessionEntry?.()
     if (entry) {
       // #3687: prefer the actual model the underlying CLI/SDK reports at
@@ -146,18 +147,19 @@ Object.assign(EVENT_MAP, {
       // Whether this session's folder settings are loaded: re-sent on every ready
       // so a client that missed the last change (or a file edit that revoked
       // trust) converges. Answered only from a fresh cached scan, never by walking
-      // the folder here (a cold cache starts an off-thread scan; the subscribe/switch
-      // burst delivers the frame). Display only; a failure never costs the ready frame.
+      // the folder here. A cold cache starts an off-thread scan, and the frame is sent
+      // when that scan resolves (`folder_trust_refresh`). Display only; a failure never
+      // costs the ready frame.
       try {
-        const trustMsg = typeof ctx.sessionId === 'string' && ctx.sessionId
-          ? buildFolderTrustStateMessageIfCached(ctx.sessionId, entry)
-          : null
+        const hasSession = typeof ctx.sessionId === 'string' && ctx.sessionId
+        const trustMsg = hasSession ? buildFolderTrustStateMessageIfCached(ctx.sessionId, entry) : null
         if (trustMsg) messages.push({ msg: trustMsg })
+        else if (hasSession && folderTrustFrameApplies(entry)) sideEffects.push({ type: 'folder_trust_refresh', sessionId: ctx.sessionId })
       } catch (err) {
         log.debug?.(`folder trust state failed: ${err?.message} — omitted from ready`)
       }
     }
-    return { messages }
+    return sideEffects.length > 0 ? { messages, sideEffects } : { messages }
   },
 
   // #8700: the SESSION changed or learned its level — a model switch dropped a
