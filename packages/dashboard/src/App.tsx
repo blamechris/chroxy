@@ -53,6 +53,7 @@ import { ChatView, type ChatViewMessage } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
+import { useReplayInProgress } from './hooks/useReplayInProgress'
 import { toWireAttachments } from './utils/attachment-utils'
 import { toMessageAttachments } from './utils/attachment-preview'
 import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession, withDecisionCounts } from './utils/pendingPermissions'
@@ -1127,6 +1128,8 @@ export function App() {
     persistCompactChatFilter(enabled)
   }, [])
   const [isSwitchingSession, setIsSwitchingSession] = useState(false)
+  // #8231 — the active session's history replay is still arriving (hint gate).
+  const activeReplayInProgress = useReplayInProgress(activeSessionId)
 
   // Clear the switching flag once the active session actually changes
   useEffect(() => {
@@ -3253,7 +3256,9 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
-                        loading={connectionPhase !== 'connected' || isSwitchingSession}
+                        loading={connectionPhase !== 'connected'}
+                        replaying={activeReplayInProgress}
+                        settleKey={`${activeSessionId ?? ''}|${connectionPhase}`}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         scrollToBottomSignal={scrollToBottomSignal}
@@ -3303,7 +3308,9 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
-                        loading={connectionPhase !== 'connected' || isSwitchingSession}
+                        loading={connectionPhase !== 'connected'}
+                        replaying={activeReplayInProgress}
+                        settleKey={`${activeSessionId ?? ''}|${connectionPhase}`}
                         chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}

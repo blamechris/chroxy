@@ -8186,6 +8186,13 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-secondary);
 }
 
+.provider-description {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: -4px;
+}
+
 .provider-billing-hint {
   width: 100%;
   font-size: 11px;

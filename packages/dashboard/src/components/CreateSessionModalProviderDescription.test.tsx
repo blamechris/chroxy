@@ -65,11 +65,18 @@ describe('provider picker descriptions (#8231)', () => {
     expect(codex.title !== codex.textContent, 'title adds information').toBe(true)
   })
 
-  it('shows one description line for the selected provider and follows the selection', () => {
+  it('shows the description only when no billing hint is shown, and follows the selection', () => {
+    mockStoreState.availableProviders = [
+      READY('claude-sdk'),
+      { name: 'smoke-stub', capabilities: {}, auth: { ready: true, source: 'none', envVar: null, envVars: [], detail: '', hint: '' } },
+    ]
     renderModal()
-    const desc = () => screen.getByTestId('provider-description').textContent
-    expect(desc() === getProviderInfo('claude-sdk').tooltip, 'initial').toBe(true)
-    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'codex' } })
-    expect(desc() === getProviderInfo('codex').tooltip, 'after change').toBe(true)
+    // claude-sdk has live auth detail → the billing hint speaks, no description.
+    expect(screen.getByTestId('provider-billing-hint')).toBeInTheDocument()
+    expect(screen.queryByTestId('provider-description')).not.toBeInTheDocument()
+    // smoke-stub has neither live detail nor a static billing line → description shows.
+    fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'smoke-stub' } })
+    expect(screen.queryByTestId('provider-billing-hint')).not.toBeInTheDocument()
+    expect(screen.getByTestId('provider-description').textContent === getProviderInfo('smoke-stub').tooltip).toBe(true)
   })
 })

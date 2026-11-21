@@ -170,12 +170,27 @@ export interface ChatViewProps {
    *  tool is running. undefined → the rail keeps its activity-state colour. */
   inFlightToolColor?: string
   /**
-   * #8231 — true while the transcript is not yet trustworthy (connecting,
-   * reconnecting, switching session). An empty list in that window means
-   * "history has not arrived", not "nothing was said", so the first-run hint
-   * stays hidden until the parent reports a settled connection.
+   * #8231 — true while the connection is not settled (connecting, reconnecting,
+   * restarting, down). An empty list then means "history has not arrived", not
+   * "nothing was said". Session switches are NOT covered here: the parent shows
+   * a skeleton instead of ChatView for those, and the replay that follows the
+   * switch is covered by `replaying` + `settleKey`.
    */
   loading?: boolean
+  /**
+   * #8231 — true between a `history_replay_start` and its `history_replay_end`
+   * for the active session. Messages stay `[]` for that whole window, so the
+   * first-run hint must not show in it.
+   */
+  replaying?: boolean
+  /**
+   * #8231 — identity of the (session, connection phase) the transcript belongs
+   * to. Whenever it changes the hint is held back for `EMPTY_HINT_SETTLE_MS`
+   * again: an EMPTY session may receive no replay frames at all, so the absence
+   * of a replay alone can never prove "nothing here", and a pure delay fails
+   * for long histories — the two are combined.
+   */
+  settleKey?: string
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
   /**
@@ -635,8 +650,20 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, loading, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
+/** #8231 — how long after a session/phase change an empty list is believed. */
+export const EMPTY_HINT_SETTLE_MS = 500
+
+function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, settleKey, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, onEditQueued, workingLabel, openSearchSignal, getSearchText }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // #8231 — settle window for the first-run hint: restarts whenever the
+  // (session, phase) identity changes, and is torn down on change/unmount.
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    setSettled(false)
+    const timer = setTimeout(() => setSettled(true), EMPTY_HINT_SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [settleKey])
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
   // ordered `messages` (queuedIds is an unordered Set). Only built when 2+ are
@@ -1482,7 +1509,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, loading, chatActivityStat
           {/* #8231 — first-run hint: one calm, non-interactive line for a session
               with nothing in it yet. Hidden while history is loading and the
               moment any row, streaming bubble or working indicator exists. */}
-          {messages.length === 0 && !loading && !isStreaming && !isBusy && (
+          {messages.length === 0 && !loading && !replaying && settled && !isStreaming && !isBusy && (
             <p className="chat-empty-hint" data-testid="chat-empty-hint">
               Nothing here yet. Type a message below to start; / opens commands.
             </p>

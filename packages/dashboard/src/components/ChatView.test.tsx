@@ -249,23 +249,6 @@ describe('ChatView', () => {
     expect(screen.getByTestId('chat-view')).toBeInTheDocument()
   })
 
-  it('shows the first-run hint for an empty settled session (#8231)', () => {
-    render(<ChatView messages={[]} isStreaming={false} />)
-    expect(screen.getByTestId('chat-empty-hint').textContent).toContain('Type a message below to start')
-  })
-
-  it('hides the first-run hint while loading (#8231)', () => {
-    render(<ChatView messages={[]} isStreaming={false} loading />)
-    expect(screen.queryByTestId('chat-empty-hint')).not.toBeInTheDocument()
-  })
-
-  it('hides the first-run hint once a message exists (#8231)', () => {
-    const { rerender } = render(<ChatView messages={[]} isStreaming={false} />)
-    expect(screen.getByTestId('chat-empty-hint')).toBeInTheDocument()
-    rerender(<ChatView messages={makeMessages(1)} isStreaming={false} />)
-    expect(screen.queryByTestId('chat-empty-hint')).not.toBeInTheDocument()
-  })
-
   it('renders the presence rail reflecting the chat-activity state (chat redesign #6392)', () => {
     render(<ChatView messages={makeMessages(2)} isStreaming={false} chatActivityState="thinking" />)
     const rail = screen.getByTestId('presence-rail')

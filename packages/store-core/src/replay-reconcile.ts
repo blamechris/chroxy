@@ -173,6 +173,28 @@ const _historyCursors = new Map<string, number>()
  */
 const _replayWindowOpen = new Map<string, ReplayWindow>()
 
+// #8231 — a REACTIVE reading of "is a replay window open for this session?".
+// The window map above is module state, so a UI that wants to hold back an
+// "empty session" hint while history is still arriving cannot read it during
+// render and be told when it changes. Subscribers are notified on every open,
+// close, abandon (`resetReplayReconcile`) and drop (`dropReplaySessionState`),
+// which is every place the map's membership changes.
+const _replayWindowListeners = new Set<() => void>()
+function notifyReplayWindowChange(): void {
+  for (const listener of [..._replayWindowListeners]) listener()
+}
+
+/** Subscribe to replay-window open/close changes. Returns the unsubscribe. */
+export function subscribeReplayWindows(listener: () => void): () => void {
+  _replayWindowListeners.add(listener)
+  return () => { _replayWindowListeners.delete(listener) }
+}
+
+/** Is a `history_replay_start` for this session still awaiting its `history_replay_end`? */
+export function isReplayInProgress(sessionId: string | null | undefined): boolean {
+  return !!sessionId && _replayWindowOpen.has(sessionId)
+}
+
 /**
  * The open replay window for one session: the refcount, plus the BASELINE
  * captured when it OPENED — where the deferred swap will cut.
@@ -816,7 +838,9 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   _rebuildBaseline.clear()
   // #7420 — an open window and its live-arrival ids are per-connection state
   // like the baseline, never a cursor: a fresh auth must not inherit either.
+  const hadOpenWindow = _replayWindowOpen.size > 0
   _replayWindowOpen.clear()
+  if (hadOpenWindow) notifyReplayWindowChange()
   _liveDuringReplay.clear()
   _sweepableLedger = null
   // #7519 — the frame scope is per-connection state too. `endReplayFrame`'s
@@ -926,6 +950,7 @@ export function reconcileReplayStart(
     // nowhere else, so the captured prefix is the OUTERMOST start's by
     // construction.
     _replayWindowOpen.set(sessionId, replayWindow)
+    notifyReplayWindowChange()
     // Drop the previous window's live-arrival ids: every prompt already on
     // screen pre-dates this replay, so nothing about it is vouched for by this
     // window. A NESTED start must NOT do this — the outer window is still open
@@ -1639,6 +1664,7 @@ function closeReplayWindow(sessionId: string): void {
   // Last (or unmatched) end — the whole record goes, its baseline with it
   // (#7492; the baseline carries `openLen` AND `prefixIds` since #7524).
   _replayWindowOpen.delete(sessionId)
+  notifyReplayWindowChange()
   const streams = _openStreams.get(sessionId)
   if (streams) {
     // A live turn end that landed inside the window: apply it now (S-1).
@@ -1696,7 +1722,7 @@ export function getLiveReplayLedgerSessionIds(): string[] {
 export function dropReplaySessionState(sessionId: string | null | undefined): void {
   if (!sessionId) return
   _rebuildBaseline.delete(sessionId)
-  _replayWindowOpen.delete(sessionId)
+  if (_replayWindowOpen.delete(sessionId)) notifyReplayWindowChange()
   _liveDuringReplay.delete(sessionId)
   _historyCursors.delete(sessionId)
   _openStreams.delete(sessionId)

@@ -1081,12 +1081,6 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 </>
             }
           </select>
-          {/* #8231: one line saying what the chosen provider is. The same text
-              the option title= carries, but visible without hovering — a native
-              <select> has no per-option description on touch or keyboard. */}
-          <span className="provider-billing-hint" data-testid="provider-description">
-            {getProviderInfo(provider).tooltip}
-          </span>
           {/* #8265: say where the preselection came from, so a saved
               override is never mistaken for the daemon's default. */}
           {provider === defaultProvider && defaultProviderSource !== 'builtin' ? (
@@ -1141,17 +1135,29 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               subscription-vs-credit-pool copy. Suppressed when the selected
               provider is unready — the fix-hint panel below replaces it so the
               user isn't reading billing copy for a provider they can't launch. */}
-          {selectedProviderUnready ? null : (() => {
+          {(() => {
             const live = availableProviders.find(p => p.name === provider)?.auth
-            const text = live?.detail || providerBillingFallback(provider)
-            if (!text) return null
+            const text = selectedProviderUnready ? null : (live?.detail || providerBillingFallback(provider))
+            if (text) {
+              return (
+                <span
+                  className="provider-billing-hint"
+                  data-testid="provider-billing-hint"
+                  data-source={live?.source ?? 'static'}
+                >
+                  {text}
+                </span>
+              )
+            }
+            // #8231: one line saying what the chosen provider is, shown ONLY when
+            // no billing hint is (the live auth detail is the better, current
+            // statement and the static tooltip would duplicate or contradict it).
+            // The same text the option title= carries, but visible without
+            // hovering — a native <select> has no per-option description on
+            // touch or keyboard.
             return (
-              <span
-                className="provider-billing-hint"
-                data-testid="provider-billing-hint"
-                data-source={live?.source ?? 'static'}
-              >
-                {text}
+              <span className="provider-description" data-testid="provider-description">
+                {getProviderInfo(provider).tooltip}
               </span>
             )
           })()}
