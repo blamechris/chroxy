@@ -1986,7 +1986,10 @@ export class CodexAppServerSession extends BaseSession {
   // notification. It is reported as a `stopped` result (BaseSession marks it
   // `interrupted`, so an orchestration TurnDriver no longer settles it as a success),
   // and the requested-Stop handling there applies: no chip, the quiet `stopped`, and
-  // the stop-before-reply marker when nothing had been produced.
+  // the stop-before-reply marker when nothing had been produced. CAVEAT: this shape is
+  // documented by OpenAI but NOT pinned by a live probe in this repo's tests (#6606's C1
+  // test only models turn/completed-after-interrupt); a binary that answers differently
+  // gets the old behaviour, a normal result.
   _finishTurn(turn, turnId = null) {
     if (!this._activeTurn) return
     const t = this._activeTurn
@@ -2016,7 +2019,7 @@ export class CodexAppServerSession extends BaseSession {
         // (TurnStatus), not an error. That is a cancelled turn, which BaseSession then treats
         // like every other provider's Stop (no chip for a requested one, the marker when
         // nothing had been produced).
-        ...(turn?.status === 'interrupted' ? { turnOutcome: 'stopped' } : {}),
+        ...(turn?.status === 'interrupted' ? { turnOutcome: 'stopped', stopRequested: true } : {}),
         // #7794 — occupancy snapshot, or the field omitted entirely when codex
         // sent no usable one (clients then keep their previous snapshot / the
         // honest dash). Wire name is contextOccupancy, NOT contextUsage: the

@@ -1777,6 +1777,8 @@ export class CliSession extends BaseSession {
           // carries the same stop_reason / subtype / terminal_reason.
           declarationEligible: sdkDeclarationEligible(data),
           ...turnOutcomeField(outcomeFromSdkResult(data)),
+          // #9241: `aborted_*` is the child saying the abort ended the turn.
+          ...(outcomeFromSdkResult(data) === 'stopped' ? { stopRequested: true } : {}),
         })
 
         // Message complete — ready for next message.
@@ -2442,7 +2444,10 @@ export class CliSession extends BaseSession {
   // are reported as "the turn was terminated under it" rather than as failed
   // commands. Supplied by each caller -- this is shared by the panic-button,
   // mid-turn setModel, Stop, a crash and both watchdogs -- and never inferred.
-  _emitInterruptedTurnResult(duration = 0, terminatedReason) {
+  // #9241: `stopSignal` is the caller's word that the Stop is why the turn ended: a real
+  // child close after it. The 5 s safety timer does NOT give it (the child may still be
+  // running and answer), and the stall / hard-timeout watchdogs never did.
+  _emitInterruptedTurnResult(duration = 0, terminatedReason, { stopSignal = false } = {}) {
     if (!this._isBusy || !this._currentMessageId) return
     const messageId = this._currentMessageId
     const sessionId = this._sessionId
@@ -2452,9 +2457,7 @@ export class CliSession extends BaseSession {
     }
     this._clearMessageState({ terminatedReason })
     // #7072: terminal but not a completed turn (internal; not on the wire).
-    // #9241: `stopRequested` only for the Stop's own terminal result. The stall and
-    // hard-timeout watchdogs share this shape and are failures, not a Stop.
-    this.emit('result', { cost: null, duration, usage: null, sessionId, interrupted: true, ...(terminatedReason === 'user_stop' ? { stopRequested: true } : {}) })
+    this.emit('result', { cost: null, duration, usage: null, sessionId, interrupted: true, ...(stopSignal ? { stopRequested: true } : {}) })
   }
 
   _handleChildClose(code) {
@@ -2510,7 +2513,7 @@ export class CliSession extends BaseSession {
 
     // #7376: Stop (SIGINT -> the child exits here) and a crash both reach this
     // point; the tools they leave in flight are worded differently.
-    this._emitInterruptedTurnResult(0, wasIntentionalStop ? 'user_stop' : 'process_exit')
+    this._emitInterruptedTurnResult(0, wasIntentionalStop ? 'user_stop' : 'process_exit', { stopSignal: wasIntentionalStop })
 
     // #4602: user-initiated Stop sent SIGINT via interrupt(). The child
     // exited cleanly as a result — do NOT show "exited unexpectedly" and

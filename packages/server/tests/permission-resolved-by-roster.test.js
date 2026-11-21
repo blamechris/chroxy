@@ -10,12 +10,14 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scanPermissionResolvedSites, scanUnclassifiedMentions } from './helpers/permission-resolved-sites.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { parse } from 'acorn'
+import { TURN_QUIET_EVENTS } from '../src/base-session.js'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
@@ -71,6 +73,26 @@ describe('permission_resolved emit sites (#9119)', () => {
     const found = {}
     for (const m of scanUnclassifiedMentions(SRC)) found[m.file] = (found[m.file] ?? 0) + 1
     assert.deepEqual(found, Object.fromEntries(Object.entries(ALLOWED_MENTIONS).map(([f, v]) => [f, v.count])))
+  })
+
+  it('base-session.js\'s extra mention is the quiet list of non-output events (#9241), not an emit', () => {
+    const ast = parse(readFileSync(join(SRC, 'base-session.js'), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true })
+    const quietList = []
+    const seen = []
+    const walk = (n, inQuiet) => {
+      if (!n || typeof n.type !== 'string') return
+      const entering = n.type === 'VariableDeclarator' && n.id?.name === 'TURN_QUIET_EVENTS'
+      if (n.type === 'Literal' && n.value === 'permission_resolved') (inQuiet || entering ? quietList : seen).push(n)
+      for (const k of Object.keys(n)) {
+        const v = n[k]
+        if (Array.isArray(v)) v.forEach((c) => walk(c, inQuiet || entering))
+        else if (v && typeof v.type === 'string') walk(v, inQuiet || entering)
+      }
+    }
+    walk(ast, false)
+    assert.equal(quietList.length, 1, 'exactly one mention sits inside TURN_QUIET_EVENTS')
+    assert.equal(seen.length, 2, 'the others are the pre-existing forwarded-events list and the listener registration (not counted as a mention by the scan)')
+    assert.ok(TURN_QUIET_EVENTS.includes('permission_resolved'))
   })
 
   it('every literal emit and every wire frame names resolvedBy', () => {

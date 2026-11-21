@@ -3384,7 +3384,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     }
 
     case 'result': {
-      hapticSuccess();
+      // #9241: a turn the user stopped before any reply is not a success to buzz about.
+      if (msg.turnOutcome !== 'stopped_before_output') hapticSuccess();
       // Flush any buffered deltas before clearing streaming state
       _ctx.deltaFlusher.flushNow();
       // Clean up permission boundary split tracking

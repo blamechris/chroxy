@@ -13,8 +13,11 @@
  * provider `stopReason` / `stop_reason` strings this module maps FROM (ACP,
  * Anthropic, and BYOK's own `result.stopReason`).
  *
- * This module is the ONE place those signals are mapped onto the four-value
- * vocabulary that rides the `result` wire frame (`turnOutcome`):
+ * This module is the ONE place those signals are mapped onto the four provider-derived
+ * values of the vocabulary that rides the `result` wire frame (`turnOutcome`). The full
+ * vocabulary is @chroxy/protocol's TURN_OUTCOMES; `interrupted` (#8259) and
+ * `stopped_before_output` (#9241) are written by the daemon's own turn bookkeeping, not
+ * mapped from a provider signal here:
  *
  *   completed — the model finished on its own.
  *   truncated — the turn was cut short by a limit (tokens, turns, budget, context).

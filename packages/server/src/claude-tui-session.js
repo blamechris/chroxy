@@ -4371,6 +4371,19 @@ export class ClaudeTuiSession extends BaseSession {
       else this._declareReadyAfterSilentStart()
     }
     const rawStr = String(data)
+    // #9241: the first assistant line on the screen is the earliest sign claude began
+    // answering, and for a text-only reply it is the ONLY one until the Stop hook (no
+    // PreToolUse fires, and the text reaches `emit` as a stream_delta at the end).
+    // Claude Code prefixes assistant text and tool lines with U+23FA. DEPENDENCY: if a
+    // Claude Code release stops printing it, a Stop over visible text can again be
+    // marked "stopped before a reply" (the marker errs toward showing, not hiding).
+    // Armed only once this turn's prompt has been written (`_markPromptWritten`), so the
+    // echo of the prompt and the previous turn's screen do not count; a redraw that
+    // re-prints an older glyph line after that only suppresses the marker (fail-safe).
+    if (this._replyGlyphWatch && this._isBusy && rawStr.includes('\u23FA')) {
+      this._replyGlyphWatch = false
+      this._noteTurnOutput()
+    }
     const chunk = Buffer.from(rawStr, 'utf8')
     // #5794/#5809: monotonic total — never capped, so the nudge's progress check
     // works even when _outputTail is pinned at PTY_TAIL_BYTES.
@@ -4716,6 +4729,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._turnStartedOnThisPty = true // #8441
     this._limitScanFromBytes = this._totalOutputBytes // #8454
     this._lastTurnStopped = false
+    this._replyGlyphWatch = false // #9241: armed again by _markPromptWritten
   }
 
   /**
@@ -4727,6 +4741,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _markPromptWritten() {
     this._limitScanFromBytes = this._totalOutputBytes
+    this._replyGlyphWatch = true // #9241: see _appendToOutputTail
   }
 
   /**
@@ -6022,7 +6037,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     // The tools the Stop cut off were cut off, not failed (#7376).
     this._emitResult(
-      { cost: null, duration, usage: null, sessionId: this._sessionId, turnOutcome: 'stopped', interrupted: true },
+      { cost: null, duration, usage: null, sessionId: this._sessionId, turnOutcome: 'stopped', interrupted: true, stopRequested: true }, // #9241: the Stop's own end
       'user_stop',
     )
     this._clearTurnEndState()

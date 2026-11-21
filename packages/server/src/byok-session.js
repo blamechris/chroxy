@@ -1742,6 +1742,7 @@ export class ClaudeByokSession extends BaseSession {
         lastStopReason,
         toolRoundCapReached,
         interrupted: stoppedInToolPhase,
+        stopRequested: stoppedInToolPhase, // #9241: the tool-phase abort IS the Stop
         turnStartedAt,
         turnUsage,
         turnCost,
@@ -1804,6 +1805,8 @@ export class ClaudeByokSession extends BaseSession {
           lastStopReason,
           toolRoundCapReached,
           interrupted: true,
+          // #9241: only an abort is the Stop; any other error that raced it is not
+          stopRequested: err instanceof APIUserAbortError || err?.name === 'AbortError',
           turnStartedAt,
           turnUsage,
           turnCost,
@@ -2870,7 +2873,7 @@ export class ClaudeByokSession extends BaseSession {
    * `stopped` when the Stop was requested. Emits `stream_end` first.
    */
   _emitTurnResult({
-    messageId, lastStopReason, toolRoundCapReached, interrupted,
+    messageId, lastStopReason, toolRoundCapReached, interrupted, stopRequested = false,
     turnStartedAt, turnUsage, turnCost, turnCostKnown, finalRoundOccupancy,
   }) {
     this.emit('stream_end', { messageId })
@@ -2883,6 +2886,7 @@ export class ClaudeByokSession extends BaseSession {
       ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached, interrupted })),
       // #7072: terminal but not successful (internal; not on the wire).
       ...(interrupted ? { interrupted: true } : {}),
+      ...(stopRequested ? { stopRequested: true } : {}), // #9241 (internal; stripped by BaseSession.emit)
       duration: Date.now() - turnStartedAt,
       usage: turnUsage,
       ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),

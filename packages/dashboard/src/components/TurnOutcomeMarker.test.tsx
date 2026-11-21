@@ -42,6 +42,8 @@ describe('TurnOutcomeMarker (#7326)', () => {
       expect(chip).toHaveAttribute('data-outcome', 'stopped_before_output')
       expect(chip.className).toContain('turn-outcome-marker-stopped_before_output')
       expect(chip.getAttribute('title')).toContain('before the model produced any output')
+      // the accessible name overrides the text, so it must carry the time too
+      expect(chip.getAttribute('aria-label')).toContain(hhmm)
     })
 
     it('shows the bare label when there is no timestamp', () => {

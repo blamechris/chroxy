@@ -2551,6 +2551,9 @@ export class BaseSession extends EventEmitter {
       // only: not on a watchdog, a timeout or an error that was converted to
       // `stopped`), mint the marker first, so the client idles on it and `stopped`
       // follows.
+      // Read through a local alias on purpose: the features-gate scanner
+      // (config-supported-keys-docs.test.js) flags `X[0].stopRequested === true` as a
+      // gate shape, a false positive for this internal signal.
       const stoppedPayload = args[0]
       const explicit = !!stoppedPayload && typeof stoppedPayload === 'object' && stoppedPayload.stopRequested === true
       if (stoppedPayload && typeof stoppedPayload === 'object' && 'stopRequested' in stoppedPayload) {
@@ -2601,8 +2604,12 @@ export class BaseSession extends EventEmitter {
         payload = rest
         ackStop = !this._stoppedSinceStopRequest
         // #9241: the chip is dropped for a Stop that was asked for, but a Stop
-        // before any output gets the quiet marker in its place.
-        if (this._shouldMintStopBeforeReply()) payload = { ...payload, turnOutcome: 'stopped_before_output' }
+        // before any output gets the quiet marker in its place, and ONLY when the
+        // provider says by `stopRequested` that this result IS the Stop's end (a
+        // BYOK upstream error that raced the abort also arrives as `stopped`).
+        if (payload.stopRequested === true && this._shouldMintStopBeforeReply()) {
+          payload = { ...payload, turnOutcome: 'stopped_before_output' }
+        }
       } else if (payload && typeof payload === 'object' && payload.stopRequested === true
         && payload.turnOutcome === undefined && this._shouldMintStopBeforeReply()) {
         // claude-cli's synthetic result for a Stop (child exit / 5 s safety timer): it

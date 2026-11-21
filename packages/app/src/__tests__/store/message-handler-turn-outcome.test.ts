@@ -24,6 +24,15 @@ import {
 } from '@chroxy/store-core';
 import type { ChatMessage, ConnectionState } from '../../store/types';
 
+jest.mock('../../utils/haptics', () => ({
+  hapticSuccess: jest.fn(),
+  hapticLight: jest.fn(),
+  hapticMedium: jest.fn(),
+  hapticWarning: jest.fn(),
+  hapticError: jest.fn(),
+}));
+import { hapticSuccess } from '../../utils/haptics';
+
 jest.mock('../../store/persistence', () => ({
   clearPersistedSession: jest.fn(() => Promise.resolve()),
   persistSessionMessages: jest.fn(),
@@ -170,5 +179,16 @@ describe('a turn interrupted by a daemon restart (#8259)', () => {
     expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
     replayAll(send, frames, true);
     expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
+  });
+});
+
+// #9241 -- the quiet marker is not a success to buzz about.
+describe('haptics on a result (#9241)', () => {
+  it('a turn stopped before any reply does not trigger the success haptic; a completed one does', () => {
+    const { send } = boot();
+    send({ type: 'result', sessionId: SID, cost: null, duration: null, turnOutcome: 'stopped_before_output', timestamp: 5 } as ReplayParityFrame);
+    expect(hapticSuccess).not.toHaveBeenCalled();
+    send({ type: 'result', sessionId: SID, cost: 0.01, duration: 10, turnOutcome: 'completed' } as ReplayParityFrame);
+    expect(hapticSuccess).toHaveBeenCalledTimes(1);
   });
 });

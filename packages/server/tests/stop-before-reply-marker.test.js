@@ -14,6 +14,8 @@ import { SessionMessageHistory } from '../src/session-message-history.js'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
 import { createAcpSessionClass } from '../src/acp-session.js'
 import * as codexMod from '../src/codex-app-server-session.js'
+import * as byokMod from '../src/byok-session.js'
+import * as anthropicSdk from '@anthropic-ai/sdk'
 import { registerProvider } from '../src/providers.js'
 import { sendHistoryEntry } from '../src/ws-history.js'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
@@ -182,13 +184,21 @@ describe('BaseSession: when a user Stop leaves the marker (#9241)', () => {
     assert.equal(w.markers().length, 2)
   })
 
-  it('a result the provider already minted as stopped (tui, byok) is substituted, not duplicated', () => {
+  it('a result the provider minted as stopped AND flagged as the Stop is substituted, not duplicated', () => {
+    const { s, w } = baseTurn()
+    s._noteTurnStopRequested()
+    s.markStopRequested()
+    s.emit('result', { cost: null, duration: 5, usage: null, turnOutcome: 'stopped', interrupted: true, stopRequested: true })
+    s.emit('stopped', STOP) // the quiet ack the strip path already sent, and a late duplicate
+    assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'])
+  })
+
+  it('the strip path ALONE no longer mints: a stopped result without stopRequested (e.g. an error that raced the abort) stays quiet', () => {
     const { s, w } = baseTurn()
     s._noteTurnStopRequested()
     s.markStopRequested()
     s.emit('result', { cost: null, duration: 5, usage: null, turnOutcome: 'stopped', interrupted: true })
-    s.emit('stopped', STOP) // the quiet ack the strip path already sent, and a late duplicate
-    assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'])
+    assert.deepEqual(w.order(), ['result:-', 'stopped'], 'chip stripped and acknowledged as before, no marker')
   })
 
   it('a provider-minted stopped result with output before the Stop stays quiet (#8461)', () => {
@@ -196,7 +206,7 @@ describe('BaseSession: when a user Stop leaves the marker (#9241)', () => {
     s.emit('stream_delta', { messageId: 'm', delta: 'x' })
     s._noteTurnStopRequested()
     s.markStopRequested()
-    s.emit('result', { cost: null, duration: 5, usage: null, turnOutcome: 'stopped', interrupted: true })
+    s.emit('result', { cost: null, duration: 5, usage: null, turnOutcome: 'stopped', interrupted: true, stopRequested: true })
     assert.deepEqual(w.order(), ['result:-', 'stopped'])
   })
 
@@ -390,13 +400,28 @@ describe('claude-cli: ordering (#9241)', () => {
     assert.deepEqual(w.order(), ['result:-', 'stopped'])
   })
 
-  it('the 5 s safety timer path (child ignored SIGINT): one marker, no second one from a later stopped', () => {
+  it('the REAL 5 s safety timer (child ignored SIGINT) carries no stop signal: no marker, and a child that closes later cannot mint one after the fact', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
     const session = cliSession()
     const w = watch(session)
     session.markStopRequested()
-    session._emitInterruptedTurnResult(0, 'user_stop')
-    session.emit('stopped', STOP)
-    assert.equal(w.markers().length, 1)
+    session.interrupt()
+    t.mock.timers.tick(5000)
+    assert.equal(w.markers().length, 0, 'the child may still be running: this is not the Stop certified')
+    assert.deepEqual(w.order(), ['result:-'], 'the turn is ended, unmarked')
+    session._handleChildClose(0) // the child finally goes, flagged intentional
+    assert.equal(w.markers().length, 0, 'the settled latch does not let a late close mint')
+  })
+
+  it('a late child answer after the safety timer is accepted as ordinary output, not a second marker', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const session = cliSession()
+    const w = watch(session)
+    session.markStopRequested()
+    session.interrupt()
+    t.mock.timers.tick(5000)
+    session.emit('stream_delta', { messageId: 'm-1', delta: 'I kept running after SIGINT.' })
+    assert.equal(w.markers().length, 0)
   })
 
   it('an interrupted result nobody at a keyboard asked for (crash, watchdog) leaves no marker', () => {
@@ -476,6 +501,51 @@ describe('claude-tui: a provider that mints its own stopped result (#9241)', () 
     })
     await run()
     assert.equal(w.markers().length, 1)
+  })
+
+  // The first assistant line on the screen (Claude Code prints U+23FA before assistant text
+  // and tool lines) is the only early sign of a text-only reply: no PreToolUse hook fires and
+  // the text reaches emit() at the Stop hook. These drive the REAL PTY byte path
+  // (_appendToOutputTail) after the prompt write, then a real Stop.
+  describe('assistant text on the screen counts as output (the glyph watch)', () => {
+    const stopAfter = (chunks, { afterMs = 100 } = {}) => (s) => {
+      setTimeout(() => {
+        for (const c of chunks) s._appendToOutputTail(c)
+        s.markStopRequested()
+        s.interrupt()
+      }, afterMs)
+    }
+
+    it('a text-only reply streaming in the terminal, then Stop: NO marker (the Codex reproduction)', async () => {
+      turnSession((s) => stopAfter(['\u23FA Here is the first part of my reply.\r\n'])(s))
+      await run()
+      assert.equal(session._turnOutputSeen, true)
+      assert.equal(w.markers().length, 0)
+    })
+
+    it('spinner / status chunks and a resize without the glyph stay quiet: the Stop is marked', async () => {
+      turnSession((s) => {
+        stopAfter(['\u273B Thinking\u2026 (esc to interrupt)', '> hello', '\u001b[2K\u001b[1G'])(s)
+        setTimeout(() => s.emit('terminal_resize', { cols: 100, rows: 30 }), 50)
+      })
+      await run()
+      assert.equal(w.markers().length, 1)
+    })
+
+    it('the glyph arriving in a LATER chunk still counts', async () => {
+      turnSession((s) => stopAfter(['\u273B Thinking\u2026', '\u001b[1m\u23FA\u001b[0m Hello'])(s))
+      await run()
+      assert.equal(w.markers().length, 0)
+    })
+
+    it('a glyph in the echo of the prompt itself (before the write finished) does not count', async () => {
+      turnSession((s) => {
+        s._appendToOutputTail('> please explain \u23FA\r\n') // typed during the write: not armed yet
+        stopAfter(['\u273B Thinking\u2026'])(s)
+      })
+      await run()
+      assert.equal(w.markers().length, 1)
+    })
   })
 
   it('a Stop after the model streamed text leaves none', async () => {
@@ -694,36 +764,121 @@ describe('codex app-server: turn/completed {interrupted} is its stop path (#9241
   })
 })
 
-describe('acp: only the prompt resolving under the Stop is a Stop (#9241)', () => {
+describe('acp: only a `cancelled` prompt resolution is a Stop (#9241)', () => {
+  const cleanups = []
+  afterEach(() => { for (const c of cleanups.splice(0)) c() })
+  // The real interrupt() and _finishTurn(); only the transport is a stub (a connection
+  // whose notify() records the session/cancel).
   function acp() {
     const sk = mkdtempSync(join(tmpdir(), 'chroxy-acp-9241-'))
+    cleanups.push(() => rmSync(sk, { recursive: true, force: true }))
     const Klass = createAcpSessionClass({
       id: `fake-acp-9241-${Date.now()}-${Math.random().toString(36).slice(2)}`, label: 'Fake', command: process.execPath, args: [], env: {},
     })
     const s = new Klass({ cwd: tmpdir(), skillsDir: sk, repoSkillsDir: null, resultTimeoutMs: 5000 })
+    const cancels = []
+    s._connection = { agent: { notify: async (method) => { cancels.push(method) } } }
+    s._sessionId = 'acp-sess'
     s.on('error', () => {})
     const w = watch(s)
     s._isBusy = true
     s._activeTurn = { messageId: 'm1', didStreamStart: false }
-    return { s, w, cleanup: () => rmSync(sk, { recursive: true, force: true }) }
+    return { s, w, cancels }
   }
 
-  it('session/prompt resolving while the Stop is armed: one marker then stopped', () => {
-    const { s, w, cleanup } = acp()
+  it('a Stop answered with `cancelled`: session/cancel sent, one marker, then stopped', async () => {
+    const { s, w, cancels } = acp()
     s.markStopRequested()
-    s.markIntentionalStop()
+    await s.interrupt()
+    assert.equal(cancels.length, 1, 'the real interrupt() notified the agent')
     s._finishTurn({ stopReason: 'cancelled' })
     assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'])
-    cleanup()
   })
 
-  it('a timeout / failure converted to `stopped` while the Stop is armed mints nothing', () => {
-    const { s, w, cleanup } = acp()
+  for (const stopReason of ['max_tokens', 'refusal', 'end_turn']) {
+    it(`a Stop that lost the race to a \`${stopReason}\` is not a Stop: no marker`, async () => {
+      const { s, w } = acp()
+      s.markStopRequested()
+      await s.interrupt()
+      s._finishTurn({ stopReason })
+      assert.equal(w.markers().length, 0)
+    })
+  }
+
+  it('a timeout / failure converted to `stopped` while the Stop is armed mints nothing', async () => {
+    const { s, w } = acp()
     s.markStopRequested()
-    s.markIntentionalStop()
+    await s.interrupt()
     s._failTurn('result timeout')
     assert.deepEqual(w.order(), ['stopped'])
-    cleanup()
+  })
+})
+
+describe('claude-byok: only an abort is the Stop (#9241)', () => {
+  const { ClaudeByokSession } = byokMod
+  const { APIUserAbortError } = anthropicSdk
+  function byok(failWith) {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.setPermissionMode('auto')
+    session._client = {
+      messages: {
+        stream: () => ({
+          async *[Symbol.asyncIterator]() {
+            // The Stop lands before the model has produced anything, then the stream rejects.
+            session.markStopRequested()
+            session.interrupt()
+            throw failWith()
+            // eslint-disable-next-line no-unreachable
+            yield undefined
+          },
+          async finalMessage() { throw failWith() },
+        }),
+      },
+    }
+    session.on('error', () => {})
+    return session
+  }
+
+  it('a genuine abort before any output: one marker, then stopped', async () => {
+    const session = byok(() => new APIUserAbortError({ message: 'Request was aborted.' }))
+    const w = watch(session)
+    await session.start()
+    await session.sendMessage('go')
+    assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'])
+    await session.destroy()
+  })
+
+  it('an upstream HTTP 500 racing the Stop is NOT the Stop: no marker', async () => {
+    const session = byok(() => Object.assign(new Error('500 upstream exploded'), { status: 500 }))
+    const w = watch(session)
+    await session.start()
+    await session.sendMessage('go')
+    assert.equal(w.markers().length, 0)
+    await session.destroy()
+  })
+
+  it('a Stop after the model streamed text stays quiet (#8461)', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.setPermissionMode('auto')
+    session._client = {
+      messages: {
+        stream: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'half a rep' } }
+            session.markStopRequested()
+            session.interrupt()
+            throw new APIUserAbortError({ message: 'Request was aborted.' })
+          },
+          async finalMessage() { throw new APIUserAbortError({ message: 'Request was aborted.' }) },
+        }),
+      },
+    }
+    session.on('error', () => {})
+    const w = watch(session)
+    await session.start()
+    await session.sendMessage('go')
+    assert.equal(w.markers().length, 0)
+    await session.destroy()
   })
 })
 
@@ -748,24 +903,29 @@ describe('jsonl subprocess (gemini, legacy codex): ONE terminal result for a sil
       _buildChildEnv() { return process.env }
       _processJsonlLine() {}
     }
+    const savedKey = process.env.TEST_API_KEY
     process.env.TEST_API_KEY = 'value'
     const s = new P({ cwd: '/tmp' })
-    s._processReady = true
-    s.on('error', () => {})
-    const w = watch(s)
-    const history = new SessionMessageHistory({ maxHistory: 50 })
-    s.on('result', (r) => history.recordHistory('s1', 'result', r))
-    await s.sendMessage('go')
-    s.markStopRequested()
-    s.interrupt()
-    const deadline = Date.now() + 10000
-    while (!w.seen.some((e) => e.name === 'stopped') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
-    await new Promise((r) => setTimeout(r, 50))
-    assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'], 'one result, then stopped')
-    const results = history.getHistory('s1').filter((e) => e.type === 'result')
-    assert.equal(results.length, 1, 'one terminal result in history')
-    assert.equal(results[0].turnOutcome, MARK)
-    s.destroy()
-    delete process.env.TEST_API_KEY
+    try {
+      s._processReady = true
+      s.on('error', () => {})
+      const w = watch(s)
+      const history = new SessionMessageHistory({ maxHistory: 50 })
+      s.on('result', (r) => history.recordHistory('s1', 'result', r))
+      await s.sendMessage('go')
+      s.markStopRequested()
+      s.interrupt()
+      const deadline = Date.now() + 10000
+      while (!w.seen.some((e) => e.name === 'stopped') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+      await new Promise((r) => setTimeout(r, 50))
+      assert.deepEqual(w.order(), [`result:${MARK}`, 'stopped'], 'one result, then stopped')
+      const results = history.getHistory('s1').filter((e) => e.type === 'result')
+      assert.equal(results.length, 1, 'one terminal result in history')
+      assert.equal(results[0].turnOutcome, MARK)
+    } finally {
+      s.destroy()
+      if (savedKey === undefined) delete process.env.TEST_API_KEY
+      else process.env.TEST_API_KEY = savedKey
+    }
   })
 })

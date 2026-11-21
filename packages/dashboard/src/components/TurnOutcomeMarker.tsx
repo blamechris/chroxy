@@ -36,7 +36,7 @@ export function TurnOutcomeMarker({ outcome, timestamp }: TurnOutcomeMarkerProps
       data-outcome={outcome}
       role="status"
       title={description.detail}
-      aria-label={`${description.label}. ${description.detail}`}
+      aria-label={`${text}. ${description.detail}`}
     >
       <span className="turn-outcome-marker-icon" aria-hidden="true">{outcome === 'refused' ? '⊘' : outcome === 'stopped' || outcome === 'stopped_before_output' ? '■' : outcome === 'interrupted' ? '⚡' : '✂'}</span>
       <span className="turn-outcome-marker-text">{text}</span>

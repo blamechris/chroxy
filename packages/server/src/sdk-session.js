@@ -1803,6 +1803,8 @@ export class SdkSession extends BaseSession {
           declarationTurnId: messageId,
           declarationEligible: !supersededByNewerTurn() && !this._stdinForwardingDisabled && sdkDeclarationEligible(msg),
           ...turnOutcomeField(outcomeFromSdkResult(msg)),
+          // #9241: `aborted_*` is the SDK saying the abort ended the turn.
+          ...(outcomeFromSdkResult(msg) === 'stopped' ? { stopRequested: true } : {}),
         }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
         // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks

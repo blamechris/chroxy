@@ -94,6 +94,8 @@ describe('ChatView turn-outcome chip (#7326)', () => {
     const quiet = appendTurnOutcomeMarker([user], { outcome: 'stopped_before_output', timestamp: ts });
     const tree = renderFeed(selectChatMessages(quiet, { chatFilterCompact: false, isHiddenInCompactMode }));
     expect(labels(tree)).toEqual([`Stopped before a reply \u00b7 ${hhmm}`]);
+    // the accessible name replaces the visible text for a screen reader: it must carry the time too
+    expect(chips(tree)[0]!.props.accessibilityLabel).toContain(hhmm);
     act(() => tree.unmount());
 
     const plain = appendTurnOutcomeMarker([reply('r1', 'x')], { outcome: 'stopped', timestamp: ts });

@@ -456,6 +456,9 @@ export function withRetainedPermissionOutcomes(transcript, ring, truncated) {
       ? entry.turnOutcome
       : null
     if (!entry || (entry.type !== 'permission_outcome' && !markerOutcome)) continue
+    // A marker's identity is (outcome, timestamp), the same pair the clients dedupe on. Two
+    // markers of one outcome stamped in the SAME millisecond collapse to one; a session runs
+    // one turn at a time, so that needs two turns to end inside a millisecond.
     const key = markerOutcome ? `${markerOutcome}:${entry.timestamp}` : entry.requestId
     if (seen.has(key)) continue
     seen.add(key)

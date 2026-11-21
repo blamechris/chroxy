@@ -41,7 +41,7 @@ export function TurnOutcomeMarker({ outcome, timestamp }: TurnOutcomeMarkerProps
     <View
       testID={TURN_OUTCOME_MARKER_TESTID}
       accessibilityRole="text"
-      accessibilityLabel={`${description.label}. ${description.detail}`}
+      accessibilityLabel={`${text}. ${description.detail}`}
       style={[styles.container, tone]}
     >
       <Text style={styles.icon} accessibilityElementsHidden importantForAccessibility="no">
