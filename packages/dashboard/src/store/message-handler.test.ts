@@ -794,6 +794,29 @@ describe('dashboard message-handler dispatch', () => {
       expect(all).toContain('Bash')
       expect(all).toContain('TUI-RESULT')
     })
+
+    // Another client (or a daemon wake) typing into the TUI session on screen:
+    // the `> text` echo is a synthesized line too.
+    const remoteInput = (sessionId: string) => send({
+      type: 'user_input', sessionId, clientId: 'other',
+      messageId: 'input-1', text: 'REMOTE-PROMPT', timestamp: 1,
+    })
+
+    it('a remote user_input echo is not written to the active claude-tui session\'s terminal', () => {
+      store = createMockStore(tuiState('tui'))
+      setStore(store)
+      remoteInput('tui')
+      expect(writes()).toEqual([])
+      const msgs = (store.getState() as any).sessionStates.tui.messages
+      expect(msgs.some((m: any) => m.type === 'user_input' && m.content === 'REMOTE-PROMPT')).toBe(true)
+    })
+
+    it('positive control: a remote user_input echo is still written for an active non-tui session', () => {
+      store = createMockStore(tuiState('sdk'))
+      setStore(store)
+      remoteInput('sdk')
+      expect(writes().join('')).toContain('> REMOTE-PROMPT')
+    })
   })
 
   describe('terminal_size dispatch (#5835 Phase 2)', () => {

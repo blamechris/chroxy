@@ -6230,7 +6230,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // writes to the ACTIVE session's buffer whatever session the input belongs
       // to, so a turn for a background session (a wake, or another client typing
       // there) must not put "> ..." into the session being looked at.
-      if (userInput.content && userInput.sessionId === get().activeSessionId) {
+      // #9262: nor into a claude-tui session's live PTY mirror.
+      if (userInput.content && userInput.sessionId === get().activeSessionId
+        && !isClaudeTuiSession(get().sessions, userInput.sessionId)) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
       // #3188: a remote client just answered (or otherwise sent a fresh
