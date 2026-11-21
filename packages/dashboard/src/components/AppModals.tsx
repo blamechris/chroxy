@@ -98,6 +98,10 @@ export interface AppModalsProps {
   closeConfirmMessage: string
   onCloseConfirm: () => void
   onCloseConfirmCancel: () => void
+  // Early-interrupt confirmation (#8703)
+  interruptConfirmOpen: boolean
+  onInterruptConfirm: () => void
+  onInterruptConfirmCancel: () => void
   // Toasts
   toastItems: ComponentProps<typeof Toast>['items']
   onToastDismiss: (id: string) => void
@@ -243,6 +247,20 @@ export function AppModals(props: AppModalsProps) {
         danger
         onConfirm={props.onCloseConfirm}
         onCancel={props.onCloseConfirmCancel}
+      />
+
+      {/* #8703 — Stop before the turn's first output. Raised by the store's
+          `sendInterrupt` (the one door for Escape / Stop / Cmd+. / palette /
+          Control Room). Escape and backdrop cancel; only the button confirms. */}
+      <ConfirmDialog
+        open={props.interruptConfirmOpen}
+        title="Stop this turn?"
+        message="Nothing has come back yet. Stopping now ends the turn before it starts."
+        confirmLabel="Stop turn"
+        cancelLabel="Keep running"
+        danger
+        onConfirm={props.onInterruptConfirm}
+        onCancel={props.onInterruptConfirmCancel}
       />
 
       {/* Toasts */}

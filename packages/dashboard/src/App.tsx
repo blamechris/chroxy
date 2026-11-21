@@ -721,6 +721,9 @@ export function App() {
   const appendMemory = useConnectionStore(s => s.appendMemory)
   const addInfoNotification = useConnectionStore(s => s.addInfoNotification)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
+  // #8703: set by sendInterrupt when a Stop would land before the turn's first output.
+  const pendingInterruptConfirm = useConnectionStore(s => s.pendingInterruptConfirm)
+  const dismissInterruptConfirm = useConnectionStore(s => s.dismissInterruptConfirm)
   const sendCancelQueued = useConnectionStore(s => s.sendCancelQueued)
   // #5939: stable cancel callback so the memoized message rows skip re-render.
   const onCancelQueued = useCallback(
@@ -3627,6 +3630,13 @@ export function App() {
           setCloseConfirmSessionId(null)
         }}
         onCloseConfirmCancel={() => setCloseConfirmSessionId(null)}
+        interruptConfirmOpen={pendingInterruptConfirm != null}
+        onInterruptConfirm={() => {
+          const target = pendingInterruptConfirm
+          if (target) sendInterrupt(target.sessionId, { confirmed: true })
+          dismissInterruptConfirm()
+        }}
+        onInterruptConfirmCancel={dismissInterruptConfirm}
         toastItems={toastItems}
         onToastDismiss={(id) => {
           // #4075: cost-threshold toast IDs are routed via the per-session

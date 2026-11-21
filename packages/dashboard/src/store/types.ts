@@ -1751,6 +1751,12 @@ export interface ConnectionState {
 
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: PendingPermissionConfirm | null;
+  /**
+   * #8703 — set by `sendInterrupt` when a Stop would end a turn before its first
+   * output; the dashboard confirms before the frame goes out. Connection-lifetime
+   * (`createEmptyConnectionReadings`), and cleared if the session leaves the roster.
+   */
+  pendingInterruptConfirm: { sessionId: string } | null;
 
   // Slash commands from server
   slashCommands: SlashCommand[];
@@ -1995,7 +2001,12 @@ export interface ConnectionState {
    * per-repo drill-down, which targets the repo's session, not necessarily the
    * active one). #5272.
    */
-  sendInterrupt: (sessionId?: string) => 'sent' | 'queued' | false;
+  sendInterrupt: (
+    sessionId?: string,
+    options?: { confirmed?: boolean },
+  ) => 'sent' | 'queued' | 'confirm' | false;
+  /** #8703: close the early-interrupt confirm without sending (Cancel / Escape / backdrop). */
+  dismissInterruptConfirm: () => void;
   /**
    * #5272 (Control Room Phase 2a): cancel a single in-flight activity node (a
    * subagent) by its activity-tree entry id. Targets `sessionId` if given, else

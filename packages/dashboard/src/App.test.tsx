@@ -237,6 +237,8 @@ vi.mock('./store/connection', async () => {
     // info notification when sendInput falls through to the offline queue.
     addInfoNotification: vi.fn(),
     sendInterrupt: vi.fn(),
+    pendingInterruptConfirm: null,
+    dismissInterruptConfirm: vi.fn(),
     sendPermissionResponse: vi.fn(),
     sendUserQuestionResponse: vi.fn(),
     markPromptAnswered: vi.fn(),
@@ -836,6 +838,46 @@ describe('App', () => {
       render(<App />)
       fireEvent.keyDown(window, { key: 'w', metaKey: true })
       expect(destroySession).not.toHaveBeenCalled()
+    })
+
+    describe('#8703 early-interrupt confirmation dialog', () => {
+      it('renders nothing while no interrupt is pending', () => {
+        stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1' }
+        render(<App />)
+        expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+      })
+
+      it('shows the dialog when sendInterrupt parked a target, and Stop turn re-sends it confirmed for THAT session', () => {
+        const sendInterrupt = vi.fn()
+        const dismissInterruptConfirm = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', sendInterrupt, dismissInterruptConfirm, pendingInterruptConfirm: { sessionId: 's-target' } }
+        render(<App />)
+        expect(screen.getByText('Stop this turn?')).toBeInTheDocument()
+        fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+        expect(sendInterrupt).toHaveBeenCalledTimes(1)
+        expect(sendInterrupt).toHaveBeenCalledWith('s-target', { confirmed: true })
+        expect(dismissInterruptConfirm).toHaveBeenCalled()
+      })
+
+      it('Keep running sends nothing and clears the pending confirm', () => {
+        const sendInterrupt = vi.fn()
+        const dismissInterruptConfirm = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', sendInterrupt, dismissInterruptConfirm, pendingInterruptConfirm: { sessionId: 's1' } }
+        render(<App />)
+        fireEvent.click(screen.getByTestId('confirm-dialog-cancel'))
+        expect(sendInterrupt).not.toHaveBeenCalled()
+        expect(dismissInterruptConfirm).toHaveBeenCalledTimes(1)
+      })
+
+      it('Escape cancels the dialog and does NOT confirm (a second Escape never stops the turn)', () => {
+        const sendInterrupt = vi.fn()
+        const dismissInterruptConfirm = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', sendInterrupt, dismissInterruptConfirm, pendingInterruptConfirm: { sessionId: 's1' } }
+        render(<App />)
+        fireEvent.keyDown(screen.getByTestId('confirm-dialog'), { key: 'Escape' })
+        expect(sendInterrupt).not.toHaveBeenCalled()
+        expect(dismissInterruptConfirm).toHaveBeenCalled()
+      })
     })
 
     describe('#5206 session-close confirmation', () => {

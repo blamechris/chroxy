@@ -94,7 +94,7 @@ import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getLocalConnectionToken } from '../utils/local-auth';
 import { isLocalDaemonUrl } from '../utils/daemon-origin';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
-import { hasInterruptibleWork, isSessionBusy } from '../lib/session-busy';
+import { hasInterruptibleWork, isAwaitingFirstOutput, isSessionBusy } from '../lib/session-busy';
 import {
   setStore,
   wsSend,
@@ -1259,6 +1259,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   restartEtaMs: null,
   restartingSince: null,
   pendingPermissionConfirm: null,
+  pendingInterruptConfirm: null,
   slashCommands: [],
   filePickerFiles: null,
   mcpResources: null,
@@ -4529,12 +4530,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return result;
   },
 
-  sendInterrupt: (sessionId?: string) => {
+  sendInterrupt: (sessionId?: string, options?: { confirmed?: boolean }) => {
     const { socket, activeSessionId } = get();
     // #5272: an explicit sessionId (Control Room drill-down) wins over the
     // active session, so an operator can interrupt a repo's session without
     // first making it active.
     const sid = sessionId ?? activeSessionId;
+    // #8703: the single door for every dashboard Stop (Escape, the Stop button,
+    // Cmd+., the palette, the Control Room). Before the turn's first output a
+    // Stop ends it before it starts, so ask first: park the target for the
+    // dialog and send NOTHING (queue untouched) until it comes back confirmed.
+    if (!options?.confirmed && sid) {
+      const target = get().sessionStates[sid];
+      if (target && isAwaitingFirstOutput(target)) {
+        set({ pendingInterruptConfirm: { sessionId: sid } });
+        return 'confirm';
+      }
+    }
+    if (get().pendingInterruptConfirm) set({ pendingInterruptConfirm: null });
     const payload: Record<string, unknown> = { type: 'interrupt' };
     if (sid) payload.sessionId = sid;
     // #5938 — Stop clears the outgoing queue too (server policy #5936: a
@@ -4567,6 +4580,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (wsSend(socket, payload)) return 'sent';
     }
     return enqueueMessage('interrupt', payload);
+  },
+
+  dismissInterruptConfirm: () => {
+    if (get().pendingInterruptConfirm) set({ pendingInterruptConfirm: null });
   },
 
   // #5272 (Control Room Phase 2a): cancel one in-flight activity node (a

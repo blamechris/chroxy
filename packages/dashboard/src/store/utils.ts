@@ -386,6 +386,8 @@ export function createEmptySessionPanels() {
 export function createEmptyConnectionReadings() {
   return {
     pendingPermissionConfirm: null,
+    // #8703: the early-interrupt confirm names a session on THIS daemon.
+    pendingInterruptConfirm: null,
     fileBrowserPendingOpen: null,
     workspaceSymbols: null,
     symbolLocation: null,
