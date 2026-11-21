@@ -89,6 +89,12 @@ function safeFit(fit: FitAddon) {
   try { fit.fit() } catch { /* container not visible */ }
 }
 
+/** #9234 — proposeDimensions() runs synchronously inside React effects; an xterm
+ *  internal throw there would reach the top-level ErrorBoundary. */
+function safeProposeDimensions(fit: FitAddon) {
+  try { return fit.proposeDimensions() } catch { return undefined }
+}
+
 export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure, visible = true, remeasureKey, interactive = false, onInput }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -222,7 +228,7 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
     // is on screen and only when the grid is not degenerate (see `visible`).
     const measureAndReport = () => {
       if (disposedRef.current || !visibleRef.current) return
-      const dims = fitAddon.proposeDimensions()
+      const dims = safeProposeDimensions(fitAddon)
       if (dims && dims.cols >= MIN_MEASURE_COLS && dims.rows >= MIN_MEASURE_ROWS) {
         onMeasureRef.current?.(dims.cols, dims.rows)
       }

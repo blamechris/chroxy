@@ -16,6 +16,7 @@ const fitSpy = vi.fn()
 const resizeSpy = vi.fn()
 // #5835 Phase 2: mirror mode measures the pane via FitAddon.proposeDimensions().
 // Tests can override this to simulate different pane sizes.
+let proposeDimensionsThrows = false
 let proposeDimensionsResult: { cols: number; rows: number } | undefined = { cols: 200, rows: 50 }
 // #5835 Phase 3: capture the most-recently-constructed terminal's onData callback
 // so tests can simulate a keystroke, and the live `options` (for disableStdin).
@@ -51,7 +52,10 @@ vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     _fitted = false
     fit() { fitSpy(); this._fitted = true }
-    proposeDimensions() { return proposeDimensionsResult }
+    proposeDimensions() {
+      if (proposeDimensionsThrows) throw new TypeError("Cannot read properties of undefined (reading 'dimensions')")
+      return proposeDimensionsResult
+    }
     dispose() {}
   }
   return { FitAddon: MockFitAddon }
@@ -66,6 +70,7 @@ describe('TerminalView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     proposeDimensionsResult = { cols: 200, rows: 50 }
+    proposeDimensionsThrows = false
     lastOnData = null
     lastTermOptions = null
   })
@@ -231,6 +236,15 @@ describe('TerminalView', () => {
       const onMeasure = vi.fn()
       render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} />)
       expect(onMeasure).toHaveBeenCalledWith(200, 50)
+    })
+
+    // #9234: an xterm-internal throw from proposeDimensions must not escape the
+    // mount effect (it would reach the top-level ErrorBoundary).
+    it('swallows a proposeDimensions throw during the mount measurement', () => {
+      proposeDimensionsThrows = true
+      const onMeasure = vi.fn()
+      expect(() => render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} />)).not.toThrow()
+      expect(onMeasure).not.toHaveBeenCalled()
     })
 
     it('does not call onMeasure when proposeDimensions returns nothing (hidden/0-size pane)', () => {

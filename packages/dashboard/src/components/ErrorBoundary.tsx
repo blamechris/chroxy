@@ -1,10 +1,14 @@
 import { Component, type ErrorInfo, type ReactNode, type CSSProperties } from 'react'
+import { writeText } from '../utils/clipboard'
 
 interface ErrorBoundaryProps {
   children: ReactNode
 }
 interface ErrorBoundaryState {
   error: Error | null
+  /** #9234 — React component stack from componentDidCatch, shown + copyable. */
+  componentStack: string | null
+  copyState: 'idle' | 'copied' | 'failed'
 }
 
 // Inline styles (not a CSS class) on purpose: an error boundary is the last line
@@ -43,6 +47,16 @@ const reloadStyle: CSSProperties = {
   fontWeight: 600,
   cursor: 'pointer',
 }
+const copyStyle: CSSProperties = {
+  marginLeft: 8,
+  background: 'transparent',
+  color: 'var(--text-primary)',
+  border: '1px solid var(--scrollbar-thumb)',
+  borderRadius: 8,
+  padding: '8px 16px',
+  cursor: 'pointer',
+}
+const copyStatusStyle: CSSProperties = { marginLeft: 8, fontSize: 12, color: 'var(--text-dim)' }
 const detailsStyle: CSSProperties = { marginTop: 16, color: 'var(--text-dim)' }
 const preStyle: CSSProperties = {
   marginTop: 8,
@@ -64,14 +78,32 @@ const preStyle: CSSProperties = {
  * of a blank page.
  */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { error: null }
+  state: ErrorBoundaryState = { error: null, componentStack: null, copyState: 'idle' }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error }
+    return { error, componentStack: null, copyState: 'idle' }
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('[ErrorBoundary] render error:', error, info.componentStack)
+    this.setState({ componentStack: info.componentStack ?? null })
+  }
+
+  /** #9234 — the operator reloaded before copying anything; make it one click. */
+  private buildDetails(): string {
+    const { error, componentStack } = this.state
+    return [
+      `time: ${new Date().toISOString()}`,
+      `path: ${window.location.pathname}`,
+      `message: ${error?.message ?? ''}`,
+      `stack:\n${error?.stack ?? '(none)'}`,
+      `componentStack:${componentStack ?? ' (none)'}`,
+    ].join('\n')
+  }
+
+  private handleCopy = async (): Promise<void> => {
+    const ok = await writeText(this.buildDetails())
+    this.setState({ copyState: ok ? 'copied' : 'failed' })
   }
 
   private handleReload = (): void => {
@@ -79,7 +111,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   render(): ReactNode {
-    const { error } = this.state
+    const { error, componentStack, copyState } = this.state
     if (!error) return this.props.children
     return (
       <div style={overlay} role="alert" data-testid="error-boundary">
@@ -96,11 +128,25 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           >
             Reload
           </button>
+          <button
+            type="button"
+            style={copyStyle}
+            onClick={this.handleCopy}
+            data-testid="error-boundary-copy"
+          >
+            Copy details
+          </button>
+          {copyState !== 'idle' && (
+            <span style={copyStatusStyle} role="status" data-testid="error-boundary-copy-status">
+              {copyState === 'copied' ? 'Copied' : 'Copy failed'}
+            </span>
+          )}
           <details style={detailsStyle}>
             <summary>Error detail</summary>
             <pre style={preStyle}>
               {error.message}
               {error.stack ? `\n\n${error.stack}` : ''}
+              {componentStack ? `\n\nComponent stack:${componentStack}` : ''}
             </pre>
           </details>
         </div>
