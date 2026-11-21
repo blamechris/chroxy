@@ -327,6 +327,9 @@ function isEnabled(config) {
   return config.orphanReap.enabled !== false
 }
 
+/** At most one ok-sweep summary per this interval (#8232). */
+const OK_SUMMARY_INTERVAL_MS = 60 * 60 * 1000
+
 /**
  * Run one sweep against the configured worktree root and log a manifest.
  * Returns null when disabled by config or on Windows.
@@ -334,12 +337,13 @@ function isEnabled(config) {
  * @param {object} config - merged server config
  * @param {{ info: Function, warn: Function }} log
  * @param {object} [deps] - sweepOrphans seams plus `worktreeBase`. Also the
- *   log-dedup carrier for the LSOF_NOT_FOUND case (#8083) below: `deps` is the
- *   SAME object across every tick of `startPeriodicOrphanReap`'s interval (its
- *   closure captures it once), so a flag set here on first sight persists for
- *   the rest of the daemon's life without any new module/closure-level state.
- *   A one-off caller that doesn't pass its own `deps` gets a fresh `{}` each
- *   call, so it always logs — exactly like today, for every OTHER error kind.
+ *   carrier for the cannot-check de-duplication and the hourly ok-sweep
+ *   heartbeat (#8083, #8232): `deps` is the SAME object across every tick of
+ *   `startPeriodicOrphanReap`'s interval (its closure captures it once), so
+ *   state set here persists for the daemon's life without any new
+ *   module/closure-level state. `deps.now` is an injectable clock. A one-off
+ *   caller that doesn't pass its own `deps` gets a fresh `{}` each call, so it
+ *   always logs.
  */
 export function maybeReapOrphans(config, log, deps = {}) {
   if (!isEnabled(config)) return null
@@ -349,19 +353,40 @@ export function maybeReapOrphans(config, log, deps = {}) {
   const worktreeBase = deps.worktreeBase || configPath('worktrees')
   const report = sweepOrphans({ worktreeBase, minAgeMs, deps })
   if (report.error) {
-    // Genuinely-missing lsof is a durable host fact, not a transient hiccup —
-    // warning every 5 minutes forever is pure log spam once it's been said
-    // once. Every OTHER "cannot check" reason still warns on every sweep,
-    // unchanged (a real, possibly-transient problem must stay loud).
-    if (report.errorCode === 'LSOF_NOT_FOUND') {
-      if (!deps.lsofUnavailableWarned) {
-        log.warn(`orphan-reaper: sweep skipped — ${report.error} (further occurrences suppressed until restart)`)
-        deps.lsofUnavailableWarned = true
-      }
+    // De-duplicate EVERY cannot-check reason per daemon (#8083, #8232): a
+    // host fact (no lsof, no `ps` in a slim image) is identical on every
+    // 5-minute sweep, so repeating the warning forever is pure spam. A reason
+    // still surfaces on every NEW occurrence — the first sighting, a
+    // different reason, or the same one returning after a successful sweep —
+    // and recovery is announced once below.
+    const key = report.errorCode || report.error
+    if (deps.skipWarnedKey !== key) {
+      log.warn(`orphan-reaper: sweep skipped — ${report.error} (repeats suppressed until the reason changes or a sweep succeeds)`)
+      deps.skipWarnedKey = key
+      deps.skipSuppressed = 0
     } else {
-      log.warn(`orphan-reaper: sweep skipped — ${report.error}`)
+      deps.skipSuppressed = (deps.skipSuppressed || 0) + 1
     }
     return report
+  }
+  if (deps.skipWarnedKey !== undefined) {
+    const n = (deps.skipSuppressed || 0) + 1
+    log.info(`orphan-reaper: sweeps resumed after ${n} skipped (${deps.skipWarnedKey})`)
+    deps.skipWarnedKey = undefined
+    deps.skipSuppressed = 0
+  }
+  // Positive signal (#8232): without it a healthy reaper and a dead one look
+  // the same in the log. First ok sweep says so; then at most one summary/hour.
+  const nowMs = (deps.now || Date.now)()
+  deps.okSweepsSinceSummary = (deps.okSweepsSinceSummary || 0) + 1
+  if (deps.lastOkSummaryAt === undefined) {
+    log.info(`orphan-reaper: sweep ok — ${report.scanned} scanned, ${report.candidates} candidate(s), ${report.reaped.length} reaped`)
+    deps.lastOkSummaryAt = nowMs
+    deps.okSweepsSinceSummary = 0
+  } else if (nowMs - deps.lastOkSummaryAt >= OK_SUMMARY_INTERVAL_MS) {
+    log.info(`orphan-reaper: ${deps.okSweepsSinceSummary} sweep(s) ok since last summary (last: ${report.scanned} scanned, ${report.candidates} candidate(s), ${report.reaped.length} reaped)`)
+    deps.lastOkSummaryAt = nowMs
+    deps.okSweepsSinceSummary = 0
   }
   for (const r of report.reaped) {
     log.warn(`orphan-reaper: killed pid ${r.pid} (ppid 1, ${Math.round(r.ageMs / 60000)} min, cwd ${r.cwd}): ${r.args}`)
