@@ -115,4 +115,15 @@ describe('first-run hint gating (#8231)', () => {
     settle()
     expect(hint()).not.toBeNull()
   })
+
+  it('a key round trip A -> B -> A inside the window does not resurrect the old settled state', () => {
+    const { rerender } = render(<Harness sid="A" messages={[]} />)
+    settle()
+    expect(hint()).not.toBeNull()
+    rerender(<Harness sid="B" messages={[]} />)
+    rerender(<Harness sid="A" messages={[]} />)
+    expect(hint()).toBeNull()
+    settle()
+    expect(hint()).not.toBeNull()
+  })
 })

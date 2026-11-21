@@ -666,7 +666,12 @@ function ChatViewImpl({ messages, isStreaming, isBusy, loading, replaying, settl
   const settled = settledFor !== null && settledFor.key === settleKey
   useEffect(() => {
     const timer = setTimeout(() => setSettledFor({ key: settleKey }), EMPTY_HINT_SETTLE_MS)
-    return () => clearTimeout(timer)
+    // Clearing on cleanup (not just on mismatch) means a round trip A -> B -> A
+    // inside the window cannot resurrect A's old settled state.
+    return () => {
+      clearTimeout(timer)
+      setSettledFor(null)
+    }
   }, [settleKey])
 
   // #6392 — 1-based send position for each queued follow-up, derived from the
