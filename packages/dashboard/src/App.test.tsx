@@ -205,7 +205,7 @@ import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiCh
 import { createShortcutRegistry } from './shortcuts/registry'
 import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
 import { __setSharedRegistryForTesting } from './shortcuts/useShortcutRegistry'
-import { persistSidebarRepoNames } from './store/persistence'
+import { persistSidebarRepoNames, persistSplitMode } from './store/persistence'
 
 // Mutable state override — tests can change this before rendering
 let stateOverrides: Record<string, unknown> = {}
@@ -1128,6 +1128,46 @@ describe('App', () => {
     // ...while the ChatView itself is keyed by session, so the new session gets a
     // fresh one (scroll position and "scrolled up" do not carry across).
     expect(chatPaneBefore.firstElementChild).not.toBe(chatViewBefore)
+  })
+
+  // #9234 — the same in split view: the SplitPane (and its terminal half) stays
+  // mounted across a switch, but its chat half is a fresh ChatView per session.
+  it('gives each session a fresh ChatView in split view too (#9234)', () => {
+    const sess = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    persistSplitMode('horizontal')
+    // react-resizable-panels needs a constructible ResizeObserver (as in SplitPane.test).
+    const realResizeObserver = globalThis.ResizeObserver
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
+    try {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [sess('s1'), sess('s2')],
+        activeSessionId: 's1',
+        switchSession: vi.fn(() => true),
+      }
+      multiTerminalMountCount = 0
+      const splitChatView = () => {
+        const content = screen.getByTestId('session-content')
+        expect(within(content).queryByTestId('chat-pane')).toBeNull() // split branch, not the default panes
+        return content.querySelector('.chat-view')
+      }
+      const { rerender } = render(<App />)
+      const chatViewBefore = splitChatView()
+      expect(chatViewBefore).not.toBeNull()
+      const terminalBefore = screen.getByTestId('multi-terminal-view-mock')
+
+      fireEvent.click(screen.getByTestId('session-tab-s2'))
+      stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+      rerender(<App />)
+
+      expect(screen.getByTestId('multi-terminal-view-mock')).toBe(terminalBefore)
+      expect(multiTerminalMountCount).toBe(1)
+      expect(splitChatView()).not.toBeNull()
+      expect(splitChatView()).not.toBe(chatViewBefore)
+    } finally {
+      persistSplitMode(null)
+      globalThis.ResizeObserver = realResizeObserver
+    }
   })
 
   // #7475 — the wedge the membership check would otherwise have introduced.
