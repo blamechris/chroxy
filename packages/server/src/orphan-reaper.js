@@ -232,13 +232,13 @@ function isUnder(path, base) {
  *   re-verify before signalling), cwdOf, kill, uid, selfPid, platform, realpath,
  *   plus (when `cwdOf` is not overridden) `exists`/`resolveBinary`/`execFileSync`/
  *   `readlink` consumed by the default lsof/procfs resolution (#8083)
- * @returns {{ scanned: number, candidates: number, unresolved: number, reaped: object[], skipped: object[], error: string|null, errorCode: string|null }}
+ * @returns {{ scanned: number, candidates: number, unresolved: number, reaped: object[], skipped: object[], error: string|null, errorCode: string|null, errorStage: 'list'|'cwd'|null }}
  */
 export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps = {} } = {}) {
-  const report = { scanned: 0, candidates: 0, unresolved: 0, reaped: [], skipped: [], error: null, errorCode: null }
+  const report = { scanned: 0, candidates: 0, unresolved: 0, reaped: [], skipped: [], error: null, errorCode: null, errorStage: null }
   const platform = deps.platform || process.platform
   if (platform === 'win32') return report
-  if (!worktreeBase) { report.error = 'no worktree base'; return report }
+  if (!worktreeBase) { report.error = 'no worktree base'; report.errorStage = 'list'; return report }
 
   const listProcesses = deps.listProcesses || defaultListProcesses
   const cwdOf = deps.cwdOf || defaultCwdOf
@@ -248,7 +248,7 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   // As root the uid predicate matches EVERY process, and inside a container
   // pid 1 is a live entrypoint whose children are owned, not orphaned — the
   // remaining cwd check would be the only guard. Refuse rather than widen.
-  if (uid === 0) { report.error = 'running as root: the uid predicate cannot distinguish orphans'; return report }
+  if (uid === 0) { report.error = 'running as root: the uid predicate cannot distinguish orphans'; report.errorStage = 'list'; return report }
   // lsof and /proc report REAL paths; compare against the real base, or a
   // symlink anywhere in the chain (/tmp → /private/tmp, a linked $HOME) makes
   // every comparison fail and the sweep a permanent silent no-op.
@@ -259,6 +259,7 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   let rows
   try { rows = parseProcessTable(listProcesses()) } catch (err) {
     report.error = `process listing failed: ${(err && err.message) || err}`
+    report.errorStage = 'list'
     return report
   }
   report.scanned = rows.length
@@ -281,6 +282,7 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
     // nothing this tick.
     report.error = `cwd lookup unavailable: ${(err && err.message) || err}`
     report.errorCode = (err && err.code) || null
+    report.errorStage = 'cwd'
     return report
   }
 
@@ -301,6 +303,7 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   let recheck
   try { recheck = new Map(parseProcessTable(listProcesses()).map((r) => [r.pid, r])) } catch (err) {
     report.error = `re-verification listing failed: ${(err && err.message) || err}`
+    report.errorStage = 'cwd'
     return report
   }
 
@@ -327,6 +330,9 @@ function isEnabled(config) {
   return config.orphanReap.enabled !== false
 }
 
+/** At most one ok-sweep summary per this interval (#8232). */
+const OK_SUMMARY_INTERVAL_MS = 60 * 60 * 1000
+
 /**
  * Run one sweep against the configured worktree root and log a manifest.
  * Returns null when disabled by config or on Windows.
@@ -334,12 +340,14 @@ function isEnabled(config) {
  * @param {object} config - merged server config
  * @param {{ info: Function, warn: Function }} log
  * @param {object} [deps] - sweepOrphans seams plus `worktreeBase`. Also the
- *   log-dedup carrier for the LSOF_NOT_FOUND case (#8083) below: `deps` is the
- *   SAME object across every tick of `startPeriodicOrphanReap`'s interval (its
- *   closure captures it once), so a flag set here on first sight persists for
- *   the rest of the daemon's life without any new module/closure-level state.
- *   A one-off caller that doesn't pass its own `deps` gets a fresh `{}` each
- *   call, so it always logs — exactly like today, for every OTHER error kind.
+ *   carrier for the cannot-check de-duplication and the hourly ok-sweep
+ *   heartbeat (#8083, #8232): `deps` is the SAME object across every tick of
+ *   `startPeriodicOrphanReap`'s interval (its closure captures it once), so
+ *   state set here persists for the daemon's life without any new
+ *   module/closure-level state. `deps.now` is an injectable clock. A one-off
+ *   caller that doesn't pass its own `deps` gets a fresh `{}` each call, so it
+ *   always logs. A sweep that THROWS is not de-duplicated here: the catch in
+ *   `startPeriodicOrphanReap` warns on every occurrence (loud by design).
  */
 export function maybeReapOrphans(config, log, deps = {}) {
   if (!isEnabled(config)) return null
@@ -349,19 +357,57 @@ export function maybeReapOrphans(config, log, deps = {}) {
   const worktreeBase = deps.worktreeBase || configPath('worktrees')
   const report = sweepOrphans({ worktreeBase, minAgeMs, deps })
   if (report.error) {
-    // Genuinely-missing lsof is a durable host fact, not a transient hiccup —
-    // warning every 5 minutes forever is pure log spam once it's been said
-    // once. Every OTHER "cannot check" reason still warns on every sweep,
-    // unchanged (a real, possibly-transient problem must stay loud).
-    if (report.errorCode === 'LSOF_NOT_FOUND') {
-      if (!deps.lsofUnavailableWarned) {
-        log.warn(`orphan-reaper: sweep skipped — ${report.error} (further occurrences suppressed until restart)`)
-        deps.lsofUnavailableWarned = true
-      }
+    // De-duplicate EVERY cannot-check reason per daemon (#8083, #8232): a
+    // host fact (no lsof, no `ps` in a slim image) is identical on every
+    // 5-minute sweep, so repeating the warning forever is pure spam. A reason
+    // still surfaces on every NEW occurrence — the first sighting, a
+    // different reason, or the same one returning after a successful sweep —
+    // and recovery is announced once below.
+    // Key on code AND message so two distinct failures sharing an err.code
+    // never collapse into one silenced warning; varying message data can only
+    // cause an extra warning, never silence.
+    const key = `${report.errorCode || ''}:${report.error}`
+    if (deps.skipWarnedKey !== key) {
+      log.warn(`orphan-reaper: sweep skipped — ${report.error} (repeats suppressed until the reason changes or a sweep succeeds)`)
+      deps.skipWarnedKey = key
+      deps.skipLabel = report.error
+      deps.skipStage = report.errorStage
+      deps.skipSuppressed = 0
     } else {
-      log.warn(`orphan-reaper: sweep skipped — ${report.error}`)
+      deps.skipSuppressed = (deps.skipSuppressed || 0) + 1
     }
     return report
+  }
+  // An error-free sweep only proves a stage that actually ran: the process
+  // listing runs every sweep, but the cwd lookup (lsof) runs only when there
+  // are candidates. A zero-candidate sweep must not clear a cwd-stage reason.
+  if (deps.skipWarnedKey !== undefined && (deps.skipStage !== 'cwd' || report.candidates > 0)) {
+    const n = (deps.skipSuppressed || 0) + 1
+    log.info(`orphan-reaper: sweeps resumed after ${n} skipped (${deps.skipLabel})`)
+    deps.skipWarnedKey = undefined
+    deps.skipLabel = undefined
+    deps.skipStage = undefined
+    deps.skipSuppressed = 0
+  }
+  // Positive signal (#8232): without it a healthy reaper and a dead one look
+  // the same in the log. First ok sweep says so; then at most one summary/hour.
+  // While a reason is still outstanding the line names it instead of "ok".
+  const nowMs = (deps.now || Date.now)()
+  deps.okSweepsSinceSummary = (deps.okSweepsSinceSummary || 0) + 1
+  const counts = `${report.scanned} scanned, ${report.candidates} candidate(s), ${report.reaped.length} reaped`
+  const outstanding = deps.skipWarnedKey !== undefined ? ` (${deps.skipStage} check still unavailable: ${deps.skipLabel})` : ''
+  if (deps.lastOkSummaryAt === undefined) {
+    log.info(outstanding
+      ? `orphan-reaper: sweep NOT fully ok${outstanding} — ${counts}`
+      : `orphan-reaper: sweep ok — ${counts}`)
+    deps.lastOkSummaryAt = nowMs
+    deps.okSweepsSinceSummary = 0
+  } else if (nowMs - deps.lastOkSummaryAt >= OK_SUMMARY_INTERVAL_MS) {
+    log.info(outstanding
+      ? `orphan-reaper: ${deps.okSweepsSinceSummary} sweep(s) since last summary, NOT fully ok${outstanding} (last: ${counts})`
+      : `orphan-reaper: ${deps.okSweepsSinceSummary} sweep(s) ok since last summary (last: ${counts})`)
+    deps.lastOkSummaryAt = nowMs
+    deps.okSweepsSinceSummary = 0
   }
   for (const r of report.reaped) {
     log.warn(`orphan-reaper: killed pid ${r.pid} (ppid 1, ${Math.round(r.ageMs / 60000)} min, cwd ${r.cwd}): ${r.args}`)
