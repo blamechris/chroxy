@@ -38,8 +38,9 @@
  * skipping the key: "cannot dirty this" must not read as "nothing to check".
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { resolve, join, relative, sep } from 'path'
 import ts from 'typescript'
 
 // connection.ts reads persisted settings at module scope (same idiom as the sibling
@@ -673,6 +674,10 @@ describe('#8488 derived roster of activeSessionId writers', () => {
     return found
   }
 
+  // The derivation is SYNTACTIC. It does not see a computed key (`{ [k]: v }`) or a spread of a
+  // foreign object (`set({ ...patch })`) that happens to carry `activeSessionId`. And an
+  // `Object.assign(patch, createEmptySessionPanels())` anywhere in the NEAREST enclosing block
+  // counts as covering a `patch.activeSessionId = ...` in that block, whatever their order.
   /** Every write of `activeSessionId` in one file: `{ activeSessionId: … }`, `{ activeSessionId }`, `x.activeSessionId = …`. */
   function findWriters(file: string, source: string): Writer[] {
     const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ES2020, true)
@@ -711,42 +716,82 @@ describe('#8488 derived roster of activeSessionId writers', () => {
     })
   }
 
-  const WRITERS: Writer[] = [
-    ...findWriters('connection.ts', storeSrc),
-    ...findWriters('message-handler.ts', handlerSrc),
-  ]
+  const SRC_ROOT = resolve(__dirname, '..')
+
+  /** Every non-test dashboard source file under `root`, as a posix path relative to it. */
+  function listSourceFiles(root: string): string[] {
+    const out: string[] = []
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name)
+        if (e.isDirectory()) {
+          if (e.name === '__tests__' || e.name === 'node_modules') continue
+          walk(full)
+        } else if (
+          /\.(ts|tsx)$/.test(e.name) && !/\.d\.ts$/.test(e.name) &&
+          !/\.test\.(ts|tsx)$/.test(e.name) && !/\.testSupport\.(ts|tsx)$/.test(e.name)
+        ) out.push(relative(root, full).split(sep).join('/'))
+      }
+    }
+    walk(root)
+    return out.sort()
+  }
+
+  function collectWriters(root: string): { files: string[]; writers: Writer[] } {
+    const files = listSourceFiles(root)
+    const writers: Writer[] = []
+    for (const f of files) {
+      const src = readFileSync(join(root, f), 'utf8')
+      if (!src.includes('activeSessionId')) continue // cannot hold a writer; saves a parse
+      writers.push(...findWriters(f, src))
+    }
+    return { files, writers }
+  }
+
+  const SCAN = collectWriters(SRC_ROOT)
+  const WRITERS: Writer[] = SCAN.writers
   const UNCOVERED = WRITERS.filter((w) => !w.covered).map((w) => w.id)
 
   // Writers that change `activeSessionId` WITHOUT the panel factory, each with its reason.
   // Keyed by the derived id, so a renamed function or a rewritten line goes red here rather
   // than silently re-exempting. Every entry must match an uncovered writer that exists.
   const EXEMPT: Record<string, string> = {
-    'connection.ts:switchSession:activeSessionId: sessionId#1':
+    'store/connection.ts:switchSession:activeSessionId: sessionId#1':
       'optimistic cached-branch write; the `set(createEmptySessionPanels())` ahead of both branches covers it',
-    'connection.ts:switchSession:activeSessionId: sessionId#2':
+    'store/connection.ts:switchSession:activeSessionId: sessionId#2':
       'optimistic uncached-branch write; the same preceding `set(createEmptySessionPanels())` covers it',
-    'connection.ts:(store-init):activeSessionId: null':
+    'store/connection.ts:(store-init):activeSessionId: null':
       'the initial store construction: the panels are constructed from the factory (completeness test)',
-    'connection.ts:loadSavedConnection:updates.activeSessionId = persisted.activeSessionId':
+    'store/connection.ts:loadSavedConnection:updates.activeSessionId = persisted.activeSessionId':
       'hydration at startup, before any panel is pulled; the panels hold their constructed (empty) values',
-    'connection.ts:retargetToServer:activeSessionId: persisted.activeSessionId':
+    'store/connection.ts:retargetToServer:activeSessionId: persisted.activeSessionId':
       'runs straight after `_resetSessionMemory()` in the same action, which spreads the factory',
-    'message-handler.ts:handleStreamDelta:activeSessionId: get().activeSessionId':
+    'App.tsx:App:activeSessionId':
+      'not a store write: a prop handed to useShortcutDispatch',
+    'store/persistence.ts:loadPersistedState:activeSessionId: activeSessionId || null':
+      'not a store write: the return value of the persisted-state READ (applied by the exempt hydration sites)',
+    'store/persistence.ts:loadPersistedState:activeSessionId: null':
+      'not a store write: the empty return value of the persisted-state READ',
+    'store/message-handler.ts:handleStreamDelta:activeSessionId: get().activeSessionId':
       'not a store write: a read-through argument handed to the shared delta handler',
   }
 
   it('non-vacuity: the derivation found the writers, including the three paths of #8488', () => {
     const ids = WRITERS.map((w) => w.id)
+    expect(SCAN.files.length, 'the file enumeration found (almost) no files').toBeGreaterThanOrEqual(100)
+    expect(SCAN.files).toContain('store/connection.ts')
+    expect(SCAN.files).toContain('store/message-handler.ts')
+    expect(SCAN.files.filter((f) => /\.test\.|testSupport|__tests__|\.d\.ts$/.test(f)), 'test/declaration files leaked in').toEqual([])
     expect(ids.length, 'the derivation found (almost) no writers').toBeGreaterThanOrEqual(13)
     const covered = WRITERS.filter((w) => w.covered).map((w) => w.id)
     for (const want of [
-      'message-handler.ts:handleSessionSwitched:activeSessionId: sessionId',
-      'message-handler.ts:dispatchFrame:activeSessionId: null#1',
-      'message-handler.ts:dispatchFrame:activeSessionId: null#2',
-      'message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#1',
-      'message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#2',
-      'connection.ts:forgetSession:activeSessionId: null',
-      'connection.ts:_resetSessionMemory:activeSessionId: null',
+      'store/message-handler.ts:handleSessionSwitched:activeSessionId: sessionId',
+      'store/message-handler.ts:dispatchFrame:activeSessionId: null#1',
+      'store/message-handler.ts:dispatchFrame:activeSessionId: null#2',
+      'store/message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#1',
+      'store/message-handler.ts:dispatchFrame:patch.activeSessionId = nextId#2',
+      'store/connection.ts:forgetSession:activeSessionId: null',
+      'store/connection.ts:_resetSessionMemory:activeSessionId: null',
     ]) {
       expect(covered.includes(want), `${want} is not found as a COVERED writer`).toBe(true)
     }
@@ -771,12 +816,29 @@ describe('#8488 derived roster of activeSessionId writers', () => {
 
   it('the derivation is red on a phantom exemption and on a phantom uncovered writer', () => {
     // The same predicates against phantoms, so both directions are permanent cells.
-    const phantomExempt = { ...EXEMPT, 'connection.ts:noSuchAction:activeSessionId: null': 'phantom' }
+    const phantomExempt = { ...EXEMPT, 'store/connection.ts:noSuchAction:activeSessionId: null': 'phantom' }
     expect(Object.keys(phantomExempt).filter((id) => !UNCOVERED.includes(id))).toEqual([
-      'connection.ts:noSuchAction:activeSessionId: null',
+      'store/connection.ts:noSuchAction:activeSessionId: null',
     ])
-    const phantomUncovered = [...UNCOVERED, 'message-handler.ts:newPath:activeSessionId: null']
-    expect(phantomUncovered.filter((id) => !(id in EXEMPT))).toEqual(['message-handler.ts:newPath:activeSessionId: null'])
+    const phantomUncovered = [...UNCOVERED, 'store/message-handler.ts:newPath:activeSessionId: null']
+    expect(phantomUncovered.filter((id) => !(id in EXEMPT))).toEqual(['store/message-handler.ts:newPath:activeSessionId: null'])
+  })
+
+  it('a writer in ANY other source file is seen, and is red until covered or exempt (throwaway fixture)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'reset-roster-'))
+    try {
+      mkdirSync(join(root, 'components'))
+      writeFileSync(join(root, 'components', 'Rogue.tsx'),
+        'export function Rogue() { useConnectionStore.setState({ activeSessionId: "x" }) }\n')
+      writeFileSync(join(root, 'components', 'Rogue.test.tsx'), 'x({ activeSessionId: 1 })\n')
+      const { files, writers } = collectWriters(root)
+      expect(files).toEqual(['components/Rogue.tsx'])
+      const uncovered = writers.filter((w) => !w.covered).map((w) => w.id)
+      expect(uncovered).toEqual(['components/Rogue.tsx:Rogue:activeSessionId: "x"'])
+      expect(uncovered.filter((id) => !(id in EXEMPT)), 'the roster check would not flag it').toEqual(uncovered)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('the parser really tells a covered literal from an uncovered one', () => {
@@ -843,7 +905,7 @@ describe('#8488 auth_ok route probe: non-reconnect connects arrive with the pane
     startedConnect(url, () => expectRoster(PANELS, PANEL_KEYS, `connect(${url})`))
   })
 
-  it('disconnect() then connect() to the same URL arrives non-reconnect with the panels already cleared', () => {
+  it('disconnect() clears the panels and keeps wsUrl, so a following same-URL connect() skips the self-clear with nothing stale', () => {
     setLastConnectedUrl(A_URL)
     seed({ wsUrl: A_URL, connectionPhase: 'connected' } as unknown as Partial<State>)
     useConnectionStore.getState().disconnect()

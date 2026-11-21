@@ -5914,8 +5914,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // message-handler.ts and the full-reset sites take too (#8488). Both branches
     // below run after this, so the switch is unconditional. The `session_switched`
     // echo of THIS switch arrives with an equal id and deliberately does not clear
-    // again (`handleSessionSwitched`), so a pull answered in between survives. Clearing on every switch is
-    // what stops the Settings "Permission history" view and the MemoryPanel (whose
+    // again (`handleSessionSwitched`), so a pull answered in between survives.
+    // Clearing on every switch is what stops the Settings "Permission history" view and the MemoryPanel (whose
     // `entries === null` mount-guard would otherwise never re-fire) rendering the
     // PREVIOUS session's data against the new one, and the loading/error flags
     // reset so an in-flight pull for the old session cannot wedge the button.
