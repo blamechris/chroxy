@@ -40,6 +40,27 @@
 #   scripts/preview-daemon.sh status <smoke-dir>   exit 0 only if it is up and healthy
 #   scripts/preview-daemon.sh stop   <smoke-dir>   SIGTERM the recorded PID, PID-guarded
 #   scripts/preview-daemon.sh clean  <smoke-dir>   stop, then remove the dir (it holds the token)
+#   scripts/preview-daemon.sh sweep  [--dry-run] [--force]   reap ABANDONED previews (#8742)
+#       Looks at every preview dir directly under the previews root. AGE is what
+#       reaps automatically: a preview older than PREVIEW_DAEMON_MAX_AGE seconds
+#       (default 21600, 6 h) is stopped (PID-guarded) and removed. A preview whose
+#       recorded daemon PID is not running is just removed (nothing is signalled).
+#       The recorded LAUNCHER (launcher_pid + launcher_started in preview.json) is
+#       ADVISORY only: it is the immediate parent of `start`, which is often a
+#       short-lived shell (every agent tool call is its own shell; `$(...)` and
+#       pipes fork a subshell that exits when start returns), so a gone launcher
+#       does not prove the run is over. By default a gone or PID-reused launcher is
+#       only REPORTED. --force additionally stops+removes such a preview, but only
+#       once it is at least PREVIEW_DAEMON_FORCE_MIN_AGE seconds old (default 1800,
+#       30 min), so even a forced sweep cannot reap a smoke that just started.
+#       Records without launcher fields are only ever reaped by age or a dead
+#       daemon (their age is the preview.json mtime). If the recorded PID now
+#       belongs to ANOTHER process the preview is dead: it is reported, and once
+#       stale (older than max age, or --force past the grace with a gone launcher)
+#       its dir is removed WITHOUT signalling anything. Stops only go through the
+#       PID-guarded stop. One line per preview; exit 0 if all were handled, 4 if a
+#       stop was refused, 1 on any other failure. --dry-run changes nothing.
+#       `start` does NOT sweep on its own.
 #
 # Then:  node packages/server/tests/smoke-test.mjs --preview <smoke-dir>/preview.json
 #
@@ -53,7 +74,8 @@
 #     "baseUrl":"http://127.0.0.1:18470","defaultModel":"stub","models":["stub"]}]}}
 #
 # Exit codes: 0 ok, 1 failure, 2 usage / refused configuration,
-#             3 --expect-head mismatch, 4 stop/clean refused (PID is not ours).
+#             3 --expect-head mismatch, 4 stop/clean refused (PID is not ours;
+#             for sweep: any preview's stop was refused).
 #
 # Safety properties (each is proven by scripts/__tests__/preview-daemon.test.sh):
 #   - The daemon starts under `env -i` with an ALLOWLIST (HOME USER TERM LANG
@@ -87,7 +109,10 @@
 # Test hooks (not for normal use): PREVIEW_DAEMON_CLI (daemon entry point),
 # PREVIEW_DAEMON_PORT (fixed port), PREVIEW_DAEMON_SKIP_BUILD=1,
 # PREVIEW_DAEMON_HEALTH_TIMEOUT (seconds), PREVIEW_DAEMON_PARENT,
-# PREVIEW_DAEMON_NODE_DIR.
+# PREVIEW_DAEMON_NODE_DIR, PREVIEW_DAEMON_LAUNCHER_PID (record this PID as the
+# launcher instead of the script's parent; use when `start` runs under a
+# short-lived wrapper), PREVIEW_DAEMON_MAX_AGE (sweep max age, seconds),
+# PREVIEW_DAEMON_FORCE_MIN_AGE (sweep --force grace, seconds).
 
 set -uo pipefail
 
@@ -188,6 +213,13 @@ pid_ownership() {
   esac
 }
 
+# Start time of a process as ps prints it (1 s resolution), whitespace-normalised;
+# empty when the process does not exist. Used to tell a launcher from a later
+# process that reused its PID.
+proc_lstart() {
+  ps -o lstart= -p "$1" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//' -e 's/  */ /g'
+}
+
 # --- subcommands ----------------------------------------------------------
 cmd_stop() {
   local smoke pid port rc i
@@ -222,9 +254,10 @@ cmd_stop() {
   echo "port $port is free"
 }
 
-cmd_clean() {
-  local smoke base
-  smoke="$(canonical_dir "${1:-${PREVIEW_DAEMON_DIR:-}}")" || exit $?
+# Refuse (exit 4) unless $1 (a canonical path) is a dir this script created,
+# directly under the previews root. Shared by clean and the sweep's no-signal remove.
+guard_removable() {
+  local smoke="$1" base
   base="$(basename "$smoke")"
   case "$base" in "$MARKER"*) ;; *) die "REFUSING to remove $smoke: not a $MARKER* dir" 4 ;; esac
   [ -f "$smoke/preview.json" ] && [ -d "$smoke/config" ] \
@@ -233,9 +266,113 @@ cmd_clean() {
     || die "REFUSING to remove $smoke: the previews root does not exist" 4
   [ "$(dirname "$smoke")" = "$want_parent" ] \
     || die "REFUSING to remove $smoke: not directly under the previews root $want_parent" 4
+}
+
+cmd_clean() {
+  local smoke
+  smoke="$(canonical_dir "${1:-${PREVIEW_DAEMON_DIR:-}}")" || exit $?
+  guard_removable "$smoke"
   cmd_stop "$smoke"   # exits non-zero (leaving $smoke) if the daemon cannot be stopped
   rm -rf -- "$smoke"
   echo "removed $smoke"
+}
+
+# Remove a preview dir whose daemon is already gone, signalling NOTHING (the
+# recorded PID now belongs to another process). Same removal guards as clean.
+cmd_remove_dead() {
+  local smoke
+  smoke="$(canonical_dir "${1:-}")" || exit $?
+  guard_removable "$smoke"
+  rm -rf -- "$smoke"
+  echo "removed $smoke"
+}
+
+# Reap abandoned previews (#8742). Only ever acts on dirs directly under the
+# previews root that carry a preview.json; stops only via cmd_stop's PID guard.
+cmd_sweep() {
+  local dry=0 force=0 minage parent d name pid lp ls_rec started now age maxage cur action reason rc out worst=0 n=0 dstate lgone stale forceable note
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      --force) force=1; shift ;;
+      *) usage ;;
+    esac
+  done
+  maxage="${PREVIEW_DAEMON_MAX_AGE:-21600}"
+  case "$maxage" in ''|*[!0-9]*) die "PREVIEW_DAEMON_MAX_AGE is not a number: $maxage" 2 ;; esac
+  [ "$maxage" -ge 1 ] || die "PREVIEW_DAEMON_MAX_AGE must be at least 1: $maxage" 2
+  minage="${PREVIEW_DAEMON_FORCE_MIN_AGE:-1800}"
+  case "$minage" in ''|*[!0-9]*) die "PREVIEW_DAEMON_FORCE_MIN_AGE is not a number: $minage" 2 ;; esac
+  [ "$minage" -ge 1 ] || die "PREVIEW_DAEMON_FORCE_MIN_AGE must be at least 1: $minage" 2
+  NODE_BIN="$(resolve_node_dir)" || die "no Node 22 found (set PREVIEW_DAEMON_NODE_DIR)" 1
+  parent="${PREVIEW_DAEMON_PARENT:-${HOME:-/nonexistent}/chroxy-previews}"
+  if [ ! -d "$parent" ]; then echo "no previews root at $parent; nothing to sweep"; return 0; fi
+  parent="$(cd "$parent" && pwd -P)" || die "cannot enter $parent" 1
+  now="$(date +%s)"
+
+  for d in "$parent/$MARKER"*; do
+    [ -e "$d" ] || [ -L "$d" ] || continue
+    name="$(basename "$d")"
+    if [ -L "$d" ]; then echo "$name: skip (symlink; never touched)"; continue; fi
+    [ -d "$d" ] || continue
+    if [ ! -f "$d/preview.json" ]; then echo "$name: skip (no preview.json)"; continue; fi
+    n=$((n + 1))
+    pid="$(rec "$d" pid 2>/dev/null)"
+    case "$pid" in ''|*[!0-9]*) echo "$name: FAILED (preview.json has no usable pid; not touching it)"; [ "$worst" -eq 4 ] || worst=1; continue ;; esac
+
+    # Age: started_at (epoch s), else the record's mtime for legacy files.
+    started="$(rec "$d" started_at 2>/dev/null)"
+    case "$started" in ''|*[!0-9]*) started="$("$NODE_BIN/node" -e 'process.stdout.write(String(Math.floor(require("fs").statSync(process.argv[1]).mtimeMs/1000)))' "$d/preview.json" 2>/dev/null)" ;; esac
+    case "$started" in ''|*[!0-9]*) started="$now" ;; esac
+    age=$((now - started))
+
+    pid_ownership "$pid" "$d"; dstate=$?
+    action=''; reason=''; lgone=''
+    lp="$(rec "$d" launcher_pid 2>/dev/null)"; ls_rec="$(rec "$d" launcher_started 2>/dev/null)"
+    case "$lp" in ''|*[!0-9]*) lp='' ;; esac
+    # The launcher is ADVISORY (the immediate parent of start, often a short-lived
+    # shell): a gone one is reported, never grounds for a signal by itself.
+    if [ -n "$lp" ] && [ -n "$ls_rec" ]; then
+      cur="$(proc_lstart "$lp")"
+      if [ -z "$cur" ]; then lgone="launcher pid $lp is gone"
+      elif [ "$cur" != "$ls_rec" ]; then lgone="launcher pid $lp was reused (started \"$cur\", recorded \"$ls_rec\")"
+      fi
+    fi
+    stale=0; [ "$age" -gt "$maxage" ] && stale=1
+    forceable=0; [ "$force" -eq 1 ] && [ -n "$lgone" ] && [ "$age" -ge "$minage" ] && forceable=1
+    if [ "$dstate" -eq 1 ]; then
+      action="clean"; reason="daemon pid $pid is not running"
+    elif [ "$dstate" -eq 4 ]; then
+      note="daemon pid $pid now belongs to another process; the preview is dead"
+      if [ "$stale" -eq 1 ]; then action="remove"; reason="$note; older than max age (${age}s > ${maxage}s)"
+      elif [ "$forceable" -eq 1 ]; then action="remove"; reason="$note; $lgone, --force past ${minage}s"
+      else echo "$name: report: $note (dir kept until older than ${maxage}s, age ${age}s)"; continue; fi
+    elif [ "$stale" -eq 1 ]; then
+      action="stop+clean"; reason="older than max age (${age}s > ${maxage}s)"
+    elif [ "$forceable" -eq 1 ]; then
+      action="stop+clean"; reason="$lgone, --force past ${minage}s (age ${age}s)"
+    elif [ -n "$lgone" ]; then
+      if [ "$force" -eq 1 ]; then echo "$name: report: $lgone; --force grace not reached (age ${age}s < ${minage}s); kept"
+      else echo "$name: report: $lgone (advisory; pass --force to stop+clean once older than ${minage}s); kept"; fi
+      continue
+    else
+      if [ -n "$lp" ] && [ -n "$ls_rec" ]; then echo "$name: keep (launcher pid $lp alive, age ${age}s <= ${maxage}s)"
+      else echo "$name: keep (legacy record without launcher fields; daemon alive, age ${age}s <= ${maxage}s)"; fi
+      continue
+    fi
+
+    if [ "$dry" -eq 1 ]; then echo "$name: would $action ($reason)"; continue; fi
+    if [ "$action" = remove ]; then out="$( ( cmd_remove_dead "$d" ) 2>&1 )"; rc=$?
+    else out="$( ( cmd_clean "$d" ) 2>&1 )"; rc=$?; fi
+    if [ "$rc" -eq 0 ]; then
+      echo "$name: $action ($reason): ok"
+    else
+      echo "$name: $action ($reason): FAILED rc=$rc: $(printf '%s' "$out" | tail -n 1)"
+      if [ "$rc" -eq 4 ]; then worst=4; elif [ "$worst" -ne 4 ]; then worst=1; fi
+    fi
+  done
+  [ "$n" -gt 0 ] || echo "no previews to sweep under $parent"
+  return "$worst"
 }
 
 cmd_url() {
@@ -507,11 +644,20 @@ cmd_start() {
   [ "$listeners" = "$pid" ] \
     || fail_start "listener on :$port is [${listeners:-none}], not the launched pid $pid"
 
+  # Launcher identity for `sweep` (#8742): the process that ran this script, plus its
+  # start time so a reused PID is not mistaken for it. Omitted when ps cannot say.
+  local launcher_pid launcher_started
+  launcher_pid="${PREVIEW_DAEMON_LAUNCHER_PID:-$PPID}"
+  case "$launcher_pid" in ''|*[!0-9]*) launcher_pid='' ;; esac
+  launcher_started=''
+  [ -z "$launcher_pid" ] || launcher_started="$(proc_lstart "$launcher_pid")"
+  [ -n "$launcher_started" ] || launcher_pid=''
   "$NODE_BIN/node" -e '
-    const [, out, pid, port, configDir, fixture, head] = process.argv
-    require("fs").writeFileSync(out, JSON.stringify({
-      pid: Number(pid), port: Number(port), configDir, fixture, head,
-    }, null, 2) + "\n")' "$smoke/preview.json" "$pid" "$port" "$smoke/config" "$smoke/fixture" "$head" \
+    const [, out, pid, port, configDir, fixture, head, startedAt, lpid, lstart] = process.argv
+    const rec = { pid: Number(pid), port: Number(port), configDir, fixture, head, started_at: Number(startedAt) }
+    if (lpid && lstart) { rec.launcher_pid = Number(lpid); rec.launcher_started = lstart }
+    require("fs").writeFileSync(out, JSON.stringify(rec, null, 2) + "\n")' \
+    "$smoke/preview.json" "$pid" "$port" "$smoke/config" "$smoke/fixture" "$head" "$(date +%s)" "$launcher_pid" "$launcher_started" \
     || fail_start "could not write preview.json"
 
   START_OK=1
@@ -522,7 +668,7 @@ cmd_start() {
 }
 
 case "${1:-}" in
-  start|url|status|stop|clean) preflight ;;
+  start|url|status|stop|clean|sweep) preflight ;;
 esac
 case "${1:-}" in
   start)  shift; cmd_start "$@" ;;
@@ -530,5 +676,6 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   stop)   shift; cmd_stop "$@" ;;
   clean)  shift; cmd_clean "$@" ;;
+  sweep)  shift; cmd_sweep "$@" ;;
   *)      usage ;;
 esac
