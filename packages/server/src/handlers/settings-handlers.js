@@ -29,7 +29,7 @@ import {
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from '../providers.js'
 import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
-import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
+import { createLogger, loggableValue, loggerForSession, sessionLogger } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
 import { isPrincipalClient, refusePrincipalHandler, sendPrincipalRefusal } from '../principal-policy.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
@@ -206,7 +206,7 @@ function handleSetModel(ws, client, msg, ctx) {
         } catch (err) {
           // Roster unavailable: cannot resolve an alias, so refuse below —
           // but leave a trace (#9153) so a broken lookup is not silent.
-          log.warn(`set_model roster lookup failed for provider '${entry.provider}' model '${msg.model}': ${err?.message || err}`)
+          log.warn(`set_model roster lookup failed for provider '${entry.provider}' model ${loggableValue(msg.model)}: ${loggableValue(String(err?.message || err))}`)
         }
         // The re-check below is what refuses a target that is off the list.
         if (row && typeof row.fullId === 'string') {
@@ -219,7 +219,7 @@ function handleSetModel(ws, client, msg, ctx) {
         // sessionId, so fall back to the module-level `log` rather than
         // throwing inside loggerForSession (matches the input-handlers
         // pattern from #4823).
-        ;sessionLogger(modelSessionId).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        ;sessionLogger(modelSessionId).warn(`Rejected model ${loggableValue(msg.model)} on ${entry.provider} session ${modelSessionId} from ${client.id}`)
         sendError(
           ws,
           msg?.requestId,

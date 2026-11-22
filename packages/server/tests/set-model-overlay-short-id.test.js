@@ -9,6 +9,7 @@ import {
   _resetModelsOverlayForTests,
   _resetProviderRegistryCacheForTests,
 } from '../src/models.js'
+import { _unregisterProviderRegistryForTests } from '../src/models.js'
 import { getProvider, registerProvider } from '../src/providers.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
@@ -127,11 +128,12 @@ describe('#9153 roster lookup failure and alias collision', () => {
       const warn = entries.find((e) => e.level === 'warn'
         && e.message.includes('roster lookup failed')
         && e.message.includes(THROWING)
-        && e.message.includes('chosen'))
+        && e.message.includes('"chosen"'))
       assert.ok(warn, 'expected a roster-lookup warning naming provider and requested id')
       assert.ok(warn.message.includes('roster boom'), 'warning carries the error message')
     } finally {
       removeLogListener(listener)
+      _unregisterProviderRegistryForTests(THROWING)
     }
   })
 
@@ -143,10 +145,11 @@ describe('#9153 roster lookup failure and alias collision', () => {
       'model-one': { provider: PROVIDER, shortId: 'clash', label: 'A' },
       clash: { provider: PROVIDER, label: 'B' },
     })
-    const { session, messages } = run('clash')
+    const { session, broadcast, messages } = run('clash')
     assert.equal(messages.length, 0, 'no error frame')
     assert.equal(session.setModel.callCount, 1)
     assert.equal(session.setModel.lastCall[0], 'model-one')
+    assert.deepEqual(broadcast.lastCall.slice(1), [{ type: 'model_changed', model: 'model-one' }])
   })
 
   it('the colliding row alone (target off the list) is still refused', () => {
@@ -154,5 +157,22 @@ describe('#9153 roster lookup failure and alias collision', () => {
     const { session, messages } = run('clash')
     assert.equal(session.setModel.callCount, 0)
     assert.equal(messages[0].code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+  })
+
+  it('logs a client-supplied model id through loggableValue: newline escaped, one entry', () => {
+    setup({ 'model-one': { provider: PROVIDER, shortId: 'chosen', label: 'First' } })
+    const entries = []
+    const listener = (e) => { entries.push(e) }
+    addLogListener(listener)
+    try {
+      const { messages } = run('bad\n[INFO] forged entry')
+      assert.equal(messages[0].code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+    } finally {
+      removeLogListener(listener)
+    }
+    const rejected = entries.filter((e) => e.message.includes('Rejected model'))
+    assert.equal(rejected.length, 1, 'exactly one rejection entry')
+    assert.ok(!rejected[0].message.includes('\n'), 'no raw newline in the entry')
+    assert.ok(rejected[0].message.includes('bad\\n[INFO] forged entry'), 'newline is escaped')
   })
 })
