@@ -225,6 +225,10 @@ export const MUTANTS = {
   'I1d.counted': withPolicy({ roundShowCounters: (c) => ({ ...c, presentation: c.presentation + 1, shows_counted: c.shows_counted + 1, round_shows: (c.round_shows ?? 0) + 1 }) }),
   // An ask that joins is shown even with the item's counted shows used.
   'I13.none': withPolicy({ newAskShows: () => true }),
+  // An investigation left open by a tick never replayed stays open.
+  'I7h.abandoned': withPolicy({ closeAbandonedInvestigations: false }),
+  // A surfacing decision of a tick never replayed is never applied.
+  'I11.abandoned': withPolicy({ recoverAbandonedSignals: false }),
   // The owner item closes when its first ask ends, though another is live.
   'I10.close': withPolicy({ closesOnAskEnd: () => true }),
   // The earlier rule: a prompt ask is added only on the prompt's own id, so

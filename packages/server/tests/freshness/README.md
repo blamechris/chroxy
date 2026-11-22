@@ -79,7 +79,7 @@ payload is ignored; with a different payload it appends one
 | check inside an investigation | H(investigation id, read number): 1 the re-read, 2 its retry, 3 the gone confirmation, 4 a separate activity read |
 | activity seen at a read | H(check id, basis, ref) |
 | activity event | H(session, 'event', host event id), else H(session, basis, time) |
-| investigation | H(investigation id, phase); id = H(session, report, trigger, onset, cycle), or per tick for a recheck |
+| investigation | H(investigation id, phase); id = H(session, report, trigger, onset, cycle), or per tick for a recheck; H(that id, 'after_abandoned') once for each earlier investigation of that id closed as abandoned |
 | surface | H(item, episode, step, ordinal, phase) |
 | owner_ack | H(item, episode, message id, phase) |
 | config | H(previous config record, config hash) |
@@ -397,7 +397,12 @@ node --import ./tests/_setup.mjs --test 'tests/freshness/*.test.js'
 FRESHNESS_SOAK=1 node --import ./tests/_setup.mjs --test tests/freshness/generated.test.js
 ```
 
-The default run uses fixed seeds and takes a few seconds. The soak runs
+The default run uses fixed seeds and takes a few seconds. A crashed tick is
+replayed in its own slot, or, for some crashes (chosen from a separate
+random stream, so a seed's events are unchanged up to its first such
+restart), the process comes back only after the slot has passed and the
+source's next tick, in a later slot, runs instead; until it has, only the
+checks that hold mid-tick are made. The soak runs
 4,000 sequences of the default length and 600 of 600 steps, and takes a few
 minutes.
 
@@ -427,14 +432,14 @@ ledger and the simulated world for inspection.
 | I4c | The model's open items equal the monitor's own account of the ledger |
 | I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it; and a prompt ask added for a prompt an earlier ask of the item opened on is added only while that prompt is pending at the session's latest live read, and at most once after each ending of a prompt ask of the item, with no prompt ask added in between |
 | I6 | An exhausted item sends nothing unless its content changed while a counted show remained, or a prompt round is owed its show |
-| I7a | At most two cycles per onset, onsets derived by the monitor itself |
+| I7a | At most two cycles per onset, onsets derived by the monitor itself; an investigation closed as abandoned is no cycle |
 | I7b | At most one investigation per session per tick |
 | I7c | Both budgets respected |
 | I7d | Rechecks never take a cycle that a stale session needs |
 | I7e | A held trigger gets its first cycle within a bound |
 | I7f | A stale, unexplained report is surfaced within a bound |
 | I7g | No session is rechecked as working while nothing is there |
-| I7h | Every investigation that opens closes in the same tick |
+| I7h | Every investigation that opens closes in the same tick, or, when that tick was killed and never replayed, is closed as abandoned by a later tick of its source, deciding nothing; an investigation is closed as abandoned only then |
 | I7i | An investigation is opened only for a trigger the monitor also sees holding |
 | I8 | Freshness never improves for one report under one configuration |
 | I8b | Graded freshness equals the monitor's own computation, a source clock off by more than the limit giving `error` on any read the adapter answered (a read with no status line included); and a read so graded has outcome `error`, no report and no native state |
@@ -474,6 +479,13 @@ round owed, the two accounts would disagree on whether a show was the
 round's, which shows as I1d (the stored round count) on that record, or as
 I2 (the slot holder) at the end of the step.
 
+An investigation's `abandoned` close is the model's own label: the monitor
+checks that the tick that opened it never closed, that a later tick of the
+same source closed it and that it surfaced nothing, and then counts it as no
+cycle; it does not check that the model closes every such investigation at
+the first chance, only that none is left open at the end of a step that
+leaves no crashed tick waiting for its source's next tick.
+
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
 that the named invariant goes red.
@@ -505,7 +517,14 @@ of the current run); investigation re-reads do not count toward
 
 **reconciler.js.** Configuration records store the full values.
 
-**investigation.js.** The source-level investigation uses the cycle budget.
+**investigation.js.** A tick killed by a crash is replayed only in its own
+slot. When the process comes back after the slot has passed, the source's
+next tick closes each investigation the crashed tick left open as
+`abandoned` (no rungs, no decision, no cycle), and the next investigation
+of that onset and cycle takes a derived id, so no open record repeats a key;
+the signals of the investigations the crashed tick did close are applied by
+that next tick, unless the item's closing evidence has arrived since, until
+a later tick of the source closes. The source-level investigation uses the cycle budget.
 An attention item raised by a recheck opens on the onset of the cycle that
 led to it, so a dismissal holds. The investigation's undefined `remainder`
 field is replaced by the decision it led to.

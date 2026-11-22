@@ -280,6 +280,19 @@ function foldInvestigation(state, r) {
     }
     state.investigations.set(b.investigation_id, inv)
   }
+  // An abandoned investigation (its tick was never replayed) decided
+  // nothing: it closes, but counts as no cycle and is no session's latest.
+  if (b.phase === 'close' && b.classification === 'abandoned') {
+    if (!inv.closed) {
+      inv.closed = true
+      inv.abandoned = true
+      inv.classification = b.classification
+      inv.closeSeq = r.seq
+      const o = inv.trigger === 'recheck' ? null : state.onsets.get(onsetKey(inv))
+      if (o) o.open = null
+    }
+    return
+  }
   if (b.trigger === 'recheck') return foldInvestigationPhase(state, inv, b, r)
   const ok = onsetKey(inv)
   let o = state.onsets.get(ok)
@@ -573,6 +586,9 @@ function foldTick(state, r) {
   }
   if (b.phase === 'close') {
     t.closed = true
+    // An earlier tick of the source that never closed (a crash, never
+    // replayed) is superseded: nothing more is taken from it.
+    for (const o of state.ticks.values()) if (o.source === b.source && !o.closed && o.id !== b.tick_id) o.superseded = true
     state.lastClosedTick.set(b.source, { slot: b.slot_start, id: b.tick_id })
     state.sourceTrigger.set(b.source, { held: Boolean(b.source_all_failed), onset: b.source_onset ?? null })
     // A handover belongs to the tick that closed the item: by this record it

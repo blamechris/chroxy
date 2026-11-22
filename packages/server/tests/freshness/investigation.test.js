@@ -2,7 +2,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { itemIds } from './model/keys.js'
 import { DEFAULT_POLICY } from './model/policy.js'
-import { MIN, OWNER, T0, createHarness } from './helpers/harness.js'
+import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
+import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
 import { LITERAL, MUTANTS, staleOwnerBlockInconclusive } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
@@ -439,4 +440,72 @@ describe('disappearance and outages', () => {
     assert.ok(!h.item(att.itemId).open)
   })
 
+})
+
+describe('a tick killed by a crash and never replayed (the process back in a later slot)', () => {
+  // A blocked line on CI, stale at the tick at +90 (blocked_unresolved,
+  // surfaced after the first cycle). That tick is killed at every operation;
+  // after the restart the source's next tick runs in the next slot.
+  const SHORT = { freshness: { blocked: { fresh_max_s: 600, stale_after_s: 3600 } } }
+  function killed(op, policy) {
+    const h = setup(SHORT, policy)
+    const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+    const x = session(h, 'codex', 'x')
+    W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'waiting on CI' })
+    for (const m of [15, 30, 45, 60]) {
+      h.tick('codex', T0 + m * MIN)
+      checkStep(mon, h)
+    }
+    let crashed = false
+    try {
+      h.tick('codex', T0 + 75 * MIN, { crashAfter: op })
+    } catch (e) {
+      if (!(e instanceof Crash)) throw e
+      crashed = true
+      checkStep(mon, h, { complete: false })
+      h.restart()
+    }
+    h.tick('codex', T0 + 90 * MIN)
+    checkStep(mon, h)
+    return { h, x, crashed }
+  }
+
+  it('killed at every operation: no conflict, no investigation left open, the session surfaced exactly once', () => {
+    let points = 0
+    let abandoned = 0
+    for (let op = 0; ; op++) {
+      const { h, x, crashed } = killed(op)
+      assert.equal(h.conflicts().length, 0, `no conflict: crash at op ${op}`)
+      assert.ok([...h.ctx.state.investigations.values()].every((i) => i.closed), `nothing left open: crash at op ${op}`)
+      const decided = invs(h, x.sk).filter((i) => !i.abandoned).map((i) => `${i.cycle}:${i.classification}`)
+      assert.deepEqual(decided, ['1:blocked_unresolved'], `one cycle decided: crash at op ${op}`)
+      const att = h.item(itemIds.attention(x.s, h.ctx.state.sessions.get(x.sk).latestAuthored))
+      assert.ok(att?.open, `surfaced: crash at op ${op}`)
+      assert.equal(att.episode, 1)
+      abandoned += invs(h, x.sk).filter((i) => i.abandoned).length
+      if (!crashed) break
+      points += 1
+    }
+    assert.ok(points > 3, `${points} crash points exercised`)
+    assert.ok(abandoned > 0, 'some crash point left an investigation open')
+  })
+
+  // Left open, the abandoned investigation is the same onset and cycle as the
+  // next one, so their open records share a key: I3a here (I7h in the
+  // generated proof, where the next onset differs).
+  it('mutations: an abandoned investigation left open turns I3a red; a decision of the crashed tick never applied turns I11 red', () => {
+    const redAt = (policy, id) => {
+      for (let op = 0; op < 60; op++) {
+        try {
+          if (!killed(op, policy).crashed) return false
+        } catch (e) {
+          if (e instanceof InvariantError && e.id === id) return true
+          throw e
+        }
+      }
+      return false
+    }
+    assert.ok(redAt(MUTANTS['I7h.abandoned'], 'I3a'))
+    assert.ok(redAt(MUTANTS['I11.abandoned'], 'I11'))
+  })
 })

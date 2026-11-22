@@ -87,6 +87,8 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     tickChecks: new Map(),
     lastTickOf: new Map(),
     tickOpenSeq: new Map(),
+    tickSource: new Map(),
+    closedTicks: new Set(),
     scopes: new Map(),
     configs: new Map(),
     checkAct: new Map(),
@@ -361,7 +363,9 @@ function onRecord(mon, h, r) {
       if (b.evidence_class === 'E2' && !mon.firstAuthored.has(sk)) mon.firstAuthored.set(sk, { at: b.last_report_at, scope: mon.scopes.get(sk) ?? null })
       break
     case 'tick':
+      if (b.phase === 'close') mon.closedTicks.add(b.tick_id)
       if (b.phase === 'open') {
+        mon.tickSource.set(b.tick_id, b.source)
         mon.lastTickOf.set(b.source, b.tick_id)
         mon.tickOpenSeq.set(b.tick_id, r.seq)
         mon.currentTick = b.tick_id
@@ -422,7 +426,7 @@ function onRecord(mon, h, r) {
       const tick = r.refs?.tick
       if (b.phase === 'open') {
         mon.stats.investigations += 1
-        mon.openInv.set(b.investigation_id, true)
+        mon.openInv.set(b.investigation_id, { tick, source: b.source, sk, trigger: b.trigger, run: null })
         if (b.onset) mon.onsetTrigger.set(b.onset, b.trigger)
         const who = b.source_level ? `src:${b.source}` : sk
         const ts = `${tick}|${who}`
@@ -458,10 +462,22 @@ function onRecord(mon, h, r) {
             const run = mon.runs.get(sk)?.[b.trigger]
             if (!run) fail('I7i', `an investigation was opened for ${b.trigger}, which the monitor does not see holding`)
             run.cycles += 1
+            mon.openInv.get(b.investigation_id).run = run
             if (run.cycles > 2) fail('I7a', `${run.cycles} cycles of ${b.trigger} in one unbroken run of the trigger`)
           }
         }
       } else if (b.phase === 'close') {
+        const opened = mon.openInv.get(b.investigation_id)
+        if (b.classification === 'abandoned') {
+          // I7h: an investigation is closed as abandoned only when the tick
+          // that opened it never closed, and only by a later tick of its own
+          // source. It decided nothing, so it is no cycle of its onset (I7a).
+          if (!opened) fail('I7h', 'an investigation that is not open was closed as abandoned')
+          if (mon.closedTicks.has(opened.tick) || tick === opened.tick || mon.tickSource.get(tick) !== opened.source) fail('I7h', 'an investigation was closed as abandoned though its own tick closed, or by a tick of another source')
+          if (b.surface != null) fail('I7h', 'an abandoned investigation surfaced something')
+          if (opened.run) opened.run.cycles -= 1
+          mon.stats.abandoned = (mon.stats.abandoned ?? 0) + 1
+        }
         mon.openInv.delete(b.investigation_id)
         if (b.trigger === 'recheck' && b.classification === 'no_longer_observed' && sk) {
           const run = mon.runs.get(sk)?.stale_report

@@ -433,6 +433,14 @@ export const DEFAULT_POLICY = Object.freeze({
     return rec && rec.kind === kind ? rec : null
   },
 
+  // ── a tick never replayed ──
+  // A tick killed by a crash, with the process back only after its slot has
+  // passed, is never replayed. The source's next tick closes the
+  // investigations it left open as `abandoned` (no cycle, no decision), and
+  // applies the signals of those it did close. Read by investigation.js.
+  closeAbandonedInvestigations: true,
+  recoverAbandonedSignals: true,
+
   // ── investigation ──
   // DESIGN-GAP: several triggers can hold at once, and the rules allow one
   // investigation per session per tick without saying which. Fixed order.
