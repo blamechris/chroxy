@@ -8014,6 +8014,10 @@ button.sidebar-token-view-session-row:hover {
   cursor: pointer;
   font-size: var(--text-sm);
   padding: 4px 0;
+  /* #9144: 44px tap-target floor (AGENTS.md). Grown visibly, no hitSlop on web. */
+  min-height: 44px;
+  min-width: 44px;
+  text-align: left;
 }
 .advanced-toggle-btn:hover {
   color: var(--text-primary);
