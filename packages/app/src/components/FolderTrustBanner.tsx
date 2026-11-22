@@ -327,7 +327,8 @@ const styles = StyleSheet.create({
   },
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    // The app's base background at 80% alpha: dims the screen behind the dialog.
+    backgroundColor: `${COLORS.backgroundPrimary}cc`,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -411,7 +412,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   primaryButtonText: {
-    color: '#fff',
+    color: COLORS.textPrimary,
     fontSize: 14,
     fontWeight: '600',
   },
