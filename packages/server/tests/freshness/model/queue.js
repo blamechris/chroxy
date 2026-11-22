@@ -123,12 +123,31 @@ function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, 
   return true
 }
 
+/**
+ * The verification of an acknowledgment, written once.
+ *
+ * DESIGN-GAP: two steps verify an acknowledgment, the tick that finds
+ * closing evidence (verified) and the tick that finds none (not verified),
+ * under one key. A crash after one of them wrote it and before its step, and
+ * a next tick in a later slot that finds the other answer, would rewrite it
+ * with another result: an idempotency_conflict. The model writes the
+ * verification once, whichever comes first, and never rewrites it; it is
+ * looked up like a recorded read. A later tick that finds the item still
+ * acknowledged does what the evidence then says, without a second record:
+ * closing evidence resolves it by the "any open, closing evidence" row, and
+ * no closing evidence completes the failed-verification step (returned or
+ * exhausted), which is sent at most once, as every send is. The item holds
+ * the slot as acknowledged until then, and no other item takes it.
+ */
+function* verification(ctx, item, verified, now) {
+  const vk = ownerAckKey(item.itemId, item.episode, item.ack.ackRef, 'verify')
+  if (ctx.policy.reuseRecorded(ctx.state.index, vk, 'owner_ack')) return
+  yield put({ kind: 'owner_ack', id: vk, session: envOf(item), body: { item_id: item.itemId, episode: item.episode, ack_ref: item.ack.ackRef, phase: 'verify', intent: 'done', basis: 'owner_direct', verified } }, now)
+}
+
 function* resolve(ctx, item, { now, evidence, closingAsk }) {
   yield* clearCarried(ctx, item, now)
-  if (item.state === 'acknowledged' && item.ack) {
-    const vk = ownerAckKey(item.itemId, item.episode, item.ack.ackRef, 'verify')
-    yield put({ kind: 'owner_ack', id: vk, session: envOf(item), body: { item_id: item.itemId, episode: item.episode, ack_ref: item.ack.ackRef, phase: 'verify', intent: 'done', basis: 'owner_direct', verified: true } }, now)
-  }
+  if (item.state === 'acknowledged' && item.ack) yield* verification(ctx, item, true, now)
   yield* step(ctx, item, 'resolved', { now, extra: { resolution_evidence: evidence ?? null, ...(closingAsk ? { closing_ask: closingAsk } : {}) } })
 }
 
@@ -679,8 +698,7 @@ function* verifyAcknowledged(ctx, { source, now, tickOpenSeq }) {
     // ticks. The model verifies at the next tick of the item's own source,
     // and at the next tick of any source for an item with none.
     if (it.source != null && it.source !== source) continue
-    const vk = ownerAckKey(it.itemId, it.episode, it.ack.ackRef, 'verify')
-    yield put({ kind: 'owner_ack', id: vk, session: envOf(it), body: { item_id: it.itemId, episode: it.episode, ack_ref: it.ack.ackRef, phase: 'verify', intent: 'done', basis: 'owner_direct', verified: false } }, now)
+    yield* verification(ctx, it, false, now)
     const next = P.verifyFailedStep(it)
     if (next === 'returned') {
       const c = { ...it.counters, returns_used: it.counters.returns_used + 1 }

@@ -98,7 +98,9 @@ slot").
 A send is an **attempt** record, then the send, then an **outcome** record. An
 attempt uses up its step whether or not the send is confirmed; an attempt with
 no outcome is recorded `delivery_unknown` and never re-sent. A step re-run
-after a crash reuses any read already recorded.
+after a crash reuses any read already recorded. The verification of an
+acknowledgment (`owner_ack`, phase `verify`) is written once, by whichever
+step comes first, and is never rewritten with another result.
 
 ### Items and the single slot
 
@@ -181,6 +183,14 @@ shows prompt rounds earned after an owner item's limit was used). The transition
 | owner, open | a prompt round joined with no counted show left, the slot held by it or free | shown, once | yes | unchanged |
 | owner, open | an ask ends while another is live | updated | no | same |
 | owner, open | its last ask ends | resolved, or withdrawn for a lapse | no | closed |
+
+A crash after the verification is written and before its step leaves the
+item acknowledged. If the next tick runs in a later slot, the recorded
+verification stands and is not written again, and the item follows the
+evidence that tick finds: closing evidence resolves it by the "any open,
+closing evidence" row; none completes the failed-verification step
+(`returned` or `exhausted`), sent at most once as any send. Until then it
+holds the slot as acknowledged.
 
 Edges at exact equality: a reminder or the time limit is due at the very
 moment its interval has passed since the latest show or return. A deadline
@@ -507,7 +517,11 @@ the ask that closed it (`closing_ask`), and on a join whether a show is owed
 at once (`show_now`), as counted (`counted_next`), or to a prompt round
 (`round_owed`); a round's show is marked `round`. A seed is unclosable by evidence when its naming session's
 source gives no working directory; "done" then withdraws it. "Next tick" for
-verification is the item's own source's next tick. Owner actions on an item
+verification is the item's own source's next tick. A verification is written
+once and looked up before it is written, so a crash between it and its step,
+followed by a tick in a later slot that finds the other answer, does not
+rewrite it; that tick follows the evidence it finds (resolved, or the
+failed-verification step) without a second verification record. Owner actions on an item
 that is not active do nothing. The deferral time is stored on the record.
 A carried condition whose closing evidence arrives while its owner item is
 open is dropped from the content by another `updated` step, not kept. An

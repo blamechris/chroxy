@@ -7,6 +7,7 @@ import { deriveState } from './model/derive.js'
 import { append, createLedger } from './model/ledger.js'
 import { DEFAULT_POLICY, nextReminderAt, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
+import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
 import { literalPreempts } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
@@ -321,6 +322,93 @@ describe('crashes around sends', () => {
     assert.ok(h.sendsFor(id).filter((s) => s.step === 'reminded' && s.n === 1).length <= 1)
     assert.ok(sendsBefore <= 1)
     assert.equal(h.conflicts().length, 0)
+  })
+
+  // An item is acknowledged; the verification tick is killed at every
+  // operation; after the restart the next tick runs in a LATER slot (the
+  // crashed tick is never replayed). The verification is recorded once and
+  // never rewritten with another result.
+  describe('killed in the tick that verifies an acknowledgment, the next tick in a later slot', () => {
+    function verifyCrash(op, { evidenceBefore, evidenceAfter, policy }) {
+      const h = setup({}, policy)
+      const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+      const x = session(h, 'chroxy', 'x')
+      const id = itemIds.owner(x.s)
+      W.author(h.world, x.sk, T0, ownerBlock())
+      h.tick('chroxy', T0 + 15 * MIN)
+      checkStep(mon, h)
+      h.owner(id, 'done', 'm1', { at: T0 + 16 * MIN })
+      checkStep(mon, h)
+      if (evidenceBefore) W.author(h.world, x.sk, T0 + 17 * MIN, { state: 'running', next: 'go' })
+      let crashed = false
+      try {
+        h.tick('chroxy', T0 + 30 * MIN, { crashAfter: op })
+      } catch (e) {
+        if (!(e instanceof Crash)) throw e
+        crashed = true
+        checkStep(mon, h, { complete: false })
+        h.restart()
+      }
+      evidenceAfter?.(h, x.sk)
+      h.tick('chroxy', T0 + 50 * MIN)
+      checkStep(mon, h)
+      const verifies = h.records('owner_ack').filter((r) => r.body.phase === 'verify')
+      return { h, id, crashed, verifies }
+    }
+    const each = (opts, check) => {
+      let points = 0
+      for (let op = 0; ; op++) {
+        const r = verifyCrash(op, opts)
+        assert.equal(r.h.conflicts().length, 0, `no conflict: crash at op ${op}`)
+        const ids = r.h.sends.map((s) => s.attempt_id)
+        assert.equal(new Set(ids).size, ids.length, `no second send: crash at op ${op}`)
+        assert.ok(r.verifies.length <= 1, `one verification record: crash at op ${op}`)
+        check(r, op)
+        if (!r.crashed) break
+        points += 1
+      }
+      assert.ok(points > 3, `${points} crash points exercised`)
+    }
+
+    it('closing evidence arrives after the restart: the item is resolved, by the ordinary row', () => {
+      each({ evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, { state: 'running', next: 'go' }) }, (r, op) => {
+        assert.equal(r.h.item(r.id).state, 'closed', `closed: crash at op ${op}`)
+        assert.equal(steps(r.h, r.id).at(-1), 'resolved')
+        assert.ok(r.h.sendsFor(r.id).filter((s) => s.step === 'returned').length <= 1)
+      })
+    })
+
+    it('no evidence at all: the step the verification called for is made once (returned), then the item is active', () => {
+      each({}, (r, op) => {
+        // An attempt killed before its send is never re-sent (delivery unknown).
+        const returns = r.h.surface(r.id).filter((x) => x.body.step === 'returned' && x.body.phase === 'attempt')
+        assert.equal(returns.length, 1, `one return attempt: crash at op ${op}`)
+        assert.ok(r.h.sendsFor(r.id).filter((s) => s.step === 'returned').length <= 1)
+        assert.equal(r.h.item(r.id).state, 'active')
+      })
+    })
+
+    it('closing evidence found by the crashed tick, then gone (a new owner block) after the restart: no conflict, the item moves on', () => {
+      each({ evidenceBefore: true, evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, ownerBlock('approve the other merge')) }, (r, op) => {
+        const it = r.h.item(r.id)
+        assert.notEqual(it.state, 'acknowledged', `moved on from acknowledged: crash at op ${op}`)
+      })
+    })
+
+    it('mutation: a verification written again without looking it up conflicts with itself, and I3a goes red', () => {
+      const rewrite = withPolicy({ reuseRecorded: () => null })
+      const later = (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, { state: 'running', next: 'go' })
+      let red = 0
+      for (let op = 0; op < 40; op++) {
+        try {
+          if (!verifyCrash(op, { evidenceAfter: later, policy: rewrite }).crashed) break
+        } catch (e) {
+          if (!(e instanceof InvariantError) || e.id !== 'I3a') throw e
+          red += 1
+        }
+      }
+      assert.ok(red > 0)
+    })
   })
 })
 
