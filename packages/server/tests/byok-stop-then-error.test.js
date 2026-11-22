@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ClaudeByokSession } from '../src/byok-session.js'
-import { APIUserAbortError, APIConnectionError, AnthropicError, InternalServerError } from '@anthropic-ai/sdk'
+import { APIUserAbortError, APIConnectionError, APIConnectionTimeoutError, AnthropicError, APIError, InternalServerError } from '@anthropic-ai/sdk'
 
 /**
  * #9266 -- only a genuine abort is the requested Stop. An upstream error that
@@ -53,6 +53,52 @@ describe('claude-byok: an upstream error racing a Stop is surfaced (#9266)', () 
     assert.equal(seen.stopped, 0)
     assert.equal(seen.results.filter((r) => r.turnOutcome === MARK).length, 0)
     assert.equal(seen.results.filter((r) => r.interrupted).length, 0)
+  })
+
+  it('after Stop then 500 the session is idle and a follow-up turn succeeds', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.setPermissionMode('auto')
+    let n = 0
+    session._client = { messages: { stream: () => {
+      const first = n++ === 0
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (first) { session.markStopRequested(); session.interrupt(); throw http500() }
+        },
+        async finalMessage() {
+          if (first) throw http500()
+          return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: 'ok' }] }
+        },
+      }
+    } } }
+    const results = []
+    const errors = []
+    session.on('result', (r) => results.push(r))
+    session.on('error', (e) => errors.push(e))
+    await session.start()
+    await session.sendMessage('go')
+    assert.deepEqual(errors.map((e) => e.code), ['HTTP_500'])
+    assert.equal(session.isRunning, false)
+    assert.equal(results.length, 0)
+    await session.sendMessage('again')
+    assert.deepEqual(errors.map((e) => e.code), ['HTTP_500'])
+    assert.equal(results.length, 1)
+    assert.equal(session.isRunning, false)
+    await session.destroy()
+  })
+
+  it('Stop then an SSE error event with a JSON body (no status): surfaced', async () => {
+    const sse = () => new APIError(undefined, { type: 'error', error: { type: 'overloaded_error', message: 'x' } }, undefined, new Headers())
+    const seen = await run(byok(sse))
+    assert.equal(seen.errors.length, 1)
+    assert.equal(seen.stopped, 0)
+  })
+
+  it('Stop then an SSE error event with a non-JSON string body (no status): surfaced', async () => {
+    const sse = () => new APIError(undefined, 'upstream melted', undefined, new Headers())
+    const seen = await run(byok(sse))
+    assert.equal(seen.errors.length, 1)
+    assert.equal(seen.stopped, 0)
   })
 
   it('Stop then HTTP 429 (plain error with status): surfaced', async () => {
@@ -113,6 +159,7 @@ describe('claude-byok: every abort-caused shape still ends as the quiet Stop (#9
     'SDK AnthropicError wrapping the abort as cause': () => Object.assign(new AnthropicError('wrapped'), { cause: abortDom() }),
     'APIConnectionError whose cause is the abort': () => new APIConnectionError({ cause: abortDom() }),
     'ambiguous: no status, no abort cause, signal aborted': () => new Error('socket hang up'),
+    'APIConnectionTimeoutError (deliberately quiet after a Stop)': () => new APIConnectionTimeoutError(),
   }
   for (const [name, make] of Object.entries(shapes)) {
     it(`${name}: no error, one stopped`, async () => {
@@ -132,5 +179,20 @@ describe('claude-byok: every abort-caused shape still ends as the quiet Stop (#9
   it('the ambiguous shape is a quiet stop but mints no marker', async () => {
     const seen = await run(byok(shapes['ambiguous: no status, no abort cause, signal aborted']))
     assert.equal(seen.results.filter((r) => r.turnOutcome === MARK).length, 0)
+  })
+})
+
+describe('claude-byok: no Stop keeps the pre-#9266 classification', () => {
+  it('APIConnectionError with an abort cause and no Stop is a STREAM_ERROR, not ABORT', async () => {
+    const make = () => new APIConnectionError({ cause: abortDom() })
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.setPermissionMode('auto')
+    session._client = { messages: { stream: () => ({
+      async *[Symbol.asyncIterator]() { throw make() },
+      async finalMessage() { throw make() },
+    }) } }
+    const seen = await run(session)
+    assert.deepEqual(seen.errors.map((e) => e.code), ['STREAM_ERROR'])
+    assert.equal(seen.stopped, 0)
   })
 })
