@@ -106,6 +106,7 @@ import { RESOLVED_BY } from './permission-resolved-by.js'
 import { getProvider, listProviders, DEFAULT_PROVIDER } from './providers.js'
 import { validateCwdAllowed } from './handler-utils.js'
 import { TurnDriver, TurnError } from './orchestration/turn-driver.js'
+import { busyStateOf } from './session-busy-state.js'
 
 const log = createLogger('scheduler')
 
@@ -227,6 +228,20 @@ class ScheduledRunRefusedError extends Error {
   constructor(message) {
     super(message)
     this.name = 'ScheduledRunRefusedError'
+  }
+}
+
+/**
+ * Thrown internally when a fire must NOT drive its session because a person is
+ * using it (#9242): mid-turn, or taken over since it was resolved. The caller turns
+ * it into a `skipped` outcome — the slot passes, nothing is sent, and the schedule
+ * advances to the next slot (no retry loop, no second session minted beside a
+ * session that is merely busy).
+ */
+class ScheduledRunSkippedError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ScheduledRunSkippedError'
   }
 }
 
@@ -658,6 +673,21 @@ export class SchedulerEngine extends EventEmitter {
     try {
       // Already gone (the operator closed it, or a teardown is in progress).
       if (!this._sm?.getSession?.(sessionId)) return
+      // #9242: only a session this task STILL owns is the task's to close. One a
+      // person took over (ownership released) is an ordinary session now, whether
+      // or not the adoption pass has noticed yet.
+      if (typeof this._sm.ownsScheduledTask === 'function' && !this._sm.ownsScheduledTask(sessionId, taskId)) {
+        this._log.info(`Scheduled task ${taskId} was removed — leaving its session ${sessionId} open (no longer owned by the task)`)
+        return
+      }
+      // #9242: and never take work with it. A worktree with uncommitted changes (or
+      // commits nothing else reaches), or one whose state cannot be read, is KEPT:
+      // the session is released to an ordinary one and the person decides.
+      if (typeof this._sm.hasUnsavedWorktreeWork === 'function' && this._sm.hasUnsavedWorktreeWork(sessionId)) {
+        this._sm.releaseScheduledOwnership?.(sessionId, taskId)
+        this._log.warn(`Scheduled task ${taskId} was removed — keeping its session ${sessionId} open: its worktree has unsaved work (uncommitted changes, unreachable commits, or an unreadable status). It is an ordinary session now; close it yourself once the work is safe.`)
+        return
+      }
       this._log.info(`Scheduled task ${taskId} was removed — closing its session ${sessionId}`)
       const pending = typeof this._sm.destroySessionLocked === 'function'
         ? this._sm.destroySessionLocked(sessionId)
@@ -937,6 +967,7 @@ export class SchedulerEngine extends EventEmitter {
       sessionId = this._resolveSession(task, ctx)
     } catch (err) {
       if (err instanceof ScheduledRunRefusedError) return { status: REFUSED_STATUS, error: err.message }
+      if (err instanceof ScheduledRunSkippedError) return { status: 'skipped', error: err.message }
       return { status: 'error', error: `session create failed: ${err?.message || err}` }
     }
     if (!sessionId) return { status: 'error', error: 'session create failed (no sessionId)' }
@@ -971,6 +1002,9 @@ export class SchedulerEngine extends EventEmitter {
           return { status: 'error', sessionId, error: `session ${sessionId} did not finish starting within ${ctx.runTimeoutMs}ms` }
         }
       }
+      // #9242: the start wait is an await — a person may have taken the session over
+      // (or started a turn in it) meanwhile. Judge again, right before the send.
+      this._assertDrivable(task, sessionId)
       const driver = this._ensureTurnDriver()
       // The start wait spends part of the run budget: the turn gets the REMAINDER,
       // so `timeout` keeps meaning total run time (floored so it stays a valid timer).
@@ -991,6 +1025,7 @@ export class SchedulerEngine extends EventEmitter {
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
       return { status: 'success', sessionId }
     } catch (err) {
+      if (err instanceof ScheduledRunSkippedError) return { status: 'skipped', sessionId, error: err.message }
       // ORDER IS LOAD-BEARING. `runState.blocked` is checked FIRST, ahead of the
       // TURN_STOPPED arm below, because the engine's own deny path reaches this
       // catch through exactly the same rejection: it answers `deny`, interrupts
@@ -1039,6 +1074,10 @@ export class SchedulerEngine extends EventEmitter {
     if (existing) {
       const entry = this._sm.getSession?.(existing)
       if (entry?.session) {
+        // #9242: never drive into a session a person is in the middle of using.
+        // BEFORE the mode assert, which would otherwise mutate (or refuse) a busy
+        // session's permission mode for a run that is not going to happen.
+        this._assertDrivable(task, existing)
         // THE ESCALATION VECTOR (#6997 review C3): scheduled sessions are kept
         // alive and reused, and an operator can flip any session to `auto` from
         // the dashboard — even mid-turn. Without re-asserting here, one manual
@@ -1078,6 +1117,29 @@ export class SchedulerEngine extends EventEmitter {
     if (created?.session) this._assertPermissionMode(created.session, ctx.permissionMode, sessionId)
     this._sessionByTask.set(task.id, sessionId)
     return sessionId
+  }
+
+  /**
+   * @private (#9242) — a scheduled run only ever drives a session that is STILL the
+   * task's and is NOT mid-turn. Ownership is released the moment a person sends
+   * input (SessionManager.recordUserIntent), so a released session is never
+   * driven; a mid-turn one (a person's turn, or the task's own previous run still
+   * going after a timeout) would interleave the prompt with that turn, so the fire
+   * is skipped instead. Only a mid-turn session blocks: one idle but held busy by
+   * background shells is not in the middle of anything (busyReason 'turn').
+   * A manager without the ownership API (a stub) is trusted as before.
+   *
+   * @throws {ScheduledRunSkippedError}
+   */
+  _assertDrivable(task, sessionId) {
+    if (typeof this._sm.ownsScheduledTask === 'function' && !this._sm.ownsScheduledTask(sessionId, task.id)) {
+      this._sessionByTask.delete(task.id)
+      throw new ScheduledRunSkippedError(`session ${sessionId} is no longer owned by this task (a person took it over) — not driving it`)
+    }
+    const session = this._sm.getSession?.(sessionId)?.session
+    if (session && busyStateOf(session).busyReason === 'turn') {
+      throw new ScheduledRunSkippedError(`session ${sessionId} is busy (a turn is in progress) — not driving a scheduled prompt into it; the next slot will run`)
+    }
   }
 
   /**

@@ -49,6 +49,10 @@ import { GIT } from './git.js'
 // agent-session lifetime); the clean-tree guard remains the hard safety net.
 const DEFAULT_MAX_LOCK_AGE_MS = 0
 
+function defaultGit(cwd, args) {
+  return execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' })
+}
+
 /**
  * Existence check for a pid without sending a real signal.
  * Signal 0 only probes for the process; EPERM means it exists but we can't
@@ -256,6 +260,29 @@ function isClean(git, worktreePath) {
 
 
 /**
+ * #9242: could removing this worktree lose work? True when its working tree is
+ * not clean (tracked edits, untracked files, and gitignored ones — see isClean),
+ * when HEAD holds a commit no branch, tag or remote ref reaches (a session
+ * worktree is DETACHED, so a commit made in it is reachable from nothing else and
+ * `git worktree remove` makes it unreachable), or when either question cannot be
+ * answered. Fails SAFE: unknown reads as "has work".
+ *
+ * @param {string} worktreePath
+ * @param {{ git?: (cwd: string, args: string[]) => string }} [deps]
+ * @returns {boolean}
+ */
+export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
+  const { git = defaultGit } = deps
+  if (isClean(git, worktreePath) !== true) return true
+  try {
+    return git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0
+  } catch {
+    return true
+  }
+}
+
+
+/**
  * #5859 (audit P1-7): boot-time sweep of ORPHANED chroxy session worktrees.
  *
  * Unlike the agent worktrees this module's reaper handles, chroxy's OWN session
@@ -288,7 +315,7 @@ function isClean(git, worktreePath) {
  */
 export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps = {} } = {}) {
   const {
-    git = (cwd, args) => execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' }),
+    git = defaultGit,
     readdir = (p) => readdirSync(p, { withFileTypes: true }),
     exists = existsSync,
   } = deps
