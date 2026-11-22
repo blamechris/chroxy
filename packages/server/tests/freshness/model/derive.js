@@ -32,6 +32,12 @@ export function createState(policy) {
     investigations: new Map(),
     onsets: new Map(),
     items: new Map(),
+    // Opening references of attention items whose condition an owner-block
+    // item has carried: attention item id -> Set of opening references.
+    carriedRefs: new Map(),
+    // Conditions an owner item still carried when it closed, to be
+    // handed on by the tick that closed it: "item|episode" -> handover.
+    handovers: new Map(),
     attempts: new Map(),
     index: new Map(),
     lastSeq: 0,
@@ -165,7 +171,28 @@ function setCurrent(state, s, r) {
   if (rep && b.outcome === 'ok' && rep.body.evidence_class === 'E2' && b.freshness_reason !== 'time_untrusted') {
     s.latestAuthored = b.report_id
   }
+  coverReport(state, s)
   refreshFlags(state, s)
+}
+
+/**
+ * Every authored owner-block report a declared ask covered while it was
+ * live is used, whatever its fingerprint: the ask stood on it. Derived from
+ * the tick checks and the item's asks already in the ledger, so it writes
+ * nothing.
+ *
+ * DESIGN-GAP: the reports an ask covered are recorded nowhere, and writing
+ * one on every repeat read would cost a record per tick. The fold derives
+ * them instead: a report is covered when a tick check makes it the
+ * session's latest authored report while the item carries a live declared
+ * ask.
+ */
+function coverReport(state, s) {
+  if (!state.policy.coveredReportsUsed || !s.latestAuthored || !state.config) return
+  const it = state.items.get(state.policy.ownerItemOf(s.session, 'declared'))
+  if (!it?.open || !it.asks.has('declared')) return
+  const rep = state.reports.get(s.latestAuthored)
+  if (rep && state.policy.isOwnerBlock(rep.body, state.config)) it.usedRefs.add(s.latestAuthored)
 }
 
 function foldActivity(state, r) {
@@ -316,8 +343,42 @@ function newItem(r) {
     closable: true,
     deferrals: 0,
     seed: null,
+    condition: null,
+    root: null,
+    rootCounters: new Map(),
+    carried: [],
+    carriedEver: new Set(),
+    carryRef: null,
+    // An owner item's live asks by kind ('declared', 'prompt'), from its
+    // latest content; whether one that joined is owed a show at once.
+    asks: new Map(),
+    promptLive: false,
+    showDue: false,
     history: [],
   }
+}
+
+const OWNER_BLOCK_ORIGINS = new Set(['owner'])
+
+/**
+ * An owner item's ordering fields follow its live asks: the earliest
+ * deadline, a live prompt first.
+ *
+ * DESIGN-GAP: "otherwise the existing order" orders owner items by their
+ * report or prompt time, and a two-ask item has two. The model uses the
+ * earliest of its live asks, so an item does not lose its place when a
+ * second ask joins.
+ */
+function setAsks(it, asks) {
+  it.asks = new Map((asks ?? []).map((a) => [a.kind, a]))
+  if (it.asks.size === 0) return
+  const deadlines = [...it.asks.values()].map((a) => a.deadline).filter((d) => d != null)
+  it.deadline = deadlines.length ? Math.min(...deadlines) : null
+  it.orderTime = Math.min(...[...it.asks.values()].map((a) => a.order_time ?? Infinity))
+  it.promptLive = it.asks.has('prompt')
+  const declared = it.asks.get('declared')
+  it.fingerprint = declared?.fingerprint ?? null
+  if (declared?.report_id) it.reportId = declared.report_id
 }
 
 function foldSurface(state, r) {
@@ -342,6 +403,18 @@ function foldSurface(state, r) {
     if (!state.policy.attemptUsesOrdinal) return
   }
   applyStep(it, b, ms(r.ts), r.seq)
+  if (b.step === 'updated' && b.carry && b.carry.op === 'carry') {
+    const refs = state.carriedRefs.get(b.carry.attention_item) ?? new Set()
+    refs.add(b.carry.opened_by)
+    state.carriedRefs.set(b.carry.attention_item, refs)
+  }
+  // The counters an attention episode ended with belong to its condition, so
+  // that a handover of the same condition continues them.
+  if ((b.step === 'resolved' || b.step === 'withdrawn') && it.origin === 'attention' && it.root) it.rootCounters.set(it.root, { ...it.counters })
+  if ((b.step === 'resolved' || b.step === 'withdrawn') && OWNER_BLOCK_ORIGINS.has(it.origin) && it.carried.length > 0) {
+    const key = `${it.itemId}|${it.episode}`
+    state.handovers.set(key, { key, itemId: it.itemId, episode: it.episode, session: it.session, sk: it.sk, source: it.source, carried: it.carried.slice() })
+  }
   // Once the preemptor is shown, or closes without being shown, the items it
   // preempted no longer wait on it.
   const shown = b.step === 'shown' && (b.phase === 'attempt' || !state.policy.attemptUsesOrdinal)
@@ -378,8 +451,17 @@ function applyStep(it, b, at, seq) {
       it.deferrals = 0
       it.seed = b.seed ?? null
       it.preemptedBy = null
+      it.condition = b.condition ?? null
+      it.root = b.condition?.root ?? b.opened_by
+      it.carried = []
+      it.carriedEver = new Set()
+      it.carryRef = null
+      it.showDue = false
+      it.promptLive = false
+      if (b.asks) setAsks(it, b.asks)
       break
     case 'shown':
+      it.showDue = false
       it.state = 'active'
       it.preemptedBy = null
       it.lastShowAt = at
@@ -416,6 +498,20 @@ function applyStep(it, b, at, seq) {
       if (b.content_at != null) it.contentAt = b.content_at
       if (b.report_id) it.reportId = b.report_id
       if (b.deadline !== undefined) it.deadline = b.deadline
+      if (b.carry) {
+        it.carried = b.carried
+        it.carryRef = b.n
+        if (b.carry.op === 'carry') it.carriedEver.add(`${b.carry.attention_item}|${b.carry.opened_by}`)
+      }
+      if (b.ask) {
+        setAsks(it, b.asks)
+        if (b.ask.op === 'join') {
+          it.usedRefs.add(b.ask.opened_by)
+          it.showDue = Boolean(b.show_now)
+          // The show a new ask is owed is a counted one, whatever deferral came before.
+          if (b.counted_next) it.afterDeferral = false
+        }
+      }
       if (b.requeue) {
         it.state = 'queued'
         it.position = { rank: 1, seq: 0 }
@@ -453,6 +549,9 @@ function foldTick(state, r) {
     t.closed = true
     state.lastClosedTick.set(b.source, { slot: b.slot_start, id: b.tick_id })
     state.sourceTrigger.set(b.source, { held: Boolean(b.source_all_failed), onset: b.source_onset ?? null })
+    // A handover belongs to the tick that closed the item: by this record it
+    // has been made, or found to have nothing left to do.
+    for (const [key, ho] of state.handovers) if (ho.source === b.source) state.handovers.delete(key)
   }
 }
 

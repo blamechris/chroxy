@@ -362,7 +362,7 @@ export function loadTrustStore(filePath = defaultTrustStorePath(), { log } = {})
  * cleanup-side ENOENT. The cleanup unlink swallows its own errors (the temp may
  * already be gone if the rename partially succeeded or the FS removed it).
  */
-export function writeFileAtomic0600(filePath, content) {
+export function writeFileAtomic0600(filePath, content, beforeRename) {
   const dir = dirname(filePath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   // A unique temp name (pid + random) opened O_EXCL: a concurrent writer in another
@@ -372,6 +372,8 @@ export function writeFileAtomic0600(filePath, content) {
   try {
     writeFileSync(tmp, content, { mode: 0o600, flag: 'wx' })
     try { chmodSync(tmp, 0o600) } catch {}
+    // Last check before the file replaces the target; throwing abandons the write.
+    if (beforeRename) beforeRename()
     renameSync(tmp, filePath)
   } catch (err) {
     try { unlinkSync(tmp) } catch {}

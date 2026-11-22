@@ -7,18 +7,20 @@
  * with this account, or as a bound the account says was crossed. Ground truth
  * about sessions comes from the simulated world.
  *
- * Each failure carries an invariant id (I1a .. I10, with I7i) so a mutation proof can
+ * Each failure carries an invariant id (I1a .. I13, with I7i) so a mutation proof can
  * assert WHICH invariant went red. The full list is in ../README.md.
  *
  * What the monitor derives for itself rather than reading from the model:
  * item states and counters, the freshness band of each trusted authored read
  * (I8b), the onset of each per-session trigger (I7a), and the evidence behind
- * every resolution and withdrawal (I4b). It still reads from the model the
- * parsed report fields and, for the source-level outage investigation only,
- * the model's own onset.
+ * every resolution and withdrawal (I4b), and which attention conditions are
+ * live and what each owner item's content names (I9, I11). It still
+ * reads from the model the parsed report fields, an investigation's decision
+ * to surface (whose timing I7f checks against the world) and, for the
+ * source-level outage investigation only, the model's own onset.
  *
  * Limits: the monitor uses the model's own `isOwnerBlock` (for declared
- * resolutions in I4b, and in I9 and I10) and the model-computed
+ * resolutions in I4b, and in I10) and the model-computed
  * `block_fingerprint` (I6). A defect in the default owner-block rule or in
  * the fingerprint is therefore invisible to those checks.
  */
@@ -38,10 +40,10 @@ export class InvariantError extends Error {
 const STALE_STATES = new Set(['running', 'unknown', 'blocked', 'stalled'])
 const DISAGREE_STATES = new Set(['idle', 'done'])
 const TRIGGERS = ['stale_report', 'native_disagreement', 'dropped_from_list', 'repeated_error']
+const OWNER_BLOCK_ORIGINS = new Set(['owner'])
 const WITHDRAW_REASONS = {
-  declared: new Set(),
-  prompt: new Set(['lapsed']),
-  attention: new Set(['dismissed', 'superseded']),
+  owner: new Set(['lapsed']),
+  attention: new Set(['dismissed', 'superseded', 'merged']),
   gone: new Set(['dismissed']),
   seed: new Set(['dismissed', 'owner_stated_unverified']),
   issue: new Set(['dismissed', 'no_longer_eligible']),
@@ -94,7 +96,16 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     prevTickOutcome: new Map(),
     ownerDone: new Set(),
     onsetTrigger: new Map(),
-    onsetConfirms: new Map(),
+    // I11: attention conditions this monitor holds live, by attention item id,
+    // and every (attention item, opening reference) an owner item carried.
+    conds: new Map(),
+    carriedEver: new Set(),
+    // What each owner episode carried when it closed: "item|episode" ->
+    // Map(attention item -> condition root), for the handover that follows.
+    closedCarried: new Map(),
+    // I12: sends per condition, by the condition's root (the reference that
+    // first opened it), across every episode that condition opened.
+    condCounts: new Map(),
     stats: { records: 0, sends: 0, shows: 0, reminders: 0, returns: 0, investigations: 0, rechecks: 0, episodes: 0, resolved: 0, withdrawn: 0, exhausted: 0, crashes: 0 },
   }
 }
@@ -155,7 +166,7 @@ function advanceRuns(mon, sk, b, own) {
 function spec(mon, id, origin) {
   let it = mon.items.get(id)
   if (!it) {
-    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null }
+    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false }
     mon.items.set(id, it)
   }
   return it
@@ -170,19 +181,58 @@ function newerAuthored(mon, sk, thanReportId) {
   return null
 }
 
-function justifyResolved(mon, it) {
+/** The evidence that ends one ask, from this monitor's own account of reports, prompts and answers. */
+function askEnded(mon, sk, kind, ask, how) {
+  if (kind === 'declared') {
+    const lr = newerAuthored(mon, sk, ask.opened_by)
+    return Boolean(lr && !isOwnerBlock(lr, mon.config))
+  }
+  if (how === 'lapsed') {
+    // No prompt pending at the latest live read, and a newer report.
+    const pend = mon.livePending.get(sk)
+    if (!pend || pend.size > 0) return false
+    const lr = mon.latestAuthored.get(sk)
+    const rep = lr ? mon.reports.get(lr) : null
+    const raised = mon.promptRaised.get(`${sk}|${ask.content_ref}`) ?? -Infinity
+    return Boolean(rep && rep.last_report_at > raised)
+  }
+  // The ask's own prompt answered, or an owner answer to a later prompt.
+  if (mon.answered.has(`${sk}|${ask.content_ref}`)) return true
+  const since = mon.promptRaised.get(`${sk}|${ask.content_ref}`) ?? -Infinity
+  for (const [k, at] of mon.answeredAt) if (k.startsWith(`${sk}|`) && k !== `${sk}|${ask.content_ref}` && (mon.promptRaised.get(k) ?? at) >= since) return true
+  return false
+}
+
+/** The kinds the record says the item carries equal this monitor's own fold of its ask changes. */
+/**
+ * One ask as this monitor follows it: the references it stood on (its
+ * opening reference and, for a declared ask, every authored owner-block
+ * report it covered while live, as this monitor sees the reports). A prompt
+ * the content moved away from stays free to open an ask of its own (it may
+ * still be pending, unanswered).
+ */
+function newAsk(_mon, _sk, a) {
+  return { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
+}
+
+/** At a tick's end: a live declared ask covers the session's latest authored owner-block report, whatever its fingerprint. */
+function follow(x, ask, ref) {
+  ask.stood.add(ref)
+  x.stood.add(ref)
+}
+
+function checkAsks(it, b) {
+  const named = (b.asks ?? []).map((a) => a.kind).sort()
+  const mine = [...it.asks.keys()].sort()
+  if (named.length !== mine.length || named.some((k, i) => k !== mine[i])) fail('I10', `an owner item's content lists asks [${named}] where its changes add up to [${mine}]`)
+}
+
+function justifyResolved(mon, it, b) {
   const sk = it.sk
   switch (it.origin) {
-    case 'declared': {
-      const lr = newerAuthored(mon, sk, it.openedBy)
-      return lr && !isOwnerBlock(lr, mon.config)
-    }
-    case 'prompt': {
-      // The item's own prompt answered, or an owner answer to a later prompt.
-      if (mon.answered.has(`${sk}|${it.contentRef}`)) return true
-      const since = mon.promptRaised.get(`${sk}|${it.contentRef}`) ?? -Infinity
-      for (const [k, at] of mon.answeredAt) if (k.startsWith(`${sk}|`) && k !== `${sk}|${it.contentRef}` && (mon.promptRaised.get(k) ?? at) >= since) return true
-      return false
+    case 'owner': {
+      const ask = it.asks.get(b.closing_ask)
+      return Boolean(ask) && askEnded(mon, sk, b.closing_ask, ask, 'resolved')
     }
     case 'attention':
       return Boolean(newerAuthored(mon, sk, it.reportId))
@@ -206,26 +256,52 @@ function justifyResolved(mon, it) {
   }
 }
 
-function justifyWithdrawn(mon, it, reason) {
+function justifyWithdrawn(mon, it, reason, _b) {
   switch (reason) {
     case 'dismissed':
       return mon.ownerDismiss.has(`${it.id}|${it.episode}`)
     case 'lapsed': {
-      // No prompt pending at the latest live read, and a newer report.
-      const pend = mon.livePending.get(it.sk)
-      if (!pend || pend.size > 0) return false
-      const lr = mon.latestAuthored.get(it.sk)
-      const rep = lr ? mon.reports.get(lr) : null
-      const raised = mon.promptRaised.get(`${it.sk}|${it.contentRef}`) ?? -Infinity
-      return Boolean(rep && rep.last_report_at > raised)
+      const ask = it.asks.get('prompt')
+      return Boolean(ask) && askEnded(mon, it.sk, 'prompt', ask, 'lapsed')
     }
     case 'superseded':
       return [...mon.items.values()].some((g) => g.open && g.origin === 'gone' && g.sk === it.sk)
+    case 'merged':
+      return openOwnerBlocksOf(mon, it.sk).some((ob) => ob.own?.has(it.id))
     case 'owner_stated_unverified':
       return mon.ownerDone.has(`${it.id}|${it.episode}`) && !sourceCaps(mon.config, it.source).scope
     default:
       return false
   }
+}
+
+/** One condition's sends: its attention item and its root, across its episodes. */
+function account(mon, it) {
+  const key = `${it.id}|${it.root}`
+  let a = mon.condCounts.get(key)
+  if (!a) {
+    a = { counted: 0, reminders: 0, returns: 0, deferrals: 0 }
+    mon.condCounts.set(key, a)
+  }
+  return a
+}
+
+/** I10: an owner item closes only with its last ask. */
+function closeOwner(it, b) {
+  if (it.origin !== 'owner') return
+  const others = [...it.asks.keys()].filter((k) => k !== b.closing_ask)
+  if (!it.asks.has(b.closing_ask) || others.length > 0) fail('I10', `an owner item closed on its ${b.closing_ask} ask while [${others}] was still live`)
+}
+
+function endClosingAsk(it, b) {
+  if (it.origin !== 'owner') return
+  const ask = it.asks.get(b.closing_ask)
+  if (ask) for (const ref of ask.stood) it.endedRefs.add(ref)
+  it.asks = new Map()
+}
+
+function openOwnerBlocksOf(mon, sk) {
+  return [...mon.items.values()].filter((x) => x.open && x.sk === sk && OWNER_BLOCK_ORIGINS.has(x.origin))
 }
 
 function onRecord(mon, h, r) {
@@ -337,15 +413,23 @@ function onRecord(mon, h, r) {
         }
       } else if (b.phase === 'close') {
         mon.openInv.delete(b.investigation_id)
-        if (b.trigger === 'dropped_from_list' && b.onset) {
-          const list = mon.onsetConfirms.get(b.onset) ?? []
-          for (const rg of b.rungs ?? []) if (rg.rung === 'confirm_gone') list.push(rg.outcome)
-          mon.onsetConfirms.set(b.onset, list)
-        }
         if (b.trigger === 'recheck' && b.classification === 'no_longer_observed' && sk) {
           const run = mon.runs.get(sk)?.stale_report
           if (run) run.cycles = 0
         }
+        // I11: an investigation that decides to surface a session starts a
+        // condition that must stay in front of the owner until its attention
+        // item's own closing evidence, unless the attention item it would be
+        // already used that opening reference (the model never reopens on a
+        // used reference) or a carried condition consumed it.
+        if (sk && b.surface === 'attention') {
+          const id = itemIds.attention(r.session, b.report_id)
+          const ref = b.onset ?? b.basis_onset ?? b.investigation_id
+          const spent = mon.items.get(id)?.usedRefs.has(ref) || mon.carriedEver.has(`${id}|${ref}`)
+          if (!mon.conds.has(id) && !spent) mon.conds.set(id, { id, sk, ref, reportId: b.report_id ?? null })
+        }
+        // A session confirmed gone supersedes every attention condition it had.
+        if (sk && b.surface === 'gone') for (const [id, c] of mon.conds) if (c.sk === sk) mon.conds.delete(id)
       }
       break
     }
@@ -356,8 +440,19 @@ function onRecord(mon, h, r) {
         if (it.open) fail('I5', `a second episode opened while one is open (${b.origin})`)
         if (it.usedRefs.has(b.opened_by)) fail('I5', `an episode opened on an opening reference already used (${b.origin})`)
         if (b.episode !== it.episode + 1) fail('I5', `episode ${b.episode} after ${it.episode}`)
-        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null })
+        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map() })
         it.usedRefs.add(b.opened_by)
+        if (b.ask) {
+          // I5: an ask opens only on a reference no earlier ask of the item stood on.
+          if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${b.ask.kind} ask opened an owner item on a reference an earlier ask stood on`)
+          it.asks = new Map([[b.ask.kind, newAsk(mon, sk, b.ask)]])
+          it.stood.add(b.ask.opened_by)
+          checkAsks(it, b)
+        }
+        // A condition's root, from this monitor's own account: the opening
+        // reference, unless the episode is a handover of a condition that a
+        // closed owner episode carried, which keeps that one's root.
+        if (b.origin === 'attention') it.root = (b.handover_of && mon.closedCarried.get(b.handover_of)?.get(b.item_id)) || b.opened_by
         mon.stats.episodes += 1
         break
       }
@@ -383,15 +478,22 @@ function onRecord(mon, h, r) {
           else it.deferredShows = (it.deferredShows ?? 0) + 1
           it.state = 'active'
           mon.stats.shows += 1
+          // I13: a new ask found no counted show left, so nothing is shown for it.
+          if (sending && counted && it.noShow) fail('I13', 'an owner item with no counted show left was shown for a new ask')
+          if (sending && counted) it.owed = false
           // I1a: a counted show stays within the limit in force when it is made.
           if (sending && counted && it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max})`)
           if (sending && counted && b.shows_counted > max) fail('I1a', `stored shows_counted ${b.shows_counted} above max ${max}`)
+          // I12: one condition, however many episodes, within the show limit.
+          if (sending && counted && it.root && ++account(mon, it).counted > max) fail('I12', `one condition was shown ${account(mon, it).counted} counted times across its episodes (max ${max})`)
           break
         case 'reminded':
           it.reminders += 1
           mon.stats.reminders += 1
+          if (sending && it.root && ++account(mon, it).reminders > 2) fail('I12', `one condition was reminded ${account(mon, it).reminders} times across its episodes`)
           break
         case 'returned':
+          if (sending && it.root && ++account(mon, it).returns > 1) fail('I12', `one condition was returned ${account(mon, it).returns} times across its episodes`)
           it.returns += 1
           it.state = 'active'
           mon.stats.returns += 1
@@ -404,6 +506,7 @@ function onRecord(mon, h, r) {
           mon.lastPreempted = it.id
           break
         case 'deferred':
+          if (it.root) account(mon, it).deferrals += 1
           it.deferrals += 1
           it.state = 'deferred'
           break
@@ -413,31 +516,98 @@ function onRecord(mon, h, r) {
           mon.stats.exhausted += 1
           break
         case 'updated': {
-          let changed
-          if (it.origin === 'prompt') changed = b.content_ref !== it.contentRef
-          else {
-            const rep = mon.reports.get(b.content_ref)
-            changed = rep ? rep.block_fingerprint !== it.fp : true
-            if (rep) it.fp = rep.block_fingerprint
+          if (b.ask) {
+            const kind = b.ask.kind
+            let changed = true
+            if (b.ask.op === 'join') {
+              // I5: an ask joins only on a reference no earlier ask of the item used.
+              if (it.usedRefs.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference already used`)
+              if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference an earlier ask stood on`)
+              if (it.asks.has(kind)) fail('I10', `a second ${kind} ask joined one owner item`)
+              it.usedRefs.add(b.ask.opened_by)
+              it.asks.set(kind, newAsk(mon, sk, b.ask))
+              it.stood.add(b.ask.opened_by)
+              // I13: a new ask with a counted show left is owed one; with none
+              // left it may change only the content.
+              if (it.counted < max) it.owed = mon.lastTickOf.get(b.source) ?? true
+              else it.noShow = true
+              mon.stats.joins = (mon.stats.joins ?? 0) + 1
+            } else if (b.ask.op === 'end') {
+              const mine = it.asks.get(kind)
+              if (!mine) fail('I10', `an owner item ended a ${kind} ask it does not carry`)
+              if (!askEnded(mon, sk, kind, mine, b.ask.how)) fail('I4b', `a ${kind} ask was ended (${b.ask.how}) without its evidence`)
+              it.asks.delete(kind)
+              for (const ref of mine.stood) it.endedRefs.add(ref)
+              changed = false
+            } else {
+              const mine = it.asks.get(kind)
+              if (!mine) fail('I10', `an owner item changed a ${kind} ask it does not carry`)
+              if (kind === 'prompt') {
+                changed = b.ask.content_ref !== mine.content_ref
+                mine.content_ref = b.ask.content_ref
+              } else {
+                const rep = mon.reports.get(b.ask.report_id)
+                changed = rep ? rep.block_fingerprint !== mine.fp : true
+                if (rep) mine.fp = rep.block_fingerprint
+              }
+            }
+            checkAsks(it, b)
+            if (b.requeue) {
+              if (it.noShow && it.exhausted) fail('I13', 'an exhausted owner item with no counted show left was queued again for a new ask')
+              if (it.exhausted && changed && it.counted < max) it.exhausted = false
+              it.state = 'queued'
+            }
+            break
           }
-          it.contentRef = b.content_ref
-          if (b.report_id) it.reportId = b.report_id
-          if (b.requeue) {
-            if (it.exhausted && changed && it.counted < max) it.exhausted = false
-            it.state = 'queued'
+          if (b.carry) {
+            // A carried-condition change: judged against this monitor's own
+            // account of what the item carries, not the record's list.
+            const own = it.own ?? new Map()
+            const key = b.carry.attention_item
+            const changed = b.carry.op === 'carry' ? !own.has(key) : own.has(key)
+            if (b.carry.op === 'carry') {
+              // The condition's root: that of the attention item being merged,
+              // or of the closed owner episode handing it on, else the
+              // reference that would have opened it.
+              const att = mon.items.get(key)
+              const root = (att?.open && att.root) || (b.carry.from && mon.closedCarried.get(b.carry.from)?.get(key)) || b.carry.opened_by
+              own.set(key, root)
+              mon.carriedEver.add(`${key}|${b.carry.opened_by}`)
+            } else own.delete(key)
+            it.own = own
+            it.carried = b.carried ?? []
+            // I11: what the record says the item names is what this monitor's
+            // own account says it carries.
+            const named = it.carried.map((c) => c.attention_item).sort()
+            const mine = [...own.keys()].sort()
+            if (named.length !== mine.length || named.some((k, i) => k !== mine[i])) fail('I11', `an owner item's content names ${named.length} conditions where its changes add up to ${mine.length}`)
+            if (b.requeue) {
+              if (it.exhausted && changed && it.counted < max) it.exhausted = false
+              it.state = 'queued'
+            }
+            break
           }
+          // Only owner items have an `updated` step, and each is an ask change
+          // or a carried-condition change.
           break
         }
         case 'resolved':
-          if (!justifyResolved(mon, it)) fail('I4b', `an item (${it.origin}) was resolved without its origin's closing evidence`)
+          closeOwner(it, b)
+          if (!justifyResolved(mon, it, b)) fail('I4b', `an item (${it.origin}) was resolved without its origin's closing evidence`)
+          endClosingAsk(it, b)
+          if (it.own) mon.closedCarried.set(`${it.id}|${it.episode}`, new Map(it.own))
           it.open = false
           it.state = 'closed'
           mon.stats.resolved += 1
           break
         case 'withdrawn': {
           if (!WITHDRAW_REASONS[it.origin]?.has(b.reason)) fail('I4b', `an item (${it.origin}) was withdrawn for '${b.reason}'`)
-          if (!justifyWithdrawn(mon, it, b.reason)) fail('I4b', `an item (${it.origin}) was withdrawn as '${b.reason}' without the evidence for it`)
+          closeOwner(it, b)
+          if (!justifyWithdrawn(mon, it, b.reason, b)) fail('I4b', `an item (${it.origin}) was withdrawn as '${b.reason}' without the evidence for it`)
+          endClosingAsk(it, b)
           if (b.reason === 'dismissed' && it.reportId) mon.dismissedReports.add(`${sk}|${it.reportId}`)
+          if (b.reason === 'dismissed' && it.origin === 'attention') mon.conds.delete(it.id)
+          if (it.own) mon.closedCarried.set(`${it.id}|${it.episode}`, new Map(it.own))
           it.open = false
           it.state = 'closed'
           mon.stats.withdrawn += 1
@@ -453,7 +623,10 @@ function onRecord(mon, h, r) {
       // ...and from the model's stored counters.
       if (b.reminders_used > 2) fail('I1b', `stored reminders_used ${b.reminders_used}`)
       if (b.returns_used > 1) fail('I1c', `stored returns_used ${b.returns_used}`)
-      if (b.presentation > b.shows_counted + it.deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${it.deferrals} deferrals`)
+      // A condition's episodes continue one presentation count, so its stored
+      // count is bounded by the deferrals of all of them.
+      const deferrals = it.root ? account(mon, it).deferrals : it.deferrals
+      if (b.presentation > b.shows_counted + deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${deferrals} deferrals`)
       break
     }
     case 'owner_ack': {
@@ -479,7 +652,7 @@ function covered(h, sk, source, reportId, mon) {
   for (const it of h.ctx.state.items.values()) {
     if (!it.open) continue
     if (it.origin === 'outage' && it.source === source) return true
-    if (it.sk === sk && ['attention', 'gone', 'declared', 'prompt'].includes(it.origin)) return true
+    if (it.sk === sk && ['attention', 'gone', 'owner'].includes(it.origin)) return true
   }
   return mon.dismissedReports.has(`${sk}|${reportId}`)
 }
@@ -497,6 +670,19 @@ function onTickClosed(mon, h, r) {
       fail('I2b', `an acknowledged ${it.origin} item was not verified at the next tick of its source`)
     }
   }
+  // I13: a new ask that found a counted show left is shown by the end of the
+  // tick that brought it: at once if its item held the slot, else as the
+  // tick fills the slot, so a new ask still unshown is queued behind the
+  // item that holds the slot. With no counted show left it brought no show.
+  const holder = [...mon.items.values()].find((x) => x.open && (x.state === 'active' || x.state === 'acknowledged'))
+  for (const it of mon.items.values()) {
+    if (it.owed !== tick) continue
+    it.owed = false
+    if (!it.open || it.counted >= cfg.surface.max_presentations) continue
+    if (it.state === 'queued' && holder && holder !== it) continue
+    fail('I13', `an owner item owed a show for a new ask is ${it.state === 'queued' ? 'queued with the slot free' : it.state} at the end of the tick, not shown`)
+  }
+  for (const it of mon.items.values()) it.noShow = false
   const budget = cfg.investigation_budget_per_tick
   const cycles = mon.tickCycles.get(tick) ?? 0
   // I7c: budgets respected.
@@ -535,24 +721,35 @@ function onTickClosed(mon, h, r) {
     const g = rechecked && idleNow ? (mon.recheckStreak.get(sk) ?? 0) + 1 : 0
     mon.recheckStreak.set(sk, g)
     if (g > 1) fail('I7g', `a session was rechecked ${g} ticks running while nothing was working or waiting`)
-    // I10: an owner block is not left without an item. A prompt pending at a
-    // live read, and an authored report that is an owner block, each have an
-    // open item of that origin by the end of the tick, unless that item
-    // already used the same opening reference.
-    const sess = w?.session
-    if (sess && c.native_available) {
-      const pend = mon.checkAct.get(c.check_id)?.pending ?? []
-      if (pend.length) {
-        const latest = pend.slice().sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1)).pop()
-        const it = mon.items.get(itemIds.prompt(sess))
-        if (!it?.open && !it?.usedRefs.has(latest.ref)) fail('I10', 'a prompt pending at a live read has no open prompt item')
-      }
-    }
+    // I10: every live ask is on the session's open owner item, by the end of
+    // the tick, as this monitor sees the asks: the latest prompt pending at a
+    // live read, and an authored report that is an owner block. The only
+    // exception is a line or prompt that an ask already stood on and that ask
+    // has ended (a session rewound to it), which never brings it back. And no owner item
+    // still carries a declared ask that a newer, non-owner-block report ended.
+    const owners = [...mon.items.values()].filter((x) => x.sk === sk && OWNER_BLOCK_ORIGINS.has(x.origin))
+    const carrying = (kind) => owners.some((x) => x.open && x.asks.has(kind))
+    const askGone = (ref) => owners.some((x) => x.endedRefs.has(ref))
     const la = mon.latestAuthored.get(sk)
     const lrep = la ? mon.reports.get(la) : null
-    if (sess && lrep && isOwnerBlock(lrep, mon.config)) {
-      const it = mon.items.get(itemIds.declared(sess))
-      if (!it?.open && !it?.usedRefs.has(la)) fail('I10', 'an authored owner-block report has no open owner-block item')
+    const ob = Boolean(lrep && isOwnerBlock(lrep, mon.config))
+    let latest = null
+    if (c.native_available) {
+      const pend = mon.checkAct.get(c.check_id)?.pending ?? []
+      if (pend.length) latest = pend.slice().sort((a, b) => (a.raised_at ?? 0) - (b.raised_at ?? 0) || (a.ref < b.ref ? -1 : 1)).pop()
+    }
+    // The references each live ask stood on, as this monitor sees its
+    // content move (I5 uses them).
+    for (const x of owners) {
+      if (!x.open) continue
+      const d = x.asks.get('declared')
+      if (d && ob) follow(x, d, la)
+    }
+    if (latest && !carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
+    if (ob && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
+    for (const x of owners) {
+      const d = x.open ? x.asks.get('declared') : null
+      if (d && askEnded(mon, sk, 'declared', d, 'resolved')) fail('I10', 'an owner item still carries a declared ask that a newer report ended')
     }
   }
 }
@@ -593,25 +790,35 @@ export function checkStep(mon, h, { complete = true } = {}) {
     const m = h.ctx.state.items.get(it.id)
     if (it.open !== Boolean(m?.open)) fail('I4c', `item open=${it.open} in the ledger account but open=${Boolean(m?.open)} in the model`)
   }
-  // I9: an owner-block report is not surfaced a second time as an attention
-  // item beside its own owner-block item. Two cases are exempt, both places
-  // where the owner hears twice about one session (README, open):
-  //  - the attention item came from `repeated_error`: the session's own reads
-  //    keep failing, a different signal from its old line;
-  //  - DESIGN-GAP: it came from `dropped_from_list` on a source that cannot
-  //    confirm `gone`, so two inconclusive cycles surface it as attention;
-  //  - DESIGN-GAP: it came from `dropped_from_list` where every confirming
-  //    read found the session listed again (a list that intermittently omits
-  //    it), which is also two inconclusive cycles.
-  for (const it of h.ctx.state.items.values()) {
-    if (!it.open || it.origin !== 'attention' || !it.session) continue
-    const trigger = mon.onsetTrigger.get(it.openedBy)
-    if (trigger === 'repeated_error') continue
-    if (trigger === 'dropped_from_list' && !sourceCaps(mon.config, it.source).can_confirm_gone) continue
-    const confirms = mon.onsetConfirms.get(it.openedBy) ?? []
-    if (trigger === 'dropped_from_list' && confirms.length > 0 && confirms.every((c) => c === 'listed')) continue
-    const d = h.ctx.state.items.get(itemIds.declared(it.session))
-    const rep = it.reportId ? mon.reports.get(it.reportId) : null
-    if (d?.open && rep && isOwnerBlock(rep, mon.config)) fail('I9', `an owner-block report holds both an owner-block item and an attention item (${trigger})`)
+  // I9: a session never has two open owner items, and a session with an
+  // open owner item never also has an open attention item, whatever the
+  // attention item's trigger.
+  const blocked = new Set()
+  for (const it of mon.items.values()) {
+    if (!it.open || !OWNER_BLOCK_ORIGINS.has(it.origin)) continue
+    if (blocked.has(it.sk)) fail('I9', 'a session holds two open owner items')
+    blocked.add(it.sk)
+  }
+
+  for (const it of mon.items.values()) {
+    if (!it.open || it.origin !== 'attention' || !blocked.has(it.sk)) continue
+    fail('I9', `a session holds both an owner item and an attention item (${mon.onsetTrigger.get(it.openedBy) ?? 'carried'})`)
+  }
+  // I11: a condition that was surfaced is never lost. While it is live (no
+  // newer authored report, not superseded by gone, not dismissed), its
+  // session has its open attention item or an open owner item whose
+  // content names it; and an owner item names no condition that has
+  // ended.
+  for (const [id, c] of mon.conds) {
+    if (newerAuthored(mon, c.sk, c.reportId)) mon.conds.delete(id)
+  }
+  for (const c of mon.conds.values()) {
+    if (mon.items.get(c.id)?.open) continue
+    if (openOwnerBlocksOf(mon, c.sk).some((ob) => ob.own?.has(c.id))) continue
+    fail('I11', `a surfaced condition has neither its attention item nor an owner item that names it`)
+  }
+  for (const ob of mon.items.values()) {
+    if (!ob.open || !OWNER_BLOCK_ORIGINS.has(ob.origin)) continue
+    for (const id of ob.own?.keys() ?? []) if (!mon.conds.has(id)) fail('I11', `an owner item names a condition that has ended`)
   }
 }

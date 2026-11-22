@@ -233,6 +233,12 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
         rungs.push({ rung: 'activity_read', outcome: 'unavailable' })
       }
     }
+    // DESIGN-GAP: a stale owner block is explained by its owner item only
+    // while the item carries a live declared ask. A session rewound to an
+    // owner-block line whose ask already used it (and so never comes back)
+    // has no ask carrying it, and is classified, and rechecked, as any other
+    // stale line.
+    const declaredOpen = declaredAskLive(st, P, session)
     const latestRead = st.sessions.get(s.sk)?.latestRead
     const rep = latestRead ? st.reports.get(latestRead)?.body : report
     reportAgeMs = rep ? now - rep.last_report_at : null
@@ -248,7 +254,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
       events: st.sessions.get(s.sk)?.events ?? [],
       reportAt: rep ? rep.last_report_at : -Infinity,
       state: rep ? rep.state : 'none',
-      ownerBlock: rep ? P.isOwnerBlock(rep, cfg) : false,
+      ownerBlock: rep ? P.isOwnerBlock(rep, cfg) && declaredOpen : false,
       now,
       reportAgeMs,
     }
@@ -259,7 +265,7 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
   const surface = P.surfaceFor(classification, cand.kind === 'recheck' ? null : cand.cycle, { reportAgeMs }, cfg)
   // DESIGN-GAP (added field): which owner the session waits on, so that a
   // recheck can tell a pending prompt from an owner block.
-  const reportIsOwnerBlock = report ? P.isOwnerBlock(report, cfg) : false
+  const reportIsOwnerBlock = report ? P.isOwnerBlock(report, cfg) && declaredAskLive(st, P, session) : false
   const ownerWaitBasis = classification === 'waiting_on_owner' ? (reportIsOwnerBlock || !pendingSeen ? 'owner_block' : 'prompt') : null
   // DESIGN-GAP: an attention item's opening reference is "the trigger's
   // onset", but a recheck (which can surface waiting_on_background) has no
@@ -273,6 +279,11 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
   // the age it decided on, so a replay re-derives the same signal.
   yield put({ kind: 'investigation', id: closeKey, session: env, refs: { tick: tickId }, body: closeBody }, now)
   return signalFrom(closeBody, s, cand)
+}
+
+function declaredAskLive(st, P, session) {
+  const it = st.items.get(P.ownerItemOf(session, 'declared'))
+  return Boolean(it?.open && it.asks.has('declared'))
 }
 
 function cycleOnsetFor(st, sk, reportId) {

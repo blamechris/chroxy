@@ -302,7 +302,8 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             handleCopyTranscript()
             break
           case 'session.interrupt':
-            sendInterrupt()
+            // #9243 — a held Cmd+. auto-repeats; one physical press interrupts once.
+            if (!e.repeat) sendInterrupt()
             break
           case 'session.prev':
           case 'session.next': {

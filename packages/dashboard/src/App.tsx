@@ -3260,13 +3260,25 @@ export function App() {
                 />
                 {connectionPhase === 'connecting' ? (
                   <SessionLoadingSkeleton label="Connecting..." />
-                ) : isSwitchingSession ? (
+                ) : (
+                <>
+                {isSwitchingSession && (
                   <SessionLoadingSkeleton label="Switching session..." />
-                ) : splitMode ? (
+                )}
+                {/* #9234 / #4305 — the skeleton used to REPLACE this subtree, so
+                    every switch unmounted ChatView and every per-session xterm
+                    (dropping terminal scrollback; a deferred xterm timer then threw
+                    after dispose). Keep it mounted and hide it instead. */}
+                <div
+                  data-testid="session-content"
+                  style={{ display: isSwitchingSession ? 'none' : 'contents' }}
+                >
+                {splitMode ? (
                   <SplitPane
                     direction={splitMode}
                     first={
                       <ChatView
+                        key={activeSessionId ?? ''}
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
@@ -3319,7 +3331,12 @@ export function App() {
                         display: viewMode === 'chat' ? 'contents' : 'none',
                       }}
                     >
+                      {/* #9234 — keyed by session: the pane stays mounted across a
+                          switch (so the terminals keep their xterms), but each
+                          session still gets a fresh ChatView — scroll position,
+                          "scrolled up" and the find bar must not carry over. */}
                       <ChatView
+                        key={activeSessionId ?? ''}
                         messages={chatMessages}
                         isStreaming={busyProps.isStreaming}
                         isBusy={busyProps.isBusy}
@@ -3356,6 +3373,9 @@ export function App() {
                       />
                     </div>
                   </>
+                )}
+                </div>
+                </>
                 )}
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />

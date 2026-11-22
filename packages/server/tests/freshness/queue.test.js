@@ -42,21 +42,21 @@ describe('the single slot', () => {
     W.author(h.world, b.sk, T0 + 1000, ownerBlock())
     W.author(h.world, c.sk, T0 + 2000, ownerBlock())
     let t = ticks(h, 'chroxy', T0, 1)
-    assert.deepEqual(h.sends.map((s) => s.item_id), [itemIds.declared(a.s)])
+    assert.deepEqual(h.sends.map((s) => s.item_id), [itemIds.owner(a.s)])
     // Acknowledged and awaiting verification: the slot is still held.
-    h.owner(itemIds.declared(a.s), 'done', 'm1', { at: t + MIN })
+    h.owner(itemIds.owner(a.s), 'done', 'm1', { at: t + MIN })
     t = ticks(h, 'chroxy', t, 1)
-    assert.equal(h.sendsFor(itemIds.declared(b.s)).length, 0)
-    assert.deepEqual(sent(h, itemIds.declared(a.s)), ['shown1', 'returned1'])
+    assert.equal(h.sendsFor(itemIds.owner(b.s)).length, 0)
+    assert.deepEqual(sent(h, itemIds.owner(a.s)), ['shown1', 'returned1'])
     // Resolved by evidence: the next item is shown at the next tick.
     W.author(h.world, a.sk, t + MIN, { state: 'running', next: 'go' })
     t = ticks(h, 'chroxy', t, 1)
-    assert.equal(h.item(itemIds.declared(a.s)).state, 'closed')
-    assert.deepEqual(sent(h, itemIds.declared(b.s)), ['shown1'])
+    assert.equal(h.item(itemIds.owner(a.s)).state, 'closed')
+    assert.deepEqual(sent(h, itemIds.owner(b.s)), ['shown1'])
     // Deferred: the slot frees, the third is shown.
-    h.owner(itemIds.declared(b.s), 'defer', 'm2', { at: t + MIN, until: t + 4 * HOUR })
+    h.owner(itemIds.owner(b.s), 'defer', 'm2', { at: t + MIN, until: t + 4 * HOUR })
     ticks(h, 'chroxy', t, 1)
-    assert.deepEqual(sent(h, itemIds.declared(c.s)), ['shown1'])
+    assert.deepEqual(sent(h, itemIds.owner(c.s)), ['shown1'])
     assert.equal(h.openItems().filter((i) => i.state === 'active').length, 1)
   })
 
@@ -68,7 +68,7 @@ describe('the single slot', () => {
       W.author(h.world, a.sk, T0, ownerBlock())
       W.author(h.world, b.sk, T0 + 1000, ownerBlock())
       h.tick('codex', T0 + 15 * MIN)
-      h.owner(itemIds.declared(a.s), 'done', 'm1', { at: T0 + 16 * MIN })
+      h.owner(itemIds.owner(a.s), 'done', 'm1', { at: T0 + 16 * MIN })
       // Another source's tick fills the freed slot; a's own source then returns it.
       h.tick('chroxy', T0 + 20 * MIN)
       h.tick('codex', T0 + 30 * MIN)
@@ -83,7 +83,7 @@ describe('the single slot', () => {
     const b = session(h, 'chroxy', 'b')
     W.author(h.world, a.sk, T0, ownerBlock())
     W.author(h.world, b.sk, T0 + 1000, ownerBlock())
-    const id = itemIds.declared(a.s)
+    const id = itemIds.owner(a.s)
     let t = ticks(h, 'chroxy', T0, 1)
     h.owner(id, 'done', 'm1', { at: t + MIN })
     t = ticks(h, 'chroxy', t, 1)
@@ -93,7 +93,7 @@ describe('the single slot', () => {
     t = ticks(h, 'chroxy', t, 1)
     assert.equal(h.item(id).state, 'exhausted')
     assert.ok(h.item(id).open, 'an exhausted item stays listed')
-    assert.deepEqual(sent(h, itemIds.declared(b.s)), ['shown1'], 'the slot is free for the next item')
+    assert.deepEqual(sent(h, itemIds.owner(b.s)), ['shown1'], 'the slot is free for the next item')
     const acks = h.records('owner_ack').filter((r) => r.body.item_id === id).map((r) => `${r.body.phase}:${r.body.verified}`)
     assert.deepEqual(acks, ['ack:null', 'verify:false', 'ack:null', 'verify:false'])
     assert.equal(h.conflicts().length, 0)
@@ -107,8 +107,8 @@ describe('the single slot', () => {
     W.author(h.world, a.sk, T0, ownerBlock())
     W.author(h.world, b.sk, T0 + 1000, ownerBlock())
     W.author(h.world, c.sk, T0 + 2000, ownerBlock())
-    const ia = itemIds.declared(a.s)
-    const ib = itemIds.declared(b.s)
+    const ia = itemIds.owner(a.s)
+    const ib = itemIds.owner(b.s)
     ticks(h, 'chroxy', T0, 5)
     // The transition table sends an expired item to the back of its class
     // (it is exhausted only when it next reaches the slot, not at the time
@@ -127,7 +127,7 @@ describe('sends per episode', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 5)
     h.restart()
     for (let k = 0; k < 5; k++) {
@@ -150,7 +150,7 @@ describe('sends per episode', () => {
       W.author(h.world, x.sk, t + MIN, ownerBlock(`waiting ${k}h`))
       t = ticks(h, 'codex', t, 1)
     }
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     assert.equal(h.surface(id).filter((r) => r.body.step === 'updated').length, 5)
     assert.equal(new Set(h.surface(id).map((r) => r.body.episode)).size, 1)
     assert.deepEqual(sent(h, id).filter((s) => s.startsWith('shown')), ['shown1'])
@@ -164,7 +164,7 @@ describe('sends per episode', () => {
       W.author(h.world, x.sk, t + MIN, ownerBlock(w))
       t = ticks(h, 'codex', t, 1)
     }
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     assert.equal(h.surface(id).filter((r) => r.body.step === 'updated').length, 3)
     assert.equal(h.conflicts().length, 0)
     const rep = h.ctx.state.reports.get(h.item(id).reportId).body
@@ -175,7 +175,7 @@ describe('sends per episode', () => {
     const h = setup({ surface: { max_presentations: 2, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] } })
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock('A'))
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 1)
     h.owner(id, 'done', 'm1', { at: t + MIN })
     t = ticks(h, 'codex', t, 1)
@@ -198,7 +198,7 @@ describe('sends per episode', () => {
     const h = setup({ surface: { max_presentations: 1, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] } })
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 1)
     for (let k = 0; k < 3; k++) {
       h.owner(id, 'defer', `d${k}`, { at: t + MIN, until: t + 30 * MIN })
@@ -216,7 +216,7 @@ describe('sends per episode', () => {
     const h = setup({ surface: { max_presentations: 3, item_time_limit_hours: 1, reminder_after_minutes: [20, 40] } })
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     ticks(h, 'codex', T0, 14)
     const s = sent(h, id)
     assert.deepEqual(s.filter((v) => v.startsWith('shown')), ['shown1', 'shown2', 'shown3'])
@@ -233,7 +233,7 @@ describe('configuration changes mid-episode', () => {
       const x = session(h, 'codex', 'x')
       const y = session(h, 'chroxy', 'y')
       W.author(h.world, x.sk, T0, ownerBlock('A'))
-      const id = itemIds.declared(x.s)
+      const id = itemIds.owner(x.s)
       h.tick('codex', T0 + 15 * MIN)
       h.owner(id, 'done', 'm1', { at: T0 + 16 * MIN })
       h.tick('codex', T0 + 30 * MIN)
@@ -263,7 +263,7 @@ describe('crashes around sends', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     // Find the op index of the attempt by running once on a copy.
     let n = 0
     for (; n < 50; n++) {
@@ -293,7 +293,7 @@ describe('crashes around sends', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 4)
     // The next tick is due reminder 1 (60 min after the show at +15).
     const at = T0 + 75 * MIN
@@ -329,7 +329,7 @@ describe('origins and their closing evidence', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 1)
     W.author(h.world, x.sk, t + MIN, { state: 'blocked', blocked_on: 'waiting on CI' })
     t = ticks(h, 'codex', t, 20)
@@ -341,7 +341,7 @@ describe('origins and their closing evidence', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 1)
     W.author(h.world, x.sk, t + MIN, { state: 'running', next: 'go' })
     t = ticks(h, 'codex', t, 10)
@@ -356,7 +356,7 @@ describe('origins and their closing evidence', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')
     W.author(h.world, x.sk, T0, ownerBlock())
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     let t = ticks(h, 'codex', T0, 1)
     W.author(h.world, x.sk, t + MIN, { state: 'running', next: 'go' })
     t = ticks(h, 'codex', t, 1)
@@ -374,8 +374,8 @@ describe('origins and their closing evidence', () => {
     W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'waiting on CI' })
     W.author(h.world, y.sk, T0, { state: 'blocked', owner: OWNER, seed: { scope: 'repo-b', session: 'y', written_at: T0 } })
     ticks(h, 'codex', T0, 1)
-    assert.equal(h.item(itemIds.declared(x.s)), undefined)
-    assert.equal(h.item(itemIds.declared(y.s)), undefined)
+    assert.equal(h.item(itemIds.owner(x.s)), undefined)
+    assert.equal(h.item(itemIds.owner(y.s)), undefined)
     assert.ok(h.item(itemIds.seed('repo-b', 'y')).open)
   })
 
@@ -386,14 +386,14 @@ describe('origins and their closing evidence', () => {
     let t = ticks(h, 'chroxy', T0, 1)
     W.author(h.world, c.sk, t + MIN, { state: 'running', next: 'b' })
     t = ticks(h, 'chroxy', t, 1)
-    assert.equal(h.item(itemIds.declared(c.s)), undefined, 'running + inherited decision raises nothing')
+    assert.equal(h.item(itemIds.owner(c.s)), undefined, 'running + inherited decision raises nothing')
     W.author(h.world, c.sk, t + MIN, { state: 'blocked', blocked_on: 'waiting on CI' })
     t = ticks(h, 'chroxy', t, 1)
-    assert.ok(h.item(itemIds.declared(c.s))?.open, 'blocked + inherited decision is an owner block')
+    assert.ok(h.item(itemIds.owner(c.s))?.open, 'blocked + inherited decision is an owner block')
     // ...and the first running line, still inheriting it, resolves the item.
     W.author(h.world, c.sk, t + MIN, { state: 'running', next: 'c' })
     ticks(h, 'chroxy', t, 1)
-    assert.equal(h.item(itemIds.declared(c.s)).state, 'closed')
+    assert.equal(h.item(itemIds.owner(c.s)).state, 'closed')
   })
 
   it('gap witness: on a changed-at source a running line that DOES state a new decision is never an owner block', () => {
@@ -401,7 +401,7 @@ describe('origins and their closing evidence', () => {
     const c = session(h, 'chroxy', 'c')
     W.author(h.world, c.sk, T0, { state: 'running', next: 'a', decision: 'a brand new question' })
     ticks(h, 'chroxy', T0, 2)
-    assert.equal(h.item(itemIds.declared(c.s)), undefined)
+    assert.equal(h.item(itemIds.owner(c.s)), undefined)
   })
 
   it('a pending prompt that times out does not resolve its item; an owner answer recorded by the host does', () => {
@@ -410,7 +410,7 @@ describe('origins and their closing evidence', () => {
     W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
     const p1 = W.raisePrompt(h.world, c.sk, T0 + 10 * MIN, 3600)
     let t = ticks(h, 'chroxy', T0, 1)
-    const id = itemIds.prompt(c.s)
+    const id = itemIds.owner(c.s)
     W.lapsePrompt(h.world, c.sk, p1, t + MIN)
     t = ticks(h, 'chroxy', t, 2)
     assert.ok(h.item(id).open)
@@ -427,7 +427,7 @@ describe('origins and their closing evidence', () => {
     const h = setup({ per_source: { chroxy: 30 } })
     const c = session(h, 'chroxy', 'c')
     W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
-    const id = itemIds.prompt(c.s)
+    const id = itemIds.owner(c.s)
     let t = T0
     for (let k = 0; k < 24; k++) {
       const at = T0 + k * 5 * MIN + 1000
@@ -456,11 +456,11 @@ describe('origins and their closing evidence', () => {
       const p2 = W.raisePrompt(h.world, c.sk, t + 2 * MIN)
       W.answerPrompt(h.world, c.sk, p2, t + 3 * MIN)
       t = ticks(h, 'chroxy', t, 4)
-      assert.equal(h.item(itemIds.prompt(c.s)).open, literal, literal ? 'literal: stays open' : 'model: resolved')
+      assert.equal(h.item(itemIds.owner(c.s)).open, literal, literal ? 'literal: stays open' : 'model: resolved')
     }
   })
 
-  it('a stale line surfaced as attention, then a prompt on the same session: a separate owner-block item that notifies', () => {
+  it('a stale line surfaced as attention, then a prompt on the same session: a separate owner item that notifies', () => {
     const h = setup()
     const d = session(h, 'claude-desktop', 'd', null)
     const c = session(h, 'chroxy', 'c')
@@ -479,7 +479,7 @@ describe('origins and their closing evidence', () => {
     W.raisePrompt(h.world, c.sk, t + 2 * MIN, 3600)
     h.tick('chroxy', t + 15 * MIN)
     h.tick('chroxy', t + 30 * MIN)
-    const pid = itemIds.prompt(c.s)
+    const pid = itemIds.owner(c.s)
     assert.ok(h.item(pid)?.open)
     assert.notEqual(pid, att)
   })
@@ -534,7 +534,7 @@ describe('the preemption link', () => {
     const l = createLedger({ ledgerId: 'L' })
     const z = { presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 }
     steps.forEach(([item, episode, step, extra = {}], i) => {
-      append(l, { kind: 'surface', id: `r${i}`, body: { item_id: item, item_kind: 'owner_block', origin: 'declared', episode, step, phase: 'none', ...z, opened_by: `ref-${item}-${episode}`, ...extra } }, T0 + i * 1000)
+      append(l, { kind: 'surface', id: `r${i}`, body: { item_id: item, item_kind: 'owner_block', origin: 'owner', episode, step, phase: 'none', ...z, opened_by: `ref-${item}-${episode}`, ...extra } }, T0 + i * 1000)
     })
     return deriveState(l.records, DEFAULT_POLICY)
   }
@@ -561,7 +561,7 @@ describe('preemption', () => {
     h.tick('chroxy', T0 + 2 * MIN)
     W.raisePrompt(h.world, b.sk, T0 + 5 * MIN, 45 * 60)
     ticks(h, 'chroxy', T0, 4)
-    return { h, ia: itemIds.prompt(a.s), ib: itemIds.prompt(b.s) }
+    return { h, ia: itemIds.owner(a.s), ib: itemIds.owner(b.s) }
   }
 
   it('an item whose deadline passes before the active item\'s next reminder preempts it once; the preempted keeps its history', () => {

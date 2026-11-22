@@ -15,17 +15,18 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { withPolicy } from './model/policy.js'
-import { MIN, T0, createHarness } from './helpers/harness.js'
+import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
 import { runSequence } from './helpers/sequence.js'
 import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const SEEDS = {
-  I1a: 1, I1b: 1, I1c: 1, I1d: 1, I2: 1, I2b: 1, I2c: 2093, 'I2c.front': 782, I3a: 1, I3b: 14, I4a: 3, I4b: 8, 'I4b.lapsed': 1, I5: 11, I6: 158,
-  I7a: 1, 'I7a.onset': 1, I7i: 2, I7b: 1, I7c: 2, I7d: 14, I7f: 30, 'I7f.window': 875, I7g: 7, I8: 2, I8b: 1, I9: 11, I10: 1,
-  ackFreesSlot: 1, anyNewReportIsContent: 158, contentMayMoveBack: 12, reReadOnResume: 1, staleOwnerBlockInconclusive: 11,
-  onlyOwnPromptAnswer: 232, noRecheckAfterOwnerWait: 151,
+  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, 'I2c.front': 3681, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, 'I5.content': 76, I6: 271,
+  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6,
+  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 18,
+  ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 70, reReadOnResume: 4, raiseBesideOwnerBlock: 7, twoOwnerItems: 6,
+  onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
 }
 const SEARCH = 300
 
@@ -39,7 +40,7 @@ function firstFailure(expect, from, opts) {
 
 describe('mutation proofs: each invariant goes red when its rule is broken', () => {
   for (const [name, policy] of Object.entries(MUTANTS)) {
-    if (name === 'I7e') continue
+    if (name === 'I7e' || name === 'I2c') continue
     const expect = name.split('.')[0]
     it(`${name}`, () => {
       const f = firstFailure(expect, SEEDS[name], { policy })
@@ -77,6 +78,59 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     assert.equal(run(MUTANTS.I7e), 'I7e')
   })
 
+  // Random sequences reach this preemption only rarely, so I2c is proven on a
+  // schedule built for it: an item is active, a prompt whose deadline comes
+  // before the active item's next reminder preempts it, and the process dies
+  // between the preemption and the preemptor's show. The replay comes after
+  // the preemptor's deadline has passed, so only the preemptor-first rule
+  // keeps the preempted item from being shown straight back.
+  it('I2c (scenario): the preempted item shown straight back after a crash is caught', () => {
+    const build = (policy) => {
+      const h = createHarness({ config: { per_source: { chroxy: 15 } }, ...(policy ? { policy } : {}) })
+      const a = W.addSession(h.world, { source: 'chroxy', native_id: 'a', scope: 'r' })
+      const b = W.addSession(h.world, { source: 'chroxy', native_id: 'b', scope: 'r' })
+      W.author(h.world, a, T0, { state: 'blocked', blocked_on: 'approve', owner: OWNER })
+      W.author(h.world, b, T0, { state: 'running', next: 'b' })
+      const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+      h.tick('chroxy', T0 + 15 * MIN)
+      checkStep(mon, h)
+      // A deadline at +46, before a's first reminder at +75.
+      W.raisePrompt(h.world, b, T0 + 16 * MIN, 30 * 60)
+      return { h, mon }
+    }
+    const run = (policy) => {
+      const slotStart = T0 + 30 * MIN
+      for (let n = 0; n < 80; n++) {
+        const { h, mon } = build(policy)
+        try {
+          h.tick('chroxy', T0 + 30 * MIN, { crashAfter: n, slotStart })
+          continue
+        } catch (e) {
+          if (!(e instanceof Crash)) throw e
+        }
+        const surf = h.records('surface')
+        const preempted = surf.some((r) => r.body.step === 'preempted')
+        const shown = surf.some((r) => r.body.step === 'shown' && r.body.phase === 'attempt' && r.session.native_id === 'b')
+        if (!preempted || shown) continue
+        // Killed between the preemption and the preemptor's show; replayed
+        // in the same slot after the preemptor's deadline has passed.
+        try {
+          checkStep(mon, h, { complete: false })
+          h.restart()
+          h.tick('chroxy', T0 + 50 * MIN, { slotStart })
+          checkStep(mon, h)
+        } catch (e) {
+          if (e instanceof InvariantError) return e.id
+          throw e
+        }
+        return null
+      }
+      throw new Error('the crash point between the preemption and the show was not found')
+    }
+    assert.equal(run(), null)
+    assert.equal(run(MUTANTS.I2c), 'I2c')
+  })
+
   it('I7h (fault): a planner that never writes an investigation\'s close record is caught', () => {
     const drop = (d) => d.kind === 'investigation' && d.body.phase === 'close'
     const f = firstFailure('I7h', 1, { fault: { dropAppend: drop } })
@@ -95,6 +149,52 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'seed' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'owner_stated_unverified' } } : d)
     const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
     assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I4b (fault): an attention item withdrawn as merged with no owner item carrying it is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.origin === 'attention' && d.body.step === 'resolved' ? { ...d, body: { ...d.body, step: 'withdrawn', reason: 'merged' } } : d)
+    const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I11 (fault): a carried condition whose clearing is never written stays named after it ended, and is caught', () => {
+    const dropAppend = (d) => d.kind === 'surface' && d.body.step === 'updated' && d.body.carry?.op === 'clear'
+    const f = firstFailure('I11', 1, { fault: { dropAppend } })
+    assert.ok(f)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I11 (fault): an owner item whose recorded list does not match its own changes is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.carry?.op === 'carry' ? { ...d, body: { ...d.body, carried: [] } } : d)
+    const f = firstFailure('I11', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /content names 0 conditions where its changes add up to 1/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I10 (fault): an owner item whose recorded asks do not match its own ask changes is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.ask?.op === 'join' ? { ...d, body: { ...d.body, asks: d.body.asks.filter((a) => a.kind !== d.body.ask.kind) } } : d)
+    const f = firstFailure('I10', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /content lists asks/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I10 (fault): a declared ask whose ending is never written stays on the item after the newer report, and is caught', () => {
+    const dropAppend = (d) => d.kind === 'surface' && d.body.ask?.op === 'end' && d.body.ask.kind === 'declared'
+    const f = firstFailure('I10', 1, { fault: { dropAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /still carries a declared ask/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I4b (fault): an ask recorded as ended without its evidence is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'surface' && d.body.ask?.op === 'content' && d.body.ask.kind === 'declared' ? { ...d, body: { ...d.body, ask: { ...d.body.ask, op: 'end', how: 'resolved' }, asks: d.body.asks.filter((a) => a.kind !== 'declared') } } : d)
+    const f = firstFailure('I4b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /ask was ended/)
     assert.ok(runSequence(f.seed).ok)
   })
 

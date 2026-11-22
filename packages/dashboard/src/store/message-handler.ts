@@ -234,7 +234,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { filterThinking, nextMessageId, createEmptySessionPanels } from './utils';
+import { filterThinking, nextMessageId, createEmptySessionPanels, isClaudeTuiSession } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
@@ -2025,6 +2025,29 @@ type MsgGet = () => ConnectionState;
 type MsgSet = (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void;
 type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: ConnectionContext) => void;
 
+// #9259 — `appendTerminalData` writes to the ACTIVE session's terminal whatever
+// session the text belongs to, so the synthesized terminal text (stream deltas,
+// the stream-end newline, the tool_start line, the tool_result preview) goes
+// through here and is dropped when a session is on screen and the frame names
+// a different one. A frame without a sessionId (or with an empty or non-string
+// one) keeps its pre-multi-session meaning, the active session, exactly as the
+// chat-side routing of the same frames resolves it. With no session active
+// there is no session terminal to bleed into, so the flat-state write is kept.
+// Same intent as terminal_output (dispatchTerminalOutput) and the `user_input`
+// echo.
+// #9262 — the frame's session (its sessionId, else the active one) is also
+// dropped when it is claude-tui: its terminal is the live PTY mirror, and an
+// injected line corrupts the TUI redraw. Same rule as the prompt and answer
+// echoes in connection.ts.
+function appendTerminalDataForSession(get: MsgGet, msg: Record<string, unknown>, data: string): void {
+  const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null;
+  const state = get();
+  const activeId = state.activeSessionId;
+  if (sessionId !== null && activeId !== null && sessionId !== activeId) return;
+  if (isClaudeTuiSession(state.sessions, sessionId ?? activeId)) return;
+  state.appendTerminalData(data);
+}
+
 // --- Extracted handler functions ---
 
 function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
@@ -2749,7 +2772,7 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     // Forward delta text to terminal view (synthesize raw output in CLI mode).
     // The shared fn already gates on `typeof msg.delta === 'string' && length`.
     appendTerminalDelta: (delta) => {
-      get().appendTerminalData(delta);
+      appendTerminalDataForSession(get, msg, delta);
     },
 
     // #4297 — TUI fires stream_start at turn-start (#4010), creating an empty
@@ -2844,7 +2867,7 @@ function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   // Flush any buffered deltas immediately before clearing streaming state
   deltaFlusher.flushNow();
   // Add newline separator after response ends for Output view readability
-  get().appendTerminalData('\r\n');
+  appendTerminalDataForSession(get, msg, '\r\n');
   const out = sharedStreamEnd(msg, get().activeSessionId);
   // Clean up permission boundary split tracking. messageId is null for
   // malformed payloads (non-string msg.messageId) — skip cleanup in that case.
@@ -2873,7 +2896,7 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   // throw on a non-serialisable msg.input (circular ref) cannot suppress the
   // terminal preview write — matches the prior inline ordering.
   const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
-  get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  appendTerminalDataForSession(get, msg, `\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
   const toolStartTargetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
   const cached = (() => {
     const targetState = toolStartTargetId ? get().sessionStates[toolStartTargetId] : null;
@@ -2975,7 +2998,7 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
     const preview = text.length > 500
       ? text.slice(0, 500) + '...'
       : text;
-    get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
+    appendTerminalDataForSession(get, msg, `\x1b[2m${preview}\x1b[0m\r\n`);
   }
   const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {
@@ -6207,7 +6230,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // writes to the ACTIVE session's buffer whatever session the input belongs
       // to, so a turn for a background session (a wake, or another client typing
       // there) must not put "> ..." into the session being looked at.
-      if (userInput.content && userInput.sessionId === get().activeSessionId) {
+      // #9262: nor into a claude-tui session's live PTY mirror.
+      if (userInput.content && userInput.sessionId === get().activeSessionId
+        && !isClaudeTuiSession(get().sessions, userInput.sessionId)) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
       // #3188: a remote client just answered (or otherwise sent a fresh

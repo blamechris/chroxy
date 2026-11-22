@@ -5,6 +5,7 @@
  * Pattern: mock useConnectionStore to return default state + no-op actions,
  * avoiding real WebSocket connections.
  */
+import { useEffect } from 'react'
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, within, waitFor, act } from '@testing-library/react'
 import type { CreateSessionData } from './components/CreateSessionModal'
@@ -70,14 +71,22 @@ let capturedOnRestart: ((sessionId: string) => void) | null = null
 // JSDOM-incompatible browser APIs and would throw on every test. A
 // shallow stub keeps the App tests focused on App behaviour while
 // MultiTerminalView's own tests cover its production wiring.
+// #9234: counts stub mounts so a test can prove a session switch does not
+// unmount/remount the terminal subtree.
+let multiTerminalMountCount = 0
 vi.mock('./components/MultiTerminalView', () => ({
-  MultiTerminalView: (props: { className?: string; visible?: boolean }) => (
-    <div
-      data-testid="multi-terminal-view-mock"
-      className={props.className}
-      data-visible={String(props.visible)}
-    />
-  ),
+  MultiTerminalView: (props: { className?: string; visible?: boolean }) => {
+    useEffect(() => {
+      multiTerminalMountCount++
+    }, [])
+    return (
+      <div
+        data-testid="multi-terminal-view-mock"
+        className={props.className}
+        data-visible={String(props.visible)}
+      />
+    )
+  },
 }))
 
 // #4685 — PermissionPrompt reads `availableProviders` and calls
@@ -196,7 +205,7 @@ import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiCh
 import { createShortcutRegistry } from './shortcuts/registry'
 import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
 import { __setSharedRegistryForTesting } from './shortcuts/useShortcutRegistry'
-import { persistSidebarRepoNames } from './store/persistence'
+import { persistSidebarRepoNames, persistSplitMode } from './store/persistence'
 
 // Mutable state override — tests can change this before rendering
 let stateOverrides: Record<string, unknown> = {}
@@ -1083,6 +1092,82 @@ describe('App', () => {
     rerender(<App />)
     // Skeleton cleared once activeSessionId changes
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+
+  // #9234 — the skeleton used to replace the chat/terminal subtree, remounting
+  // every per-session xterm on each switch (scrollback lost). It must now show
+  // while the content stays mounted (hidden); only the ChatView is per-session.
+  it('keeps chat and terminals mounted while the switch skeleton shows (#9234)', () => {
+    const sess = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [sess('s1'), sess('s2')],
+      activeSessionId: 's1',
+      switchSession: vi.fn(() => true),
+    }
+    multiTerminalMountCount = 0
+    const { rerender } = render(<App />)
+    const terminalBefore = screen.getByTestId('multi-terminal-view-mock')
+    const chatPaneBefore = screen.getByTestId('chat-pane')
+    const chatViewBefore = chatPaneBefore.firstElementChild
+    expect(chatViewBefore).not.toBeNull()
+    expect(multiTerminalMountCount).toBe(1)
+
+    fireEvent.click(screen.getByTestId('session-tab-s2'))
+    expect(screen.getByTestId('session-loading-skeleton')).toBeInTheDocument()
+    expect(screen.getByTestId('session-content')).toHaveStyle({ display: 'none' })
+    expect(screen.getByTestId('multi-terminal-view-mock')).toBe(terminalBefore)
+
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+    expect(screen.getByTestId('session-content')).toHaveStyle({ display: 'contents' })
+    expect(screen.getByTestId('multi-terminal-view-mock')).toBe(terminalBefore)
+    expect(screen.getByTestId('chat-pane')).toBe(chatPaneBefore)
+    expect(multiTerminalMountCount).toBe(1)
+    // ...while the ChatView itself is keyed by session, so the new session gets a
+    // fresh one (scroll position and "scrolled up" do not carry across).
+    expect(chatPaneBefore.firstElementChild).not.toBe(chatViewBefore)
+  })
+
+  // #9234 — the same in split view: the SplitPane (and its terminal half) stays
+  // mounted across a switch, but its chat half is a fresh ChatView per session.
+  it('gives each session a fresh ChatView in split view too (#9234)', () => {
+    const sess = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    persistSplitMode('horizontal')
+    // react-resizable-panels needs a constructible ResizeObserver (as in SplitPane.test).
+    const realResizeObserver = globalThis.ResizeObserver
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver
+    try {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [sess('s1'), sess('s2')],
+        activeSessionId: 's1',
+        switchSession: vi.fn(() => true),
+      }
+      multiTerminalMountCount = 0
+      const splitChatView = () => {
+        const content = screen.getByTestId('session-content')
+        expect(within(content).queryByTestId('chat-pane')).toBeNull() // split branch, not the default panes
+        return content.querySelector('.chat-view')
+      }
+      const { rerender } = render(<App />)
+      const chatViewBefore = splitChatView()
+      expect(chatViewBefore).not.toBeNull()
+      const terminalBefore = screen.getByTestId('multi-terminal-view-mock')
+
+      fireEvent.click(screen.getByTestId('session-tab-s2'))
+      stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+      rerender(<App />)
+
+      expect(screen.getByTestId('multi-terminal-view-mock')).toBe(terminalBefore)
+      expect(multiTerminalMountCount).toBe(1)
+      expect(splitChatView()).not.toBeNull()
+      expect(splitChatView()).not.toBe(chatViewBefore)
+    } finally {
+      persistSplitMode(null)
+      globalThis.ResizeObserver = realResizeObserver
+    }
   })
 
   // #7475 — the wedge the membership check would otherwise have introduced.

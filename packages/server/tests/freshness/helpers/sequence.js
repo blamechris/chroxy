@@ -75,6 +75,7 @@ function drawEvent(rng, g, h) {
     ['owner_done', 4], ['owner_defer', 2], ['owner_dismiss', 2], ['quiet', 1.5],
     ['die', 1.5], ['blocked_read', 0.6], ['untrusted', 0.6], ['future_line', 0.6],
     ['source_skew', 0.5], ['answering', 0.6], ['flicker', 0.8], ['config', 0.4],
+    ['prompt_round', 0.6],
   ])
   switch (kind) {
     case 'tick': {
@@ -98,6 +99,9 @@ function drawEvent(rng, g, h) {
     case 'turn_start': case 'turn_end': case 'turn_error': case 'background': case 'drop': case 'relist': case 'flaky':
       return { kind, sk }
     case 'prompt': return { kind, sk: rng.pick(sks.filter((x) => world.sessions[x].session.source === 'chroxy')) }
+    // Owner-block cycles in a row on one session: a prompt raised, a tick,
+    // the owner's answer, a tick, repeated.
+    case 'prompt_round': return { kind, sk: rng.pick(sks.filter((x) => world.sessions[x].session.source === 'chroxy')), rounds: rng.int(2, 4) }
     case 'answer': case 'lapse': {
       const pend = sks.flatMap((x) => world.sessions[x].prompts.filter((p) => p.status === 'pending').map((p) => [x, p.ref]))
       if (pend.length === 0) return { kind: 'noop' }
@@ -212,6 +216,17 @@ function runStep(g, h, mon, ev) {
     }
     return
   }
+  if (ev.kind === 'prompt_round') {
+    for (let k = 0; k < ev.rounds; k++) {
+      const ref = Wd.raisePrompt(h.world, ev.sk, g.now)
+      for (const answer of [false, true]) {
+        if (answer) Wd.answerPrompt(h.world, ev.sk, ref, g.now)
+        runStep(g, h, mon, { kind: 'tick', source: 'chroxy', at: Math.max(g.now, g.nextSlot.chroxy), crash: null })
+        checkStep(mon, h)
+      }
+    }
+    return
+  }
   if (ev.kind === 'config') {
     const cur = structuredClone(h.ctx.state.config)
     if (ev.which === 'max_presentations') cur.surface.max_presentations = cur.surface.max_presentations === 2 ? 3 : 2
@@ -276,20 +291,23 @@ export function probeClosable(h, policy) {
       else Wd.author(world, sk, now, { state: 'blocked', blocked_on: 'waiting on CI', next: 'closing evidence', decision: w.session.source === 'chroxy' ? undefined : null })
     }
     switch (it.origin) {
-      case 'declared':
       case 'attention':
         ensureReadable(it.sk)
         nonOwnerLine(it.sk)
         break
-      case 'prompt': {
+      case 'owner': {
+        // Every live ask's own evidence: a line that is no owner block for the
+        // declared ask; for the prompt ask, an owner answer to the latest
+        // prompt, or, if that prompt already lapsed, the lapse path (nothing
+        // pending and a newer report).
         ensureReadable(it.sk)
-        const w = world.sessions[it.sk]
-        // The origin's evidence is an owner answer to the latest prompt. If
-        // the latest prompt already lapsed it is the lapse path instead:
-        // nothing pending and a newer report.
-        const latest = w.prompts.slice().sort((a, b) => a.raised_at - b.raised_at).pop()
-        for (const x of w.prompts.filter((y) => y.status === 'pending')) Wd.answerPrompt(world, it.sk, x.ref, now)
-        if (!latest || latest.status === 'lapsed') Wd.author(world, it.sk, now + 1000, { state: 'running', next: 'closing evidence' })
+        if (it.asks.has('declared')) nonOwnerLine(it.sk)
+        if (it.asks.has('prompt')) {
+          const w = world.sessions[it.sk]
+          const latest = w.prompts.slice().sort((a, b) => a.raised_at - b.raised_at).pop()
+          for (const x of w.prompts.filter((y) => y.status === 'pending')) Wd.answerPrompt(world, it.sk, x.ref, now)
+          if ((!latest || latest.status === 'lapsed') && !it.asks.has('declared')) Wd.author(world, it.sk, now + 1000, { state: 'running', next: 'closing evidence' })
+        }
         break
       }
       case 'gone':
