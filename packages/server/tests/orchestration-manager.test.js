@@ -35,6 +35,9 @@ const STOP_TURN = Symbol('stop-turn')
  */
 const ERROR_TURN = Symbol('error-turn')
 
+/** Decider sentinel (#9147): an interrupted `result` WITH spend, then `stopped`. */
+const STOP_WITH_SPEND = Symbol('stop-with-spend')
+
 function fenced(obj) {
   return 'Here is my decision.\n\n```chroxy-decision\n' + JSON.stringify(obj) + '\n```'
 }
@@ -68,6 +71,12 @@ class FakeSession extends EventEmitter {
       const out = this._decide({ role: this.role, kind, prompt: String(prompt), n: this.kindCalls[kind], model: this._model })
       if (out == null) return // sentinel: hang this turn (no result emitted)
       if (out === STOP_TURN) {
+        this._sm.emit('session_event', { sessionId: this.sessionId, event: 'stopped', data: {} })
+        return
+      }
+      if (out === STOP_WITH_SPEND) {
+        // A Stop answered by the provider's interrupted `result` (carries real spend).
+        this._sm.emit('session_event', { sessionId: this.sessionId, event: 'result', data: { interrupted: true, cost: 0.4, usage: { input_tokens: 50, output_tokens: 5 } } })
         this._sm.emit('session_event', { sessionId: this.sessionId, event: 'stopped', data: {} })
         return
       }
@@ -980,6 +989,47 @@ test('#7142 a plan that resolves after dispose() journals no subtasks and spawns
     assert.equal(sm.created.length, 1, 'no worker was spawned after dispose')
     assert.deepEqual(logged, [], 'no log call after dispose')
     assert.equal(ledger.getRun(rec.runId).status, 'planning', 'the run was left untouched at planning')
+  } finally {
+    cleanup()
+  }
+})
+
+test('a failing ledger write does not mask a Stop: the subtask is still `interrupted` (#9147)', async () => {
+  const decide = (ctx) => {
+    if (ctx.kind === 'epic_plan') return { kind: 'epic_plan', subtasks: [{ title: 'A', goal: 'g', role: 'audit' }] }
+    if (ctx.kind === 'plan_of_attack') return STOP_WITH_SPEND
+    return happyDecider(ctx)
+  }
+  const { ledger, mgr, cleanup } = makeHarness(decide)
+  try {
+    const record = ledger.recordTurnUsage.bind(ledger)
+    let attempts = 0
+    ledger.recordTurnUsage = (runId, args) => {
+      if (args.terminalEvent === 'result' && args.data?.cost === 0.4) { attempts += 1; throw new Error('ledger disk full') }
+      return record(runId, args)
+    }
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    assert.equal(attempts, 1, 'the throwing write was reached')
+    const run = ledger.getRun(rec.runId)
+    assert.equal(run.subtasks[0].status, 'interrupted', 'the TurnError, not the ledger error, decides the subtask')
+    assert.equal(run.status, 'completed')
+  } finally {
+    cleanup()
+  }
+})
+
+test('a failing ledger write on the SUCCESS path does not fail the run (#9147)', async () => {
+  const { ledger, mgr, cleanup } = makeHarness(happyDecider)
+  try {
+    ledger.recordTurnUsage = () => { throw new Error('ledger disk full') }
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const done = waitFor(mgr, ['run_completed'])
+    await mgr.startRun(rec.runId)
+    await done
+    assert.equal(ledger.getRun(rec.runId).status, 'completed')
   } finally {
     cleanup()
   }

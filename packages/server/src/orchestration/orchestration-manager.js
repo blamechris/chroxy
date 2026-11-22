@@ -812,7 +812,7 @@ export class OrchestrationManager extends EventEmitter {
     let attempt = 0
     let currentPrompt = prompt
     let lastError = null
-    const recordUsage = (result, terminalEvent = 'result') => {
+    const recordUsageUnsafe = (result, terminalEvent = 'result') => {
       const roleClass = run.ownedSessions.get(sessionId)?.role ?? null
       // dotted ledger role: architect plan/synthesis vs architect.review, worker.audit
       const ledgerRole = roleClass === 'architect'
@@ -822,19 +822,32 @@ export class OrchestrationManager extends EventEmitter {
         subtaskId, sessionId, role: ledgerRole, turnLabel, terminalEvent, data: result,
       })
     }
+    // #9147 — the ledger is bookkeeping about the turn, never the turn's outcome: a
+    // failed write is logged and swallowed so the TurnError being rethrown (and so
+    // the TURN_STOPPED -> `interrupted` subtask mapping) or the resolved result
+    // propagates unchanged.
+    const recordUsage = (result, terminalEvent = 'result') => {
+      try { recordUsageUnsafe(result, terminalEvent) } catch (err) {
+        this._log?.warn?.(`orchestration: recording ${turnLabel} usage failed: ${err?.message || err}`)
+      }
+    }
+    // Skip null/empty synthetic stalls using the same token normalization as the
+    // ledger reducer.
+    const hasSpend = (result) => !!result && (Number.isFinite(result.cost) || Object.values(normalizeUsage(result.usage)).some((n) => n > 0))
     while (attempt <= this._cfg.maxParseRetries) {
       let turn
       try {
-        turn = await this._driver.driveTurn(sessionId, currentPrompt, { label: turnLabel, timeoutMs: this._cfg.turnTimeoutMs })
+        turn = await this._driver.driveTurn(sessionId, currentPrompt, { label: turnLabel, timeoutMs: this._cfg.turnTimeoutMs,
+          // #9147: spend that arrives while a TURN_TIMEOUT drains (a bare `stopped`
+          // carries none, see TurnDriver.driveTurn). TurnDriver delivers it at most once and never to the next turn.
+          onLateUsage: (result, terminalEvent) => { if (hasSpend(result)) recordUsage(result, terminalEvent) },
+        })
       } catch (err) {
         // A rejected terminal result OR error can still have spent money/tokens
         // (#8554). Require TurnDriver's explicit event provenance; thrown send
-        // failures are not accounting evidence. Skip null/empty synthetic stalls
-        // using the same token normalization as the ledger reducer.
+        // failures are not accounting evidence.
         const result = err instanceof TurnError && (err.terminalEvent === 'result' || err.terminalEvent === 'error') ? err.result : null
-        if (result && (Number.isFinite(result.cost) || Object.values(normalizeUsage(result.usage)).some((n) => n > 0))) {
-          recordUsage(result, err.terminalEvent)
-        }
+        if (hasSpend(result)) recordUsage(result, err.terminalEvent)
         throw err // an interrupted decision must never enter the parse/repair path
       }
       const { text, result } = turn

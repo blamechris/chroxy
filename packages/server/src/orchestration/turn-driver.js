@@ -129,6 +129,7 @@ export class TurnDriver {
     this._occupied = new Set() // sessionId -> has a turn running or reserved
     this._waiters = new Map() // sessionId -> FIFO array of { start, reject }
     this._handoff = new Set() // sessionId -> a deferred _startNext is already queued
+    this._late = new Map() // sessionId -> timed-out ctx still owed this frame's terminal usage (#9147)
     this._onSessionEvent = this._handleSessionEvent.bind(this)
     this._onSessionDestroyed = this._handleSessionDestroyed.bind(this)
     this._sm.on('session_event', this._onSessionEvent)
@@ -148,6 +149,7 @@ export class TurnDriver {
     this._active.clear()
     for (const id of [...this._occupied]) this._vacate(id)
     this._handoff.clear()
+    this._late.clear()
     for (const w of waiters) {
       try { w.reject(new TurnError('SESSION_GONE', 'TurnDriver disposed')) } catch { /* ignore */ }
     }
@@ -175,15 +177,27 @@ export class TurnDriver {
    * BaseSession `admitAtFlush`) when a provider that queued the send dispatches it.
    * Anything but `true`, or a throw, means NOT admitted: the prompt is never sent
    * and the turn rejects `NOT_ADMITTED`. Callers that pass none are unchanged.
+   *
+   * `onLateUsage(result, terminalEvent)` (optional, #9147): called AT MOST ONCE with the
+   * projected accounting of a `result`/`error` that arrives AFTER the turn already
+   * rejected without one — while a TURN_TIMEOUT drains (the interrupted session's
+   * trailing `result` is swallowed there). Without it that spend never reached the
+   * caller's ledger. A bare `stopped` is deliberately NOT covered: every provider
+   * reports an interrupted turn's accounting in a `result` BEFORE `stopped` (which
+   * the result path already carries), `stopped`'s own payload is never accounting,
+   * and a result after it in the same frame cannot be attributed. The event is
+   * consumed here (swallowed by the drain / dropped by the epoch guard) so it can never
+   * ALSO reach the next turn: the caller records it exactly once. A throw is logged.
+   * Callers that pass none are unchanged.
    * @throws {TurnError}
    */
-  driveTurn(sessionId, prompt, { label = null, timeoutMs = null, admit = null } = {}) {
+  driveTurn(sessionId, prompt, { label = null, timeoutMs = null, admit = null, onLateUsage = null } = {}) {
     if (this._disposed) return Promise.reject(new TurnError('SESSION_GONE', 'TurnDriver disposed'))
     const entry = this._sm.getSession?.(sessionId)
     if (!entry || !entry.session) return Promise.reject(new TurnError('SESSION_GONE', `session ${sessionId} not found`))
 
     return new Promise((resolve, reject) => {
-      const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs, admit }, resolve, reject)
+      const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs, admit, onLateUsage }, resolve, reject)
       if (!this._occupied.has(sessionId)) {
         this._occupy(sessionId)
         start()
@@ -200,7 +214,7 @@ export class TurnDriver {
     try { return admit() === true } catch { return false }
   }
 
-  _beginTurn(sessionId, prompt, { label, timeoutMs, admit = null }, resolve, reject) {
+  _beginTurn(sessionId, prompt, { label, timeoutMs, admit = null, onLateUsage = null }, resolve, reject) {
     // Re-fetch the session at START time, not at driveTurn() time: a queued turn
     // may have waited behind the mutex while its session was destroyed/replaced.
     const entry = this._sm.getSession?.(sessionId)
@@ -223,6 +237,7 @@ export class TurnDriver {
       truncated: false,
       settled: false,
       timer: null,
+      onLateUsage: typeof onLateUsage === 'function' ? onLateUsage : null,
       resolve,
       reject,
     }
@@ -320,10 +335,21 @@ export class TurnDriver {
 
   _handleSessionEvent({ sessionId, event, data } = {}) {
     const ctx = this._active.get(sessionId)
-    if (!ctx) return // epoch guard: no active/draining turn for this session → drop
+    if (!ctx) {
+      // epoch guard: no active/draining turn for this session → drop. The one
+      // exception is the same-frame slot of a turn that just rejected without its
+      // accounting (#9147): its own trailing result/error is owed to that turn.
+      const late = this._late.get(sessionId)
+      if (late && (event === 'result' || event === 'error')) this._reportLateUsage(late, event, data)
+      return
+    }
     if (ctx.draining) {
       // A settled-but-draining turn (post-timeout). Swallow its trailing output;
       // a terminal event confirms the session stopped → release the mutex.
+      if (event === 'result' || event === 'error') this._reportLateUsage(ctx, event, data)
+      // `stream_end` ends the drain BEFORE the interrupted turn's `result` in the
+      // same frame: keep that frame's slot open so the spend is not dropped.
+      if (event === 'stream_end') this._armLate(ctx)
       if (event === 'result' || event === 'error' || event === 'stopped' || event === 'stream_end') {
         this._endDrain(ctx)
       }
@@ -402,6 +428,26 @@ export class TurnDriver {
       }
       default:
         break
+    }
+  }
+
+  // #9147 — a turn that rejected WITHOUT a terminal accounting payload (a TURN_TIMEOUT
+  // draining) may still be owed its session's trailing result/error. Hold a slot for
+  // the rest of the current synchronous frame only — cleared on the same tick the mutex
+  // hand-off happens, so it can never see the next turn's events.
+  _armLate(ctx) {
+    if (!ctx.onLateUsage) return
+    this._late.set(ctx.sessionId, ctx)
+    process.nextTick(() => { if (this._late.get(ctx.sessionId) === ctx) this._late.delete(ctx.sessionId) })
+  }
+
+  _reportLateUsage(ctx, event, data) {
+    if (!ctx.onLateUsage) return
+    // Exactly once: the first terminal event ends the drain (ctx leaves _active) and
+    // closes the same-frame slot, so no later event can reach this ctx again.
+    if (this._late.get(ctx.sessionId) === ctx) this._late.delete(ctx.sessionId)
+    try { ctx.onLateUsage(projectTerminalUsage(data), event) } catch (err) {
+      this._log?.warn?.(`TurnDriver: onLateUsage failed: ${err?.message || err}`)
     }
   }
 

@@ -327,6 +327,8 @@ it('rethrows non-TurnError driver failures without trusting attached usage', asy
 })
 
 it('does not catch and count an accounting failure a second time', async (t) => {
+  // #9147: the failure is now logged and swallowed (the turn's result resolves), but it
+  // must still be attempted exactly once, never retried by the catch arm.
   const f = fixture(t)
   const original = Object.assign(new TurnError('TURN_ERROR', 'ledger callback failed'), { result: terminal() })
   let count = 0
@@ -334,7 +336,7 @@ it('does not catch and count an accounting failure a second time', async (t) => 
   const p = f.drive()
   f.emit('stream_delta', { delta: decision })
   f.emit('result', terminal())
-  await assert.rejects(p, (err) => err === original)
+  assert.equal((await p).decision.summary, 'finished')
   assert.equal(count, 1)
 })
 
