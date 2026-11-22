@@ -29,14 +29,22 @@
 //     every `ChildProcess.prototype.kill` takes a snapshot first and records
 //     the tracked subtree, so a grandchild stays attributable after its parent
 //     exits and it is reparented to launchd (ppid 1);
-//   - a member of a process group led by a tracked pid (pgid match), which
-//     also covers reparented grandchildren of a `detached: true` child;
+//   - a member of a process group led by a LIVE tracked pid (pgid match), which
+//     covers reparented grandchildren of a `detached: true` child while the
+//     leader runs (once it exits, only the observed set covers them);
 //   - a negative pid (process group) only when its leader satisfies the above.
 // Everything else — pid 0, -1, foreign pids, a mock child's invented pid —
 // throws CHROXY_TEST_FOREIGN_SIGNAL BEFORE the signal is sent.
 //
-// Limits, stated so nobody mistakes them for cover: a tracked pid stays
-// tracked after exit, so a recycled pid is allowed; a grandchild whose parent
+// Recycled pids (macOS wraps): a tracked pid is dropped when its child exits,
+// and every snapshot drops tracked/observed pids that left the table or whose
+// `lstart` text changed. An observed pid is re-verified against a fresh table
+// on every signal; only a LIVE tracked child skips `ps`. A string pid is
+// coerced the way Node coerces it before the decision.
+//
+// Limits, stated so nobody mistakes them for cover: a signal sent to a tracked
+// child in the instant between its death and the 'exit' event is still allowed;
+// a grandchild whose parent
 // exited BEFORE any snapshot (and which is not in the tracked pgid) cannot be
 // attributed and is refused — the fix is for the test to snapshot via a kill of
 // its own child, or to record the pid while the parent lives. With no `ps`
@@ -50,6 +58,7 @@
 
 import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
+import { isMainThread } from 'node:worker_threads'
 
 const require = createRequire(import.meta.url)
 
@@ -59,12 +68,16 @@ export const FOREIGN_SIGNAL_MARKER = Symbol.for('chroxy.testForeignSignalGuard')
 /** Async launchers that return a ChildProcess whose pid becomes tracked. */
 export const TRACKED_LAUNCHERS = ['spawn', 'exec', 'execFile', 'fork']
 
-/** Parse `ps -axo pid=,ppid=,pgid=` into rows; null when nothing parsed. */
+/**
+ * Parse `ps -axo pid=,ppid=,pgid=,lstart=` into rows; null when nothing parsed.
+ * `start` is the locale-formatted `lstart` text, compared only for equality: it
+ * tells a recycled pid from the process we first saw under that number.
+ */
 export function parsePsTable(text) {
   const rows = []
   for (const line of String(text).split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)(?:\s+(\d+))?\s*$/.exec(line)
-    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: m[3] === undefined ? null : Number(m[3]) })
+    const m = /^\s*(\d+)\s+(\d+)(?:\s+(\d+))?(?:\s+(\S.*?))?\s*$/.exec(line)
+    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: m[3] === undefined ? null : Number(m[3]), start: m[4] === undefined ? null : m[4] })
   }
   return rows.length > 0 ? rows : null
 }
@@ -73,50 +86,76 @@ export function parsePsTable(text) {
  * The decision logic, free of any patching, so the suite can drive it with a
  * fake process table. `readTable()` returns rows or null (unavailable).
  */
-export function createForeignSignalPolicy({ selfPid, readTable }) {
-  const tracked = new Set()
-  const observed = new Set()
+export function createForeignSignalPolicy({ selfPid, readTable, probeDead = () => false }) {
+  // pid -> start-time text once a snapshot has seen it (null until then).
+  // `tracked` holds LIVE children only: it is pruned on the child's exit, and a
+  // pid whose row vanishes or whose start time changes is dropped by observe().
+  // A stale entry is how a recycled pid (macOS wraps) would be mistaken for ours.
+  const tracked = new Map()
+  const observed = new Map()
+
+  function prune(map, byPid) {
+    for (const [p, st] of [...map]) {
+      const row = byPid.get(p)
+      if (!row || (st && row.start && st !== row.start)) map.delete(p)
+      else if (!st && row.start) map.set(p, row.start)
+    }
+  }
 
   function observe(rows) {
     if (!rows) return
+    const byPid = new Map(rows.map((r) => [r.pid, r]))
+    prune(tracked, byPid)
+    prune(observed, byPid)
     const kids = new Map()
     for (const r of rows) {
       if (!kids.has(r.ppid)) kids.set(r.ppid, [])
-      kids.get(r.ppid).push(r.pid)
+      kids.get(r.ppid).push(r)
     }
-    const queue = [...tracked, ...observed]
+    const queue = [...tracked.keys(), ...observed.keys()]
     const seen = new Set(queue)
     while (queue.length) {
       const p = queue.pop()
       for (const k of kids.get(p) || []) {
-        if (seen.has(k)) continue
-        seen.add(k)
-        observed.add(k)
-        queue.push(k)
+        if (seen.has(k.pid)) continue
+        seen.add(k.pid)
+        observed.set(k.pid, k.start)
+        queue.push(k.pid)
       }
     }
   }
 
   function snapshot() {
-    if (tracked.size === 0) return null
+    if (tracked.size === 0 && observed.size === 0) return null
     const rows = readTable()
     observe(rows)
     return rows
   }
 
   /** @returns {null | string} null when allowed, otherwise the reason. */
-  function decide(pid, signal) {
+  function decide(rawPid, signal) {
     if (signal === 0 || signal === '0') return null
+    // Node coerces a string pid (`process.kill('1', 'SIGTERM')`, ' 12 ', '0x10'),
+    // so decide on the number it will act on. Anything else is Node's to reject.
+    let pid = rawPid
+    if (typeof pid === 'string') pid = Number(pid)
     if (typeof pid !== 'number' || !Number.isInteger(pid)) return null // process.kill throws its own TypeError
     if (pid === selfPid) return null
     const target = pid < 0 ? -pid : pid
     if (pid === 0 || pid === -1) return `pid ${pid} addresses the whole process group or every process`
     if (target === selfPid && pid < 0) return `process group ${target} is this test process's own group`
-    if (tracked.has(target) || observed.has(target)) return null
-    if (tracked.size === 0) return `pid ${pid} is not a child this test process spawned (it has spawned none)`
+    // A tracked pid is a LIVE child (pruned on exit): no ps needed for it.
+    if (tracked.has(target)) return null
+    // A pid (or group) that no longer exists cannot be harmed: the signal can only
+    // report ESRCH. Tests and node-pty routinely signal a child after it exited.
+    // A LIVE pid that is not ours (a recycled number, a foreign process) still
+    // reaches the checks below.
+    if (probeDead(pid)) return null
+    if (tracked.size === 0 && observed.size === 0) return `pid ${pid} is not a child this test process spawned (it has spawned none)`
+    // An observed pid is re-verified against a fresh table every time.
     const rows = snapshot()
     if (rows === null) return `pid ${pid} cannot be attributed to a spawned child: the process table is unavailable`
-    if (observed.has(target)) return null
+    if (tracked.has(target) || observed.has(target)) return null
     const row = rows.find((r) => r.pid === target)
     if (row && row.pgid !== null && tracked.has(row.pgid)) return null
     return `pid ${pid} is not a child, or a descendant of a child, that this test process spawned`
@@ -128,20 +167,22 @@ export function createForeignSignalPolicy({ selfPid, readTable }) {
   // fails the test file while any refusal is unacknowledged. A test that
   // deliberately provokes one calls `acknowledge()`.
   const refusals = []
-  return { tracked, observed, refusals, acknowledge() { refusals.length = 0 }, observe, snapshot, decide, track(pid) { if (Number.isInteger(pid) && pid > 0) tracked.add(pid) } }
+  return { tracked, observed, refusals, acknowledge() { refusals.length = 0 }, observe, snapshot, decide,
+    track(pid) { if (Number.isInteger(pid) && pid > 0 && !tracked.has(pid)) tracked.set(pid, null) },
+    untrack(pid) { tracked.delete(pid) } }
 }
 
 function callSite() {
   const lines = (new Error().stack || '').split('\n').slice(1)
   const own = import.meta.url.replace(/^file:\/\//, '')
   const frame = lines.find((l) => !l.includes(own) && !l.includes('node:internal')) || lines[lines.length - 1] || ''
-  return frame.trim()
+  return frame.trim().replace(/^at\s+/, '')
 }
 
 function realReadTable(execFileSync) {
   return () => {
     try {
-      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid='], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,lstart='], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
       return parsePsTable(out)
     } catch {
       return null
@@ -161,9 +202,13 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
   if (proc.kill && proc.kill[FOREIGN_SIGNAL_MARKER]) return { installed: [], skipped: [{ name: 'kill', reason: 'already-guarded' }], policy: proc.kill[FOREIGN_SIGNAL_MARKER] }
 
   const realExecFileSync = cp.execFileSync
+  const originalKillFn = proc.kill
   const policy = createForeignSignalPolicy({
     selfPid: proc.pid,
     readTable: target.readTable || realReadTable(realExecFileSync),
+    probeDead: target.probeDead || ((pid) => {
+      try { originalKillFn.call(proc, pid, 0); return false } catch (e) { return e && e.code === 'ESRCH' }
+    }),
   })
   const installed = []
   const originalKill = proc.kill
@@ -172,10 +217,11 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
     if (!(allowEnv && process.env[allowEnv] === '1')) {
       const reason = policy.decide(pid, signal)
       if (reason !== null) {
+        const site = callSite()
         const sig = signal === undefined ? 'SIGTERM(default)' : String(signal)
         const err = new Error(
           `[chroxy-test-sandbox] BLOCKED process.kill(${pid}, ${sig}): ${reason}.\n` +
-          `  Call site: ${callSite()}\n` +
+          `  Call site: ${site}\n` +
           `  A test may only signal processes it spawned (or their descendants). A mock child with a numeric pid\n` +
           `  (\`pid: 12345\`) makes killProcessTree run \`ps\` against a pid the test does not own and SIGTERM its real\n` +
           `  children. Give the mock \`pid: undefined\`, inject the kill seam (deps.kill), or spawn a real child.\n` +
@@ -184,14 +230,17 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
         err.code = FOREIGN_SIGNAL_ERROR_CODE
         err.pid = pid
         err.signal = signal
-        policy.refusals.push(`process.kill(${pid}, ${sig}) at ${callSite()}`)
+        policy.refusals.push(`process.kill(${pid}, ${sig}) at ${site}`)
         throw err
       }
     }
     return originalKill.call(this, pid, signal)
   }
   guardedKill[FOREIGN_SIGNAL_MARKER] = policy
-  if (target.exitHook !== false) {
+  // Main thread only: a worker's `process.exitCode` does not reach the runner. The
+  // hook (and this guard) are inherited by fork/--import children, each judging its
+  // OWN refusals; CHROXY_TEST_ALLOW_FOREIGN_SIGNALS is inherited through the env.
+  if (target.exitHook !== false && isMainThread) {
     proc.on('exit', () => {
       if (policy.refusals.length === 0) return
       process.stderr.write(
@@ -203,11 +252,23 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
   proc.kill = guardedKill
   installed.push('kill')
 
+  function trackChild(child) {
+    if (!child || typeof child.pid !== 'number') return
+    const pid = child.pid
+    policy.track(pid)
+    // Dead pids must not stay attributable: the OS recycles them.
+    if (typeof child.once === 'function') {
+      const drop = () => policy.untrack(pid)
+      child.once('exit', drop)
+      child.once('close', drop)
+    }
+  }
+
   // Track pids of children this process launches.
   function wrap(original) {
     const patched = function trackingLauncher(...args) {
       const child = original.apply(this, args)
-      if (child && typeof child.pid === 'number') policy.track(child.pid)
+      trackChild(child)
       return child
     }
     // Composition: keep every OTHER guard's marker symbol visible on the wrapper
@@ -218,8 +279,9 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
     }
     if (original[promisify.custom]) {
       patched[promisify.custom] = function trackingPromisified(...args) {
-        return new Promise((resolvePromise, rejectPromise) => {
-          patched.call(this, ...args, (err, stdout, stderr) => {
+        let child
+        const promise = new Promise((resolvePromise, rejectPromise) => {
+          child = patched.call(this, ...args, (err, stdout, stderr) => {
             if (err) {
               if (stdout !== undefined) err.stdout = stdout
               if (stderr !== undefined) err.stderr = stderr
@@ -229,6 +291,9 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
             }
           })
         })
+        // Real Node attaches the ChildProcess as `.child` on the promisified result.
+        promise.child = child
+        return promise
       }
     }
     return patched
@@ -248,7 +313,7 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
   if (proto && typeof proto.kill === 'function' && !proto.kill[FOREIGN_SIGNAL_MARKER]) {
     const originalChildKill = proto.kill
     const snapshotting = function snapshotBeforeChildKill(...args) {
-      try { if (typeof this.pid === 'number') { policy.track(this.pid); policy.snapshot() } } catch { /* best effort */ }
+      try { if (typeof this.pid === 'number') { if (this.exitCode === null && this.signalCode === null) policy.track(this.pid); policy.snapshot() } } catch { /* best effort */ }
       return originalChildKill.apply(this, args)
     }
     snapshotting[FOREIGN_SIGNAL_MARKER] = 'ChildProcess.prototype.kill'
@@ -271,7 +336,12 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
             if (typeof original !== 'function' || original[FOREIGN_SIGNAL_MARKER]) continue
             const tracking = function trackingPtyLauncher(...a) {
               const term = original.apply(this, a)
-              if (term && typeof term.pid === 'number') policy.track(term.pid)
+              if (term && typeof term.pid === 'number') {
+                const pid = term.pid
+                policy.track(pid)
+                if (typeof term.onExit === 'function') term.onExit(() => policy.untrack(pid))
+                else if (typeof term.once === 'function') term.once('exit', () => policy.untrack(pid))
+              }
               return term
             }
             for (const sym of Object.getOwnPropertySymbols(original)) tracking[sym] = original[sym]
