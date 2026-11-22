@@ -160,7 +160,19 @@ test('exactly one existing native command is admitted; receipt is SUBMITTED, nev
 })
 
 test('concurrent claims, reconnect, and failed native acknowledgement cannot replay notification', async t => {
-  const f = await setup(t, { receiptTimeoutMs: 40 })
+  const RECEIPT_MS = 47 // distinctive, so only the fixture's receipt timer is intercepted
+  const f = await setup(t, { receiptTimeoutMs: RECEIPT_MS })
+  // The receipt timer must not fire on its own: on a slow runner it beat the
+  // INVOKING read (#9291). Capture it instead of scheduling it, and fire it
+  // explicitly once INVOKING and the anti-replay checks have been observed.
+  // Every other timer (fetch, lifetime, waits) passes through untouched.
+  const realSetTimeout = globalThis.setTimeout
+  const receiptTimers = []
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    if (ms !== RECEIPT_MS) return realSetTimeout(fn, ms, ...args)
+    receiptTimers.push(fn)
+    return { unref() {} }
+  })
   await f.request('/smoke/ready', {})
   await armSmoke(f.root)
   const claims = await Promise.all([f.request('/smoke/claim', {}), f.request('/smoke/claim', {})])
@@ -169,6 +181,9 @@ test('concurrent claims, reconnect, and failed native acknowledgement cannot rep
   assert.equal(JSON.parse(await readFile(`${f.root}/receipt.json`)).state, 'INVOKING')
   assert.equal((await f.request('/smoke/receipt', { nativeRoute: 'true' })).status, 409)
   assert.equal((await f.request('/smoke/receipt', { nativeRoute: true, extra: true })).status, 409)
+  assert.equal(f.snapshot().state, 'INVOKING')
+  assert.equal(receiptTimers.length, 1, 'exactly one claim armed exactly one receipt timer')
+  receiptTimers[0]()
   await waitFor(() => f.snapshot().state === 'FAILED', 'missing native receipt should fail')
   assert.equal(f.snapshot().reason, 'native receipt missing')
   assert.equal((await f.request('/smoke/receipt', { nativeRoute: true })).status, 409)
