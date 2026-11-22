@@ -1916,9 +1916,11 @@ export function SessionScreen() {
         {/* Per-folder trust: whether the active session folder's project settings
             are loaded, with Review / Trust / Stop trusting for the owner. */}
         {activeSessionId && (
-          // key: one instance per session, so the dialog's snapshot never outlives a session switch
+          // key: one instance per session, so the dialog's snapshot never outlives a session switch.
+          // Prefixed because DevPreviewBanner below is a sibling keyed by the bare session id,
+          // and two siblings with the same key break reconciliation.
           <FolderTrustBanner
-            key={activeSessionId}
+            key={`folder-trust-${activeSessionId}`}
             entry={folderTrust}
             pending={folderTrustPending}
             error={folderTrustError}
