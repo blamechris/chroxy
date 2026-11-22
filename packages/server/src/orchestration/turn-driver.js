@@ -63,16 +63,16 @@
  *   completion, and this driver rejects it (TURN_STOPPED, or TURN_ERROR when the
  *   payload also carries `failureMessage`). The flag is set by BaseSession.emit for
  *   every result whose `turnOutcome` is `stopped` (the SDK's aborted_* results, an
- *   ACP `cancelled`), by claude-byok when an interrupt lands in the tool phase, by
- *   claude-sdk's stream-stall result and by claude-cli's synthetic interrupted
+ *   ACP `cancelled`, and the Codex app-server's `turn/completed {status:
+ *   'interrupted'}`, #9241), by claude-byok when an interrupt lands in the tool phase,
+ *   by claude-sdk's stream-stall result and by claude-cli's synthetic interrupted
  *   result. It is internal: event-normalizer whitelists the result fields it puts
  *   on the wire, so clients never see it.
  *
- *   NOT covered: the Codex app-server. It ends an interrupted turn with
- *   `turn/completed` and `_finishTurn` reports it as a normal result without
- *   reading `turn.status` (see the comment there). Whether the real binary does
- *   that is tracked separately; until it is pinned, an operator Stop on a codex
- *   session can still settle as a success.
+ *   Codex app-server: `_finishTurn` now reads `turn.status` and reports `interrupted`
+ *   as a `stopped` result. That shape is documented by OpenAI but has not been pinned
+ *   against a live binary in this repo's tests, so an operator Stop on a codex session
+ *   settling as a success remains possible if the binary answers differently.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */

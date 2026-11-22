@@ -53,6 +53,25 @@ export function readResultTurnOutcome(msg: Record<string, unknown>): TurnOutcome
   return { outcome: msg.turnOutcome, timestamp: typeof ts === 'number' && Number.isFinite(ts) ? ts : null }
 }
 
+/**
+ * What the chip says. The label alone for every outcome except
+ * `stopped_before_output` (#9241), which is the one marker that stands for a turn
+ * with no reply at all: it carries the time as well ("Stopped before a
+ * reply · 14:05", local time, 24 hour), because with nothing else in the turn it is
+ * the only record of when it happened. Both clients render this one string.
+ */
+export function turnOutcomeMarkerText(outcome: MarkedTurnOutcome, timestamp?: number | null): string | null {
+  const description = describeTurnOutcome(outcome)
+  if (!description) return null
+  if (outcome !== 'stopped_before_output' || typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+    return description.label
+  }
+  const d = new Date(timestamp)
+  if (Number.isNaN(d.getTime())) return description.label
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${description.label} \u00b7 ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 /** True for the `system` message {@link appendTurnOutcomeMarker} builds. */
 export function isTurnOutcomeMarker(m: ChatMessage): boolean {
   return m.type === 'system' && m.turnOutcome !== undefined

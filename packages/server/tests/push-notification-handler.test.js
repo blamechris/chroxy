@@ -72,6 +72,34 @@ describe('PushNotificationHandler — idle push (#3866 dedupe)', () => {
   })
 })
 
+describe('PushNotificationHandler — a turn stopped before any reply is not announced as idle (#9241)', () => {
+  it('sends no "Session idle" push (Expo and Discord share this one send) and logs why', () => {
+    const ws = fakeWsServer({ authenticatedClientCount: 0 })
+    const { sessionManager, sends, logs } = makeFakes({ wsServer: ws })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: { cost: null, duration: null, turnOutcome: 'stopped_before_output' } })
+    assert.equal(sends.length, 0)
+    assert.ok(logs.debug.some((m) => m.includes('stopped before any reply')))
+  })
+
+  it('does not latch the dedupe: the next real completion still pings', () => {
+    const ws = fakeWsServer({ authenticatedClientCount: 0 })
+    const { sessionManager, sends } = makeFakes({ wsServer: ws })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: { turnOutcome: 'stopped_before_output' } })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: { turnOutcome: 'completed', duration: 5 } })
+    assert.equal(sends.length, 1)
+    assert.equal(sends[0].data.state, 'idle')
+  })
+
+  it('CONTROL: every other outcome still pings', () => {
+    for (const turnOutcome of ['completed', 'truncated', 'refused', 'stopped', undefined]) {
+      const ws = fakeWsServer({ authenticatedClientCount: 0 })
+      const { sessionManager, sends } = makeFakes({ wsServer: ws })
+      sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: { turnOutcome } })
+      assert.equal(sends.length, 1, String(turnOutcome))
+    }
+  })
+})
+
 describe('PushNotificationHandler — #3870 synchronous latch', () => {
   it('two results in the SAME tick fire only one push (latched before send resolves)', () => {
     const ws = fakeWsServer({ authenticatedClientCount: 0 })

@@ -401,7 +401,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     // from the `result` frame by store-core's `appendTurnOutcomeMarker`; the
     // pipeline lets this one `system` row into the chat flow.
     if (storeMsg.type === 'system' && storeMsg.turnOutcome) {
-      return <TurnOutcomeMarker outcome={storeMsg.turnOutcome} />
+      return <TurnOutcomeMarker outcome={storeMsg.turnOutcome} timestamp={storeMsg.timestamp} />
     }
 
     // #6845: honesty marker for a server-controlled MCP-prompt expansion

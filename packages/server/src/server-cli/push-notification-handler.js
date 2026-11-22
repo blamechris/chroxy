@@ -149,7 +149,12 @@ export class PushNotificationHandler {
       log.debug(`Push suppressed for ${event} on ${sessionId}: no configured notification sinks`)
     }
     if (hasSinks) {
-      if (event === 'result') {
+      if (event === 'result' && data?.turnOutcome === 'stopped_before_output') {
+        // #9241: the turn was stopped before any reply, which the person who stopped
+        // it just did. "Session idle" (the Expo push and, through the same pipeline,
+        // the Discord status embed) would announce a cancellation back to them.
+        log.debug(`Idle push suppressed for ${sessionId}: the turn was stopped before any reply`)
+      } else if (event === 'result') {
         // Session idle push (#3866). Gate on noActiveViewers so the user
         // isn't pinged while actively chatting with this session. The
         // per-session dedupe Set prevents a duplicate `result` from

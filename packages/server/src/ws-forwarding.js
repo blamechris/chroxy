@@ -359,9 +359,12 @@ function setupSessionForwarding(normalizer, ctx) {
     // `result`. Both clients leave busy on `agent_idle` / `session_activity`,
     // which only a `result` produced, so those sessions stayed busy for good.
     // Announcing idle here covers every provider at the one place they all meet
-    // the wire, and `stopped` stays the quiet confirmation: no `result` is
-    // minted, so no marker or chip can follow. Skipped when the same turn end
-    // already went idle through a `result`.
+    // the wire, and `stopped` stays the quiet confirmation. #9241: BaseSession.emit
+    // now mints a `result` carrying the `stopped_before_output` marker ahead of a
+    // `stopped` for a Stop that came before any output, and that result idles the
+    // client first (`idledByResultThisTick`); every other requested Stop still has no
+    // `result`, so no chip. Skipped when the same turn end already went idle through
+    // a `result`.
     let announceIdle = false
     if (event === 'stopped' && !idledByResultThisTick.has(sessionId)) {
       announceIdle = true

@@ -24,6 +24,15 @@ import {
 } from '@chroxy/store-core';
 import type { ChatMessage, ConnectionState } from '../../store/types';
 
+jest.mock('../../utils/haptics', () => ({
+  hapticSuccess: jest.fn(),
+  hapticLight: jest.fn(),
+  hapticMedium: jest.fn(),
+  hapticWarning: jest.fn(),
+  hapticError: jest.fn(),
+}));
+import { hapticSuccess } from '../../utils/haptics';
+
 jest.mock('../../store/persistence', () => ({
   clearPersistedSession: jest.fn(() => Promise.resolve()),
   persistSessionMessages: jest.fn(),
@@ -87,7 +96,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
   it('has the scenario it drives', () => {
     expect(fixture).toBeDefined();
     expect(fixture.live.filter((f) => f.type === 'result').map((f) => f.turnOutcome)).toEqual([
-      'truncated', 'refused', 'stopped', 'completed',
+      'truncated', 'refused', 'stopped', 'stopped_before_output', 'completed',
     ]);
   });
 
@@ -99,6 +108,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
       ['truncated', 'Reply cut off'],
       ['refused', 'The model declined'],
       ['stopped', 'Stopped'],
+      ['stopped_before_output', 'Stopped before a reply'],
     ]);
     // The completed turn is the last reply, with nothing after it.
     const all = read();
@@ -114,7 +124,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
   it('survives a session switch: a full-rebuild replay builds the same markers from history', () => {
     const { read, send } = boot([{ id: 'stale', type: 'response', content: 'old', timestamp: 1 } as ChatMessage]);
     replayAll(send, fixture.replay, true);
-    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped']);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped', 'stopped_before_output']);
     expect(read().some((m) => m.id === 'stale')).toBe(false);
   });
 
@@ -123,7 +133,7 @@ describe('turn outcome on the mobile app (#7326)', () => {
     for (const f of fixture.live) send(f);
     const before = read().length;
     replayAll(send, fixture.replay, false);
-    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped']);
+    expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['truncated', 'refused', 'stopped', 'stopped_before_output']);
     expect(read().length).toBe(before);
   });
 
@@ -169,5 +179,16 @@ describe('a turn interrupted by a daemon restart (#8259)', () => {
     expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
     replayAll(send, frames, true);
     expect(markers(read()).map((m) => m.turnOutcome)).toEqual(['interrupted']);
+  });
+});
+
+// #9241 -- the quiet marker is not a success to buzz about.
+describe('haptics on a result (#9241)', () => {
+  it('a turn stopped before any reply does not trigger the success haptic; a completed one does', () => {
+    const { send } = boot();
+    send({ type: 'result', sessionId: SID, cost: null, duration: null, turnOutcome: 'stopped_before_output', timestamp: 5 } as ReplayParityFrame);
+    expect(hapticSuccess).not.toHaveBeenCalled();
+    send({ type: 'result', sessionId: SID, cost: 0.01, duration: 10, turnOutcome: 'completed' } as ReplayParityFrame);
+    expect(hapticSuccess).toHaveBeenCalledTimes(1);
   });
 });

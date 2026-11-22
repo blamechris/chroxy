@@ -1090,6 +1090,8 @@ function handleInterrupt(ws, client, msg, ctx) {
     // #8374/#8430: record that the USER stopped this turn, before the abort
     // resolves any open prompt (a failed turn aborts the same controller).
     entry.session.markUserStopInFlight?.()
+    // #9241: and for the stop-before-reply marker, which is separate on purpose.
+    entry.session.markStopRequested?.()
     entry.session.interrupt()
     return
   }

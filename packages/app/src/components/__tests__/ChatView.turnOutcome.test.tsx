@@ -86,6 +86,32 @@ describe('ChatView turn-outcome chip (#7326)', () => {
     act(() => tree.unmount());
   });
 
+  it('#9241: a turn the user stopped before any reply shows its label and the time; a plain Stopped does not', () => {
+    const ts = 1700000000000;
+    const d = new Date(ts);
+    const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const user = { id: 'u1', type: 'user_input', content: 'go', timestamp: 1 } as ChatMessage;
+    const quiet = appendTurnOutcomeMarker([user], { outcome: 'stopped_before_output', timestamp: ts });
+    const tree = renderFeed(selectChatMessages(quiet, { chatFilterCompact: false, isHiddenInCompactMode }));
+    expect(labels(tree)).toEqual([`Stopped before a reply \u00b7 ${hhmm}`]);
+    // the accessible name replaces the visible text for a screen reader: it must carry the time too
+    expect(chips(tree)[0]!.props.accessibilityLabel).toContain(hhmm);
+    act(() => tree.unmount());
+
+    const plain = appendTurnOutcomeMarker([reply('r1', 'x')], { outcome: 'stopped', timestamp: ts });
+    const tree2 = renderFeed(selectChatMessages(plain, { chatFilterCompact: false, isHiddenInCompactMode }));
+    expect(labels(tree2)).toEqual(['Stopped']);
+    act(() => tree2.unmount());
+  });
+
+  it('#9241 control: a Stop after output reaches the feed as a result with no outcome, so no chip', () => {
+    // #8461 strips the outcome from a requested Stop; store-core then builds nothing.
+    const messages = appendTurnOutcomeMarker([reply('r1', 'partial text')], null);
+    const tree = renderFeed(selectChatMessages(messages, { chatFilterCompact: false, isHiddenInCompactMode }));
+    expect(chips(tree)).toHaveLength(0);
+    act(() => tree.unmount());
+  });
+
   it('shows no chip for a turn that finished (no marker message is ever built)', () => {
     const messages = appendTurnOutcomeMarker([reply('r1', 'all done')], null);
     const tree = renderFeed(messages);

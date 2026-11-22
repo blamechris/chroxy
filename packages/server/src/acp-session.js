@@ -673,7 +673,11 @@ export function createAcpSessionClass(rawEntry) {
       this._activeTurn = null
       const wasIntentional = this._consumeIntentionalStop()
       if (wasIntentional) {
-        this.emit('stopped', {})
+        // #9241: the prompt RESOLVED while the Stop was armed: the requested stop. (The
+        // failure path below also reports `stopped`, without this word.)
+        // Only a `cancelled` stop reason is the cancel being honoured; a limit or a
+        // refusal that won the race with `session/cancel` is not a Stop.
+        this.emit('stopped', res?.stopReason === 'cancelled' ? { stopRequested: true } : {})
         this._clearMessageState()
         this._maybeDequeue()
         return

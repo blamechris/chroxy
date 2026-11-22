@@ -447,6 +447,47 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.ok(events.frames.lastIndexOf(t[2]) < respDelta, 'thinking precedes the response')
   })
 
+  // #9241 -- a Stop is "before any reply" only when claude had shown nothing: the first
+  // CONSUMED hook file is the structured proof it began (the PTY mirror is the screen).
+  describe('the stop-before-reply marker judges the turn by what claude has done (#9241)', () => {
+    const markers = (s) => {
+      const found = []
+      s.on('result', (r) => { if (r.turnOutcome === 'stopped_before_output') found.push(r) })
+      return found
+    }
+
+    it('a hook file consumed before the Stop is output, even though it raised no event of its own', async () => {
+      const sessFile = writeSessFile()
+      writeJournal(sessFile, [])
+      const { s, sinkDir } = makeTurnSession()
+      s._emitToolHookEvent = () => {} // nothing reaches emit(): only the drain's own signal remains
+      const found = markers(s)
+      const turn = s.sendMessage('hi')
+      await waitFor(() => turnPolling(s), 'the turn to be polling')
+      writeFileSync(join(sinkDir, 'pre-aaa.json'), JSON.stringify({ tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      await waitFor(() => s._turnOutputSeen === true, 'the hook file to be drained')
+      s.markStopRequested()
+      s.interrupt()
+      await turn
+      assert.equal(found.length, 0, 'claude had started work: not "before a reply"')
+    })
+
+    it('CONTROL: terminal output and a resize with no hook file yet: the Stop is marked', async () => {
+      const sessFile = writeSessFile()
+      writeJournal(sessFile, [])
+      const { s } = makeTurnSession()
+      const found = markers(s)
+      const turn = s.sendMessage('hi')
+      await waitFor(() => turnPolling(s), 'the turn to be polling')
+      s.emit('terminal_output', { data: '> hi\r\n' })
+      s.emit('terminal_resize', { cols: 100, rows: 30 })
+      s.markStopRequested()
+      s.interrupt()
+      await turn
+      assert.equal(found.length, 1)
+    })
+  })
+
   it('picks up reasoning that lands in the same instant as the Stop hook (final drain before the response)', async () => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [])

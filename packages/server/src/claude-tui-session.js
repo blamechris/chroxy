@@ -202,6 +202,8 @@ const PTY_EXITED_BEFORE_PROMPT_MESSAGE = 'Claude exited before your message coul
 const PTY_EXITED_MID_TURN_MESSAGE = 'Claude exited mid-turn — restarting.'
 const PROMPT_EMPTY_MESSAGE = 'Your message was empty after removing control characters, so nothing was sent.'
 const PTY_RESPAWN_EXHAUSTED_MESSAGE = 'Claude kept exiting; stopped restarting it.'
+// #9241: Claude Code's reply-line glyph, U+23FA on macOS and U+25CF elsewhere (see _appendToOutputTail).
+const REPLY_GLYPH_RE = /[\u23FA\u25CF]/
 
 /**
  * ClaudeTuiSession — drives the interactive `claude` TUI under a PTY so the
@@ -4371,6 +4373,22 @@ export class ClaudeTuiSession extends BaseSession {
       else this._declareReadyAfterSilentStart()
     }
     const rawStr = String(data)
+    // #9241: the first assistant line on the screen is the earliest sign claude began
+    // answering, and for a text-only reply it is the ONLY one until the Stop hook (no
+    // PreToolUse fires, and the text reaches `emit` as a stream_delta at the end).
+    // Claude Code prefixes assistant text and tool lines with a platform-dependent glyph:
+    // its own `macos ? '\u23FA' : '\u25CF'` (U+23FA on macOS, U+25CF on every other
+    // platform), so BOTH are accepted. U+25CF also appears elsewhere in its UI, but an
+    // over-match only suppresses the marker, never mints it over visible text (fail-safe).
+    // DEPENDENCY: if a Claude Code release changes either glyph, a Stop over visible text
+    // can again be marked "stopped before a reply" (the marker errs toward showing).
+    // Armed only once this turn's prompt has been written (`_markPromptWritten`), so the
+    // echo of the prompt and the previous turn's screen do not count; a redraw that
+    // re-prints an older glyph line after that only suppresses the marker (fail-safe).
+    if (this._replyGlyphWatch && this._isBusy && REPLY_GLYPH_RE.test(rawStr)) {
+      this._replyGlyphWatch = false
+      this._noteTurnOutput()
+    }
     const chunk = Buffer.from(rawStr, 'utf8')
     // #5794/#5809: monotonic total — never capped, so the nudge's progress check
     // works even when _outputTail is pinned at PTY_TAIL_BYTES.
@@ -4716,6 +4734,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._turnStartedOnThisPty = true // #8441
     this._limitScanFromBytes = this._totalOutputBytes // #8454
     this._lastTurnStopped = false
+    this._replyGlyphWatch = false // #9241: armed again by _markPromptWritten
   }
 
   /**
@@ -4727,6 +4746,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _markPromptWritten() {
     this._limitScanFromBytes = this._totalOutputBytes
+    this._replyGlyphWatch = true // #9241: see _appendToOutputTail
   }
 
   /**
@@ -5346,6 +5366,15 @@ export class ClaudeTuiSession extends BaseSession {
       // `_consumedFiles.size` (which no longer grows — files are unlinked +
       // pruned), otherwise the disarm/re-arm would stop firing on progress.
       if (drainedThisPass > 0 && this._isBusy) {
+        // #9241: a consumed hook file is the earliest structured proof that claude
+        // began working on this turn (the PreToolUse / Stop hook fires as it happens),
+        // so it is what a Stop is judged against. The PTY mirror (`terminal_output`,
+        // `terminal_resize`: prompt echo, redraws) is the screen and does not count,
+        // and claude's transcript lags both (see the KNOWN LIMIT above). KNOWN LIMIT:
+        // a Stop that lands before this poller drains a hook file that was already
+        // written (the loop checks `aborted` first) sees no output yet, so a tool the
+        // user watched start can still be marked "stopped before a reply".
+        this._noteTurnOutput()
         // #4732: a consumed hook file = first output observed for this
         // turn. Disarm the pre-first-output watchdog BEFORE the
         // re-arm below — `_armResultTimeout` would otherwise re-arm
@@ -6013,7 +6042,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     // The tools the Stop cut off were cut off, not failed (#7376).
     this._emitResult(
-      { cost: null, duration, usage: null, sessionId: this._sessionId, turnOutcome: 'stopped', interrupted: true },
+      { cost: null, duration, usage: null, sessionId: this._sessionId, turnOutcome: 'stopped', interrupted: true, stopRequested: true }, // #9241: the Stop's own end
       'user_stop',
     )
     this._clearTurnEndState()

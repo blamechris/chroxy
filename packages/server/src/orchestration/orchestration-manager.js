@@ -88,12 +88,11 @@ const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 //       names the failure; a Stop the SDK answers with an `aborted_*` result is
 //       marked by BaseSession.emit for every result whose turnOutcome is `stopped`.
 //
-//   NOT CLOSED — codex app-server. It ends an interrupted turn with
-//   `turn/completed`, which `_finishTurn` reports as a normal result without
-//   reading `turn.status` (the protocol's TurnStatus has an `interrupted` value).
-//   Whether the real binary answers `turn/interrupt` that way is unverified
-//   against a live process (#7072 follow-up), so an operator Stop on a codex
-//   architect session may still settle as a completed turn.
+//   codex app-server (#9241): `_finishTurn` now reads `turn.status` and reports an
+//   `interrupted` turn as a `stopped` result, which closes this the same way. The
+//   `turn/completed {status: 'interrupted'}` answer is documented by OpenAI but not
+//   pinned against a live binary here (#7072 follow-up), so an operator Stop on a
+//   codex architect session could still settle as a completed turn if it differs.
 //
 // So this set means "vetted to not kill the NEXT turn", and — for claude-sdk and
 // claude-byok — "cannot report an interrupted turn as complete". Anything outside
