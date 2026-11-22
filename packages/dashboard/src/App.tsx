@@ -106,6 +106,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useNotificationPermission } from './hooks/useNotificationPermission'
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useTurnCompleteNotification, type TurnCompleteSession } from './hooks/useTurnCompleteNotification'
+import { sessionStopStamp } from './utils/turn-ended-by-stop'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
 import { SymbolSearchPalette } from './components/SymbolSearchPalette'
@@ -2776,6 +2777,16 @@ export function App() {
       return out
     }),
   )
+  // #9272: per-session "the last turn was ended by a Stop" — see
+  // `sessionStopStamp`. A selector of primitives, so it re-renders only when a
+  // Stop is recorded.
+  const sessionStopStampById = useConnectionStore(
+    useShallow((s) => {
+      const out: Record<string, number> = {}
+      for (const id in s.sessionStates) out[id] = sessionStopStamp(s.sessionStates[id])
+      return out
+    }),
+  )
   const turnCompleteSessions = useMemo<TurnCompleteSession[]>(
     () =>
       sessions.map(s => ({
@@ -2783,8 +2794,9 @@ export function App() {
         name: s.name,
         busy: sessionBusyById[s.sessionId] ?? false,
         awaitingPermission: (pendingPermissionCounts[s.sessionId] ?? 0) > 0,
+        stopStamp: sessionStopStampById[s.sessionId] ?? 0,
       })),
-    [sessions, sessionBusyById, pendingPermissionCounts],
+    [sessions, sessionBusyById, sessionStopStampById, pendingPermissionCounts],
   )
   useTurnCompleteNotification(turnCompleteSessions, {
     enabled: turnCompleteNotificationEnabled,

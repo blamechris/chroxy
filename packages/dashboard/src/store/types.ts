@@ -806,6 +806,13 @@ export interface SessionState extends BaseSessionState {
   // right after a model change, or the CLI could not answer) and renders as
   // "unknown"; `undefined` = this provider makes no such report.
   effectiveThinkingLevel?: ThinkingLevel | null;
+  /**
+   * #9272 — wall-clock time of the latest LIVE `result` that ended its turn as
+   * stopped or interrupted (`isStopTurnOutcome`); replayed results never write
+   * it. Dashboard-only; read through `sessionStopStamp` to gate the
+   * unfocused-window "Finished" notification.
+   */
+  lastTurnStoppedAt?: number;
   // Per-session auto-approval rules (mirrors server-side sessionRules, updated
   // via permission_rules_updated). Used by the "Allow for Session" flow to
   // append new rules without losing existing ones. Optional: undefined until

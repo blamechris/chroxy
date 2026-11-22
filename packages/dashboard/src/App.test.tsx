@@ -7,6 +7,7 @@
  */
 import { useEffect } from 'react'
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { STOP_SIGNAL_GRACE_MS } from './hooks/useTurnCompleteNotification'
 import { render, screen, cleanup, fireEvent, within, waitFor, act } from '@testing-library/react'
 import type { CreateSessionData } from './components/CreateSessionModal'
 
@@ -4653,8 +4654,13 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
     // gate suppresses every notification and all these cells pass vacuously
     // (the arming assertion below is the positive control for exactly that).
     hasFocusSpy = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    // The hook holds every "Finished" card for STOP_SIGNAL_GRACE_MS (#9272) so
+    // a late Stop signal can still suppress it; fake timers let the arming
+    // helper wait that grace out deterministically.
+    vi.useFakeTimers()
   })
   afterEach(() => {
+    vi.useRealTimers()
     hasFocusSpy?.mockRestore()
     hasFocusSpy = null
   })
@@ -4695,6 +4701,8 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
       sessionStates: { s1: sessionState(true), s2: sessionState(true) },
     }
     rerender(<App />)
+    // Wait out the Stop-signal grace: the card fires at fire time, not at the edge.
+    act(() => { vi.advanceTimersByTime(STOP_SIGNAL_GRACE_MS + 1) })
 
     expect(
       sendNativeNotificationMock,

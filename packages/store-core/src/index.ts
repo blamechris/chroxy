@@ -1231,6 +1231,7 @@ export { markTurnBoundary } from './turn-boundaries'
 export {
   appendTurnOutcomeMarker,
   readResultTurnOutcome,
+  isStopTurnOutcome,
   isTurnOutcomeMarker,
   isSystemTabMessage,
   TURN_OUTCOME_MARKER_TESTID,

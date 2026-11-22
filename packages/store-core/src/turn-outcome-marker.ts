@@ -72,6 +72,17 @@ export function turnOutcomeMarkerText(outcome: MarkedTurnOutcome, timestamp?: nu
   return `${description.label} \u00b7 ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+/**
+ * True when a `result`'s outcome says the turn ended because it was STOPPED or
+ * lost, not because the model finished: `stopped`, `stopped_before_output`
+ * (#9241) and `interrupted` (#8259). Consumers that announce "the turn
+ * finished" (the dashboard's unfocused-window notification, #9272) skip these.
+ * `truncated` and `refused` are the model's own ending and stay announced.
+ */
+export function isStopTurnOutcome(outcome: string | null | undefined): boolean {
+  return outcome === 'stopped' || outcome === 'stopped_before_output' || outcome === 'interrupted'
+}
+
 /** True for the `system` message {@link appendTurnOutcomeMarker} builds. */
 export function isTurnOutcomeMarker(m: ChatMessage): boolean {
   return m.type === 'system' && m.turnOutcome !== undefined

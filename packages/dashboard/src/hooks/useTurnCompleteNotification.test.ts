@@ -36,9 +36,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { StrictMode } from 'react'
-import { renderHook, cleanup } from '@testing-library/react'
+import { renderHook, cleanup, act } from '@testing-library/react'
 import {
   useTurnCompleteNotification,
+  STOP_SIGNAL_GRACE_MS,
   type TurnCompleteSession,
   type UseTurnCompleteNotificationOptions,
 } from './useTurnCompleteNotification'
@@ -53,6 +54,7 @@ const mockSend = vi.mocked(sendNativeNotification)
 let originalHasFocus: typeof document.hasFocus
 
 beforeEach(() => {
+  vi.useFakeTimers()
   originalHasFocus = document.hasFocus
   mockSend.mockClear()
   // Default: window NOT focused, i.e. the state in which the feature is
@@ -63,7 +65,19 @@ beforeEach(() => {
 afterEach(() => {
   document.hasFocus = originalHasFocus
   cleanup()
+  vi.useRealTimers()
 })
+
+/**
+ * The dispatch is held for STOP_SIGNAL_GRACE_MS (#9272) so a `session_stopped`
+ * that trails the idling `result` can suppress it. Every assertion on
+ * `mockSend` runs after this, so a negative one also proves nothing fires LATE.
+ */
+function settle(): void {
+  act(() => {
+    vi.advanceTimersByTime(STOP_SIGNAL_GRACE_MS + 1)
+  })
+}
 
 function session(overrides: Partial<TurnCompleteSession> = {}): TurnCompleteSession {
   return {
@@ -71,6 +85,7 @@ function session(overrides: Partial<TurnCompleteSession> = {}): TurnCompleteSess
     name: 'chroxy',
     busy: false,
     awaitingPermission: false,
+    stopStamp: 0,
     ...overrides,
   }
 }
@@ -96,10 +111,12 @@ function mount(
 describe('useTurnCompleteNotification — the turn-complete edge', () => {
   it('notifies when a busy session goes idle while the window is unfocused', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
 
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     expect(mockSend).toHaveBeenCalledWith('Chroxy: chroxy', {
       body: 'Finished — awaiting your input.',
@@ -118,6 +135,7 @@ describe('useTurnCompleteNotification — the turn-complete edge', () => {
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -126,6 +144,7 @@ describe('useTurnCompleteNotification — the turn-complete edge', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
     rerender({ sessions: [session({ busy: true, name: 'renamed' })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -136,6 +155,7 @@ describe('useTurnCompleteNotification — the turn-complete edge', () => {
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
@@ -146,6 +166,7 @@ describe('useTurnCompleteNotification — the turn-complete edge', () => {
     rerender({ sessions: [session({ busy: true })], options: DEFAULTS })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).toHaveBeenCalledTimes(2)
     unmount()
   })
@@ -157,6 +178,7 @@ describe('useTurnCompleteNotification — gates', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -173,6 +195,7 @@ describe('useTurnCompleteNotification — gates', () => {
     document.hasFocus = () => false
     rerender({ sessions: [session({ busy: false, name: 'nudge' })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -182,6 +205,7 @@ describe('useTurnCompleteNotification — gates', () => {
     const { rerender, unmount } = mount([session({ busy: true })], muted)
     rerender({ sessions: [session({ busy: false })], options: muted })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -192,6 +216,7 @@ describe('useTurnCompleteNotification — gates', () => {
     rerender({ sessions: [session({ busy: false })], options: muted })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -205,6 +230,7 @@ describe('useTurnCompleteNotification — gates', () => {
       options: DEFAULTS,
     })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -216,6 +242,7 @@ describe('useTurnCompleteNotification — gates', () => {
       options: DEFAULTS,
     })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
@@ -231,6 +258,7 @@ describe('useTurnCompleteNotification — connection lifecycle', () => {
     // Reconnect: the snapshot says idle.
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -240,6 +268,7 @@ describe('useTurnCompleteNotification — connection lifecycle', () => {
     rerender({ sessions: [session({ busy: true })], options: DEFAULTS })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
@@ -252,6 +281,7 @@ describe('useTurnCompleteNotification — connection lifecycle', () => {
     rerender({ sessions: [session({ busy: true })], options: DEFAULTS })
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
@@ -272,6 +302,7 @@ describe('useTurnCompleteNotification — multiple sessions', () => {
       options: DEFAULTS,
     })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     expect(mockSend).toHaveBeenCalledWith('Chroxy: api', expect.objectContaining({ tag: 'chroxy-turn-s1' }))
     unmount()
@@ -293,6 +324,7 @@ describe('useTurnCompleteNotification — multiple sessions', () => {
       options: DEFAULTS,
     })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     expect(mockSend).toHaveBeenCalledWith('Chroxy: web', expect.objectContaining({ tag: 'chroxy-turn-s2' }))
     unmount()
@@ -305,6 +337,7 @@ describe('useTurnCompleteNotification — multiple sessions', () => {
     // A new session lands on the same id, idle.
     rerender({ sessions: [session({ sessionId: 's1', busy: false })], options: DEFAULTS })
 
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -329,12 +362,14 @@ describe('useTurnCompleteNotification — under StrictMode', () => {
 
   it('does not fire on the double-invoked mount of an already-busy session', () => {
     const { unmount } = mountStrict([session({ busy: true })])
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
 
   it('does not fire on the double-invoked mount of an already-idle session', () => {
     const { unmount } = mountStrict([session({ busy: false })])
+    settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
@@ -343,6 +378,7 @@ describe('useTurnCompleteNotification — under StrictMode', () => {
     const { rerender, unmount } = mountStrict([session({ busy: true })])
     rerender({ sessions: [session({ busy: false })] })
 
+    settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
@@ -367,6 +403,7 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
       options,
     })
 
+    settle()
     expect(onNotificationClick).not.toHaveBeenCalled()
     const sent = mockSend.mock.calls[0]![1]!
     sent.onClick!()
@@ -397,6 +434,7 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
       options: { ...DEFAULTS, onNotificationClick: second },
     })
 
+    settle()
     mockSend.mock.calls[0]![1]!.onClick!()
     expect(first).not.toHaveBeenCalled()
     expect(second).toHaveBeenCalledWith('s1')
@@ -407,7 +445,144 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
 
+    settle()
     expect(() => mockSend.mock.calls[0]![1]!.onClick!()).not.toThrow()
+    unmount()
+  })
+})
+
+describe('useTurnCompleteNotification — a turn ended by a Stop (#9272)', () => {
+  it('does not notify when a Stop is stamped during the turn', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('notifies the same edge when no Stop is stamped — control for the case above', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 0 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('does not notify when the Stop lands AFTER the idle edge (result, then session_stopped)', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
+    expect(mockSend).not.toHaveBeenCalled() // held, not yet sent
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('a stamp that was already there when the turn began does not suppress it', () => {
+    const { rerender, unmount } = mount([session({ busy: true, stopStamp: 50 })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('a stamp cleared during the turn (e.g. claude_ready) is not a Stop', () => {
+    const { rerender, unmount } = mount([session({ busy: true, stopStamp: 50 })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 0 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('notifies the next normal turn after a Stop-ended one', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: true, stopStamp: 50 })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('holds the dispatch until the grace elapses and drops it on unmount', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+  })
+
+  it('drops a held notification when the socket disconnects', () => {
+    const { rerender, unmount } = mount([session({ busy: true })])
+    rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false })], options: { ...DEFAULTS, connected: false } })
+
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+})
+
+describe('useTurnCompleteNotification — gates re-read when the held dispatch fires (#9272)', () => {
+  function idleEdge() {
+    const m = mount([session({ busy: true })])
+    m.rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
+    expect(mockSend).not.toHaveBeenCalled()
+    return m
+  }
+
+  it('does not fire if the window gained focus during the grace', () => {
+    const { unmount } = idleEdge()
+    document.hasFocus = () => true
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the operator muted during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: false })], options: { ...DEFAULTS, enabled: false } })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the session was removed during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the session went busy again during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: true })], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if a permission prompt was raised during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: false, awaitingPermission: true })], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('still fires when nothing changed during the grace — control', () => {
+    const { unmount } = idleEdge()
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
 })

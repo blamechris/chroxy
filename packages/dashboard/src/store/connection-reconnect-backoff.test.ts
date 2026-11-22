@@ -458,6 +458,8 @@ const ALL_SESSION_STATE_KEYS = {
   health: true,
   stoppedAt: true,
   stoppedCode: true,
+  // #9272: describes the last turn, not the connection; the sweep leaves it.
+  lastTurnStoppedAt: true,
   containerLostAt: true,
   containerReattachError: true,
   activeAgents: true,
