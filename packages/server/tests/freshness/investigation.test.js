@@ -351,6 +351,30 @@ describe('disappearance and outages', () => {
     assert.equal(h.conflicts().length, 0)
   })
 
+  it('a re-read that fails and a retry that sees a turn in flight: the retry\'s native state is the activity evidence, working_unreported', () => {
+    const h = setup()
+    const c = session(h, 'chroxy', 'c')
+    W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
+    let t = ticks(h, 'chroxy', T0, 3)
+    // The tick's own read sees no turn; the re-read fails; its retry sees one.
+    let n = 0
+    const retrySeesTurn = (a) => ({
+      ...a,
+      reread: (s, now) => {
+        if (n++ === 0) return { outcome: 'error', error_code: 'timeout' }
+        const r = a.reread(s, now)
+        return { ...r, native: { ...r.native, turn_in_flight: true, answering_now: true } }
+      },
+    })
+    t += CAD * MIN
+    h.tick('chroxy', t, { reads: retrySeesTurn })
+    const inv = invs(h, c.sk)
+    assert.equal(inv.length, 1)
+    assert.equal(inv[0].classification, 'working_unreported')
+    const rungs = h.records('investigation').find((r) => r.body.phase === 'close').body.rungs.map((x) => `${x.rung}:${x.outcome}`)
+    assert.deepEqual(rungs, ['re_read:error', 're_read:ok', 'activity_read:read', 'classify:working_unreported'])
+  })
+
   it('dropped, gone, listed again, dropped again: two episodes of the gone item; the stale item is withdrawn as superseded each time', () => {
     const h = setup()
     const d = session(h, 'claude-desktop', 'd', null)

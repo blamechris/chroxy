@@ -208,10 +208,13 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     rungs.push({ rung: 're_read', outcome: reRead.body.outcome })
     let failed = reRead.body.outcome === 'error'
     let rungBlocked = reRead.body.outcome === 'blocked'
+    // The latest read of the cycle: the retry when the re-read failed.
+    let latest = reRead
     if (failed) {
       const retry = yield* investigationRead(ctx, { invId, readNo: READ_NO.RETRY, session, readFn: () => world.reread(session, now), now, tickId })
       rungs.push({ rung: 're_read', outcome: retry.body.outcome, retry: true })
       failed = retry.body.outcome === 'error'
+      latest = retry
     }
     let confirmListed = null
     if (cand.trigger === 'dropped_from_list' && !cand.sourceLevel) {
@@ -222,7 +225,10 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     let native = null
     if (!cand.sourceLevel && cand.trigger !== 'dropped_from_list') {
       if (caps.native_in_read) {
-        native = nativeEvidence(s, reRead.native)
+        // From the latest successful read of the cycle (the retry, if the
+        // re-read failed and it succeeded); from the tick's own read only
+        // when neither succeeded. A failed read carries no native state.
+        native = nativeEvidence(s, latest.native)
         rungs.push({ rung: 'activity_read', outcome: native ? 'read' : 'none' })
       } else if (caps.activity_read) {
         const a = yield* investigationRead(ctx, { invId, readNo: READ_NO.ACTIVITY, session, readFn: () => world.activity(session, now), now, tickId, readKind: 'activity' })

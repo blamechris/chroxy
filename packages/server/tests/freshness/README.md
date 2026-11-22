@@ -374,8 +374,10 @@ needs its own read draws on a separate budget.
 An investigation runs **rungs**, recorded by name in its close record:
 `re_read` (the same adapter read once more, and one retry if it failed),
 `confirm_gone` (a read confirming a dropped session is really gone),
-`activity_read` (native activity: from the tick's own read where the source
-carries it, else a separate read) and `classify`. A recheck runs only
+`activity_read` (native activity: where the source's read carries it, from
+the latest successful read of the cycle, the re-read or, if the re-read
+failed, its retry, and from the tick's own read only when neither
+succeeded; else a separate read) and `classify`. A recheck runs only
 `activity_read` and `classify`.
 
 Classifications and their effect: `working_unreported` and
