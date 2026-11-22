@@ -2769,11 +2769,21 @@ export class CliSession extends BaseSession {
     let closed = false
     const forceKillTimer = setTimeout(() => {
       if (closed) return
-      try { forceKill(child) } catch {}
+      try { this._killChildTree(child, { force: true }) } catch {}
     }, 3000)
     if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
     child.on('close', () => { closed = true; clearTimeout(forceKillTimer) })
-    killProcessTree(child)
+    this._killChildTree(child)
+  }
+
+  /**
+   * #9267: the one seam for signalling a retired child's process tree.
+   * Defaults to the platform helper (`ps`-enumerates the real descendants of
+   * `child.pid` and signals them); tests whose mock child carries a numeric pid
+   * override it so no real process is ever enumerated or signalled.
+   */
+  _killChildTree(child, opts) {
+    killProcessTree(child, opts)
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
