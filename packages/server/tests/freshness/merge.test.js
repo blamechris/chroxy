@@ -1,6 +1,6 @@
 /**
  * One session, one item: a condition that would raise an attention item for
- * a session that already has an open owner-block item is merged into that
+ * a session that already has an open owner item is merged into that
  * item instead (README, "One session, one item").
  *
  * Every scenario is a list of ticks run with the invariant monitor checked
@@ -11,7 +11,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_CONFIG } from './model/config.js'
-import { withPolicy } from './model/policy.js'
 import { itemIds } from './model/keys.js'
 import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
@@ -89,7 +88,7 @@ function repeatedError(over, policy) {
     { source: 'codex', at: at(45), reads: bad },
     { source: 'codex', at: at(60), reads: bad },
   ]
-  return Object.assign(sc, { x, merge: 3, ob: itemIds.declared(x.s) })
+  return Object.assign(sc, { x, merge: 3, ob: itemIds.owner(x.s) })
 }
 
 /** A declared block on a source that cannot confirm gone; the session leaves the list at +30. */
@@ -103,7 +102,7 @@ function droppedCannotConfirm() {
     { source: 'claude-desktop', at: at(30), before: (h) => (h.world.sessions[d.sk].listed = false) },
     { source: 'claude-desktop', at: at(45) },
   ]
-  return Object.assign(sc, { x: d, merge: 2, ob: itemIds.declared(d.s) })
+  return Object.assign(sc, { x: d, merge: 2, ob: itemIds.owner(d.s) })
 }
 
 /** A declared block whose list omits the session at every tick read while every confirming read finds it. */
@@ -117,13 +116,13 @@ function intermittentList() {
     { source: 'codex', at: at(30), before: flicker },
     { source: 'codex', at: at(45), before: flicker },
   ]
-  return Object.assign(sc, { x, merge: 2, ob: itemIds.declared(x.s) })
+  return Object.assign(sc, { x, merge: 2, ob: itemIds.owner(x.s) })
 }
 
 /**
  * A pending prompt shown at +15; the session's reads fail from +30 and the
- * condition is merged into the prompt item at +60; the owner answers at +61
- * and the reads recover at +75, so the prompt item closes while the
+ * condition is merged into the owner item (its prompt ask) at +60; the owner answers at +61
+ * and the reads recover at +75, so the owner item closes while the
  * condition still holds.
  */
 function promptThenAnswered(policy) {
@@ -141,7 +140,7 @@ function promptThenAnswered(policy) {
     { source: 'chroxy', at: at(60), reads: bad },
     { source: 'chroxy', at: at(75), before: (h) => W.answerPrompt(h.world, c.sk, ref, at(61)) },
   ]
-  return Object.assign(sc, { x: c, merge: 3, close: 4, ob: itemIds.prompt(c.s) })
+  return Object.assign(sc, { x: c, merge: 3, close: 4, ob: itemIds.owner(c.s) })
 }
 
 /**
@@ -158,29 +157,29 @@ function attentionThenPrompt(policy) {
   sc.ticks = [15, 30, 45, 60, 75].map((m) => ({ source: 'chroxy', at: at(m) }))
   sc.ticks.push({ source: 'chroxy', at: at(90), before: (h) => (ref = W.raisePrompt(h.world, c.sk, at(76), 7200)) })
   sc.ticks.push({ source: 'chroxy', at: at(105), before: (h) => W.answerPrompt(h.world, c.sk, ref, at(91)) })
-  return Object.assign(sc, { x: c, merge: 5, close: 6, ob: itemIds.prompt(c.s) })
+  return Object.assign(sc, { x: c, merge: 5, close: 6, ob: itemIds.owner(c.s) })
 }
 
 function attentionIdOf(sc) {
   return itemIds.attention(sc.x.s, sc.h.ctx.state.sessions.get(sc.x.sk).latestAuthored)
 }
 
-// ── the merge while the owner-block item is open ───────────────────────────
+// ── the merge while the owner item is open ───────────────────────────
 
-describe('a second item about a session with an open owner-block item is merged into it', () => {
+describe('a second item about a session with an open owner item is merged into it', () => {
   for (const [name, build, trigger] of [
     ['its own reads keep failing (repeated_error)', repeatedError, 'repeated_error'],
     ['it left the list of a source that cannot confirm gone', droppedCannotConfirm, 'dropped_from_list'],
     ['every confirming read found it listed again', intermittentList, 'dropped_from_list'],
   ]) {
-    it(`${name}: no attention item, the owner-block item names the condition, nothing is sent`, () => {
+    it(`${name}: no attention item, the owner item names the condition, nothing is sent`, () => {
       const sc = build()
       play(sc, { upTo: sc.merge })
       const sendsBefore = sc.h.sends.length
       const before = sc.h.records().length
       play(sc, { from: sc.merge })
       const h = sc.h
-      assert.deepEqual(h.openItems().map((i) => i.origin), ['declared'])
+      assert.deepEqual(h.openItems().map((i) => i.origin), ['owner'])
       const att = attentionIdOf(sc)
       assert.equal(h.item(att), undefined, 'no attention item is ever raised')
       // The condition is in the item's content: what it would have been,
@@ -205,10 +204,10 @@ describe('a second item about a session with an open owner-block item is merged 
   it('gap witness: read the earlier way (both items raised), the session holds two items and I9 fails', () => {
     const old = repeatedError({}, LITERAL.raiseBesideOwnerBlock.policy)
     assert.throws(() => play(old), (e) => e instanceof InvariantError && e.id === 'I9')
-    assert.deepEqual(old.h.openItems().map((i) => i.origin).sort(), ['attention', 'declared'])
+    assert.deepEqual(old.h.openItems().map((i) => i.origin).sort(), ['attention', 'owner'])
   })
 
-  it('mutation: a condition beside an open owner-block item that is dropped instead of merged turns I11 red', () => {
+  it('mutation: a condition beside an open owner item that is dropped instead of merged turns I11 red', () => {
     const sc = repeatedError({}, MUTANTS.I11)
     assert.throws(() => play(sc), (e) => e instanceof InvariantError && e.id === 'I11')
     assert.equal(sc.h.openItems().length, 1)
@@ -226,7 +225,7 @@ describe('a merge is the updated row of the transition table', () => {
     const y = session(h, 'codex', 'y')
     W.author(h.world, x.sk, T0, ownerBlock())
     W.author(h.world, y.sk, T0, { state: 'idle' })
-    const id = itemIds.declared(x.s)
+    const id = itemIds.owner(x.s)
     const bad = failing('x')
     const ticks = (list) => play({ ...sc, ticks: list.map(([m, reads]) => ({ source: 'codex', at: at(m), reads })) })
     ticks([[15]])
@@ -274,7 +273,7 @@ describe('a merge is the updated row of the transition table', () => {
       const y = session(h, 'codex', 'y')
       W.author(h.world, x.sk, T0, ownerBlock())
       W.author(h.world, y.sk, T0, { state: 'idle' })
-      const id = itemIds.declared(x.s)
+      const id = itemIds.owner(x.s)
       const bad = failing('x')
       const ticks = (list) => play({ ...sc, ticks: list.map(([m, reads]) => ({ source: 'codex', at: at(m), reads })) })
       // Merged while the item is active (one counted show of two used).
@@ -297,7 +296,7 @@ describe('a merge is the updated row of the transition table', () => {
       return h
     }
     const h = run(false)
-    assert.equal(h.sendsFor(itemIds.declared(h.world.sessions[h.world.order[0]].session)).filter((s) => s.step === 'shown').length, 2)
+    assert.equal(h.sendsFor(itemIds.owner(h.world.sessions[h.world.order[0]].session)).filter((s) => s.step === 'shown').length, 2)
     assert.throws(() => run(true), (e) => e instanceof InvariantError && e.id === 'I6')
   })
 
@@ -320,7 +319,7 @@ describe('a merge is the updated row of the transition table', () => {
     assert.equal(new Set(recs.map((r) => r.id)).size, 3)
     assert.equal(h.conflicts().length, 0)
     assert.deepEqual(h.item(sc.ob).carried.map((c) => c.opened_by), [recs[2].body.carry.opened_by])
-    assert.deepEqual(h.openItems().map((i) => i.origin), ['declared'])
+    assert.deepEqual(h.openItems().map((i) => i.origin), ['owner'])
   })
 
   it('a condition whose own closing evidence arrives is dropped from the content; the item stays open', () => {
@@ -337,10 +336,10 @@ describe('a merge is the updated row of the transition table', () => {
   })
 })
 
-// ── when the owner-block item closes, and the reverse order ────────────────
+// ── when the owner item closes, and the reverse order ────────────────
 
-describe('the condition outlives the owner-block item; the reverse order leaves one item', () => {
-  it('the owner-block item closes while the condition holds: the condition raises its own attention item in that tick', () => {
+describe('the condition outlives the owner item; the reverse order leaves one item', () => {
+  it('the owner item closes while the condition holds: the condition raises its own attention item in that tick', () => {
     const sc = promptThenAnswered()
     play(sc)
     const { h } = sc
@@ -354,12 +353,12 @@ describe('the condition outlives the owner-block item; the reverse order leaves 
     assert.deepEqual(h.openItems().map((i) => i.origin), ['attention'])
   })
 
-  it('mutation: a condition not handed on when its owner-block item closes turns I11 red', () => {
+  it('mutation: a condition not handed on when its owner item closes turns I11 red', () => {
     const sc = promptThenAnswered(MUTANTS['I11.handover'])
     assert.throws(() => play(sc), (e) => e instanceof InvariantError && e.id === 'I11')
   })
 
-  it('an attention item open when the session gets an owner-block item is withdrawn as merged and carried; handed back when that item closes', () => {
+  it('an attention item open when the session gets an owner item is withdrawn as merged and carried; handed back when that item closes', () => {
     const sc = attentionThenPrompt()
     play(sc, { upTo: sc.merge })
     const { h } = sc
@@ -367,7 +366,7 @@ describe('the condition outlives the owner-block item; the reverse order leaves 
     assert.ok(h.item(attId).open)
     const opened = h.item(attId).openedBy
     play(sc, { from: sc.merge, upTo: sc.close })
-    assert.deepEqual(h.openItems().map((i) => i.origin), ['prompt'])
+    assert.deepEqual(h.openItems().map((i) => i.origin), ['owner'])
     assert.equal(steps(h, attId).at(-1).body.reason, 'merged')
     const [rec] = carries(h, sc.ob)
     assert.equal(rec.body.carry.path, 'open_attention')
@@ -404,7 +403,7 @@ describe('the condition outlives the owner-block item; the reverse order leaves 
         error = e.id
       }
       const att = attentionIdOf(sc)
-      const pid = itemIds.prompt(x.s)
+      const pid = itemIds.owner(x.s)
       const sends = h.sends.map((s) => `${s.item_id === att ? 'attention' : s.item_id === pid ? 'prompt' : '?'}:${s.episode}:${s.step}${s.n}`)
       return { h, att, sends, error }
     }
@@ -431,57 +430,6 @@ describe('the condition outlives the owner-block item; the reverse order leaves 
     assert.ok(fresh.sends.filter((s) => s.startsWith('attention:')).length > 3)
   })
 
-  // Under the default policy the declared block takes every condition while it
-  // is open, and it closes only on a newer authored report, which also ends a
-  // condition about the earlier one: a handover to the session's other
-  // owner-block item cannot happen. With the prompt item preferred it can.
-  for (const sameTick of [false, true]) {
-    it(`with the prompt item preferred, a condition handed on to the session's other open owner-block item${sameTick ? ' (a second prompt pending when the first is answered: its next episode)' : ' (the declared block)'}: no send, no conflict`, () => {
-      const promptFirst = withPolicy({ mergeTarget: (items) => items.find((i) => i.origin === 'prompt') ?? items.find((i) => i.origin === 'declared') ?? null })
-      const sc = setup({}, promptFirst)
-      const { h } = sc
-      const c = session(h, 'chroxy', 'c')
-      const y = session(h, 'chroxy', 'y')
-      W.author(h.world, c.sk, T0, ownerBlock())
-      W.author(h.world, y.sk, T0, { state: 'idle' })
-      const bad = failing('c')
-      let p1 = null
-      sc.ticks = [
-        { source: 'chroxy', at: at(15) },
-        // A prompt with a deadline far beyond the declared item's reminders, so it never preempts.
-        { source: 'chroxy', at: at(30), before: (hh) => (p1 = W.raisePrompt(hh.world, c.sk, at(16), 36000)) },
-        { source: 'chroxy', at: at(45), reads: bad },
-        { source: 'chroxy', at: at(60), reads: bad },
-        { source: 'chroxy', at: at(75), reads: bad },
-        {
-          source: 'chroxy',
-          at: at(90),
-          before: (hh) => {
-            W.answerPrompt(hh.world, c.sk, p1, at(76))
-            if (sameTick) W.raisePrompt(hh.world, c.sk, at(77), 36000)
-          },
-        },
-      ]
-      play(sc, { upTo: 5 })
-      const declared = itemIds.declared(c.s)
-      const prompt = itemIds.prompt(c.s)
-      assert.equal(h.item(declared).state, 'active')
-      assert.deepEqual(carries(h, prompt).map((r) => `${r.body.carry.op}:${r.body.carry.path}`), ['carry:signal'])
-      assert.deepEqual(h.item(declared).carried, [])
-      const sendsBefore = h.sends.length
-      play(sc, { from: 5 })
-      const target = sameTick ? prompt : declared
-      const [handed] = carries(h, target).filter((r) => r.body.carry.path === 'handover')
-      assert.ok(handed, 'a carry with path handover')
-      assert.equal(handed.body.carry.from, `${prompt}|1`)
-      if (sameTick) assert.equal(handed.body.episode, 2)
-      assert.deepEqual(h.item(target).carried.map((x) => x.trigger), ['repeated_error'])
-      assert.equal(h.item(itemIds.attention(c.s, h.ctx.state.sessions.get(c.sk).latestAuthored)), undefined, 'no attention item')
-      assert.equal(h.sends.length, sendsBefore, 'nothing sent')
-      assert.equal(h.conflicts().length, 0)
-    })
-  }
-
   it('mutation: the reverse order left alone keeps both items and turns I9 red', () => {
     const sc = attentionThenPrompt(MUTANTS.I9)
     assert.throws(() => play(sc), (e) => e instanceof InvariantError && e.id === 'I9')
@@ -494,7 +442,7 @@ describe('crash and replay in the middle of a merge', () => {
   for (const [name, build, tickOf] of [
     ['a merge on a signal', () => repeatedError(), (sc) => sc.merge],
     ['the reverse order', attentionThenPrompt, (sc) => sc.merge],
-    ['a handover when the owner-block item closes', () => promptThenAnswered(), (sc) => sc.close],
+    ['a handover when the owner item closes', () => promptThenAnswered(), (sc) => sc.close],
   ]) {
     it(`${name}: killed at every operation of its tick and replayed, one item and one change; no conflict, no second send`, () => {
       let points = 0

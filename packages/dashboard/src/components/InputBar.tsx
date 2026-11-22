@@ -1069,6 +1069,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
         return
       }
       e.preventDefault()
+      // #9243 — a held key auto-repeats; one physical press interrupts once.
+      if (e.repeat) return
       onInterrupt()
     } else if ((e.key === 'l' || e.key === 'L') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
       // #3853: Cmd+L (mac) / Ctrl+L (linux/win) clears the composer. Only

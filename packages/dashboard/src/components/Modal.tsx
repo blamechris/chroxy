@@ -57,6 +57,9 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
     const eventTime = epoch ? e.timeStamp - performance.timeOrigin + 1 : e.timeStamp
     if (eventTime < attachedAtRef.current) return
     if (e.key === 'Escape') {
+      // #9243 — a held Escape auto-repeats; a repeat must not dismiss the dialog
+      // (nor re-open one through the composer), so one press closes once.
+      if (e.repeat) return
       // Only close if this is the topmost modal (#1179)
       const overlays = document.querySelectorAll('[data-modal-overlay]')
       if (overlays.length > 0 && overlays[overlays.length - 1] === overlayRef.current) {

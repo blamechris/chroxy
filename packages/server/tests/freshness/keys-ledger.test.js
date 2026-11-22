@@ -30,8 +30,8 @@ describe('keys', () => {
 
   it('a session label is never part of a key; the incarnation is', () => {
     const renamed = { ...S1, label: 'something else' }
-    assert.equal(itemIds.declared(S1), itemIds.declared(renamed))
-    assert.notEqual(itemIds.declared(S1), itemIds.declared({ ...S1, incarnation: 't1' }))
+    assert.equal(itemIds.owner(S1), itemIds.owner(renamed))
+    assert.notEqual(itemIds.owner(S1), itemIds.owner({ ...S1, incarnation: 't1' }))
   })
 
   it('the same slot is the same tick; a different source or slot is not', () => {
