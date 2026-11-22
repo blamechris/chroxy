@@ -34,6 +34,7 @@ import { processBase64Image } from '../utils/image-utils'
 import { useConnectionStore } from '../store/connection'
 import { persistSplitMode } from '../store/persistence'
 import { resolveTogglePlanModeTarget } from '../lib/plan-mode-toggle'
+import { isFreshKeyPress } from '../utils/keyboard'
 
 type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots'
 
@@ -303,7 +304,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             break
           case 'session.interrupt':
             // #9243 — a held Cmd+. auto-repeats; one physical press interrupts once.
-            if (!e.repeat) sendInterrupt()
+            if (isFreshKeyPress(e)) sendInterrupt()
             break
           case 'session.prev':
           case 'session.next': {

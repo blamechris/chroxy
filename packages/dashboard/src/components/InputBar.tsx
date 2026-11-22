@@ -17,6 +17,7 @@ import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge, type C
 import { PastedTextChip } from './PastedTextChip'
 import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 import { isImeComposing } from '../utils/ime'
+import { isFreshKeyPress } from '../utils/keyboard'
 
 /**
  * Convert a clipboard HTML payload to plain text. Used as a fallback when
@@ -1070,7 +1071,7 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
       }
       e.preventDefault()
       // #9243 — a held key auto-repeats; one physical press interrupts once.
-      if (e.repeat) return
+      if (!isFreshKeyPress(e)) return
       onInterrupt()
     } else if ((e.key === 'l' || e.key === 'L') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
       // #3853: Cmd+L (mac) / Ctrl+L (linux/win) clears the composer. Only

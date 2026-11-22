@@ -17,11 +17,16 @@
  * only act while connected (sendPermissionResponse refuses to send while the
  * socket is down, so we never optimistically resolve a prompt the server can't
  * receive — #5699).
+ *
+ * A held shortcut answers ONE prompt (#9270): auto-repeat keydowns never call
+ * respond(), because once the first keydown answers the primary the next queued
+ * prompt becomes primary and would otherwise be answered by the repeat.
  */
 import { useEffect, useMemo, useRef } from 'react'
 import type { ChatMessage } from '@chroxy/store-core'
 import { isRuleEligibleTool, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionDecision, ProviderInfo } from '../store/types'
+import { isFreshKeyPress } from '../utils/keyboard'
 
 export interface UseChatKeyboardArgs {
   /** The active session's messages, in render order. */
@@ -79,9 +84,11 @@ export function useChatKeyboard(args: UseChatKeyboardArgs): void {
   const stateRef = useRef({ primary, providerSupportsRules, connected, sendPermissionResponse })
   stateRef.current = { primary, providerSupportsRules, connected, sendPermissionResponse }
 
-  // #6287 — guard against double-fire from key auto-repeat before the store's
-  // answered state flips and `primary` advances. Latched per requestId; cleared
-  // whenever the primary prompt changes (a new one became first-unanswered).
+  // #6287 — guard against two fresh presses answering the same primary before
+  // the store's answered state flips and `primary` advances. Latched per
+  // requestId; cleared whenever the primary prompt changes. It does NOT cover
+  // auto-repeat: once the primary advances this latch clears, so held keys are
+  // stopped by isFreshKeyPress in the keydown handler (#9270).
   const submittedRef = useRef<string | null>(null)
   useEffect(() => {
     submittedRef.current = null
@@ -106,11 +113,14 @@ export function useChatKeyboard(args: UseChatKeyboardArgs): void {
       // Skip when focus is in an input, textarea, or select.
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      const fresh = isFreshKeyPress(e)
 
       if (e.key.toLowerCase() === 'y' && (e.metaKey || e.ctrlKey)) {
         // Only act if there IS a primary prompt to answer.
         if (!stateRef.current.primary) return
         e.preventDefault()
+        // #9270 — a held key's auto-repeat must not answer the next prompt.
+        if (!fresh) return
         if (e.shiftKey) {
           // Allow for Session — no-op when the tool/provider doesn't support
           // session rules (#2834/#3072), matching the button's gating.
@@ -125,6 +135,7 @@ export function useChatKeyboard(args: UseChatKeyboardArgs): void {
         if (!stateRef.current.primary) return
         // Skip if a modal overlay is open — let the Modal handle Escape (#1230).
         if (document.querySelector('[data-modal-overlay]')) return
+        if (!fresh) return
         respond('deny')
       }
     }
