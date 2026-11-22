@@ -166,7 +166,7 @@ function advanceRuns(mon, sk, b, own) {
 function spec(mon, id, origin) {
   let it = mon.items.get(id)
   if (!it) {
-    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false, roundOwed: 0, roundTick: null, roundJoins: 0, roundShown: 0 }
+    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false, roundOwed: 0, roundJoins: 0, roundShown: 0, tookSlot: null, base: null }
     mon.items.set(id, it)
   }
   return it
@@ -286,6 +286,25 @@ function account(mon, it) {
   return a
 }
 
+/**
+ * I1d: the counters a record stores are this monitor's own counts of the
+ * episode's shows, counted shows, round shows, reminders and returns.
+ */
+function checkCounters(it, b) {
+  if (!it.base) return
+  const own = {
+    presentation: it.base.presentation + it.shows,
+    shows_counted: it.base.shows_counted + it.counted,
+    round_shows: it.base.round_shows + it.roundShown,
+    reminders_used: it.base.reminders_used + it.reminders,
+    returns_used: it.base.returns_used + it.returns,
+  }
+  for (const [k, v] of Object.entries(own)) {
+    const stored = k === 'round_shows' ? (b.round_shows ?? 0) : b[k]
+    if (stored !== v) fail('I1d', `a ${b.step} record stores ${k} ${stored} where this monitor counts ${v}`)
+  }
+}
+
 /** I10: an owner item closes only with its last ask. */
 function closeOwner(it, b) {
   if (it.origin !== 'owner') return
@@ -320,6 +339,7 @@ function onRecord(mon, h, r) {
       if (b.phase === 'open') {
         mon.lastTickOf.set(b.source, b.tick_id)
         mon.tickOpenSeq.set(b.tick_id, r.seq)
+        mon.currentTick = b.tick_id
       }
       break
     case 'check': {
@@ -440,7 +460,10 @@ function onRecord(mon, h, r) {
         if (it.open) fail('I5', `a second episode opened while one is open (${b.origin})`)
         if (it.usedRefs.has(b.opened_by)) fail('I5', `an episode opened on an opening reference already used (${b.origin})`)
         if (b.episode !== it.episode + 1) fail('I5', `episode ${b.episode} after ${it.episode}`)
-        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map(), roundOwed: 0, roundTick: null, roundJoins: 0, roundShown: 0 })
+        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map(), roundOwed: 0, roundJoins: 0, roundShown: 0, tookSlot: null })
+        // The counters this episode starts from (an attention item handed back
+        // continues its condition's), for I1d's comparison of every record.
+        it.base = { presentation: b.presentation, shows_counted: b.shows_counted, reminders_used: b.reminders_used, returns_used: b.returns_used, round_shows: b.round_shows ?? 0 }
         it.usedRefs.add(b.opened_by)
         if (b.ask) {
           // I5: an ask opens only on a reference no earlier ask of the item stood on.
@@ -472,16 +495,25 @@ function onRecord(mon, h, r) {
         // I6: an exhausted item sends nothing unless its content changed while a counted show remained.
         fail('I6', `an exhausted item sent '${b.step}' without a content change while a counted show remained`)
       }
-      if (b.phase === 'outcome') break
+      if (b.phase === 'outcome') {
+        checkCounters(it, b)
+        break
+      }
       switch (b.step) {
         case 'shown':
           // I2c: the first show after a preemption is not the preempted item
           // itself. (It checks only that; which item is shown is the order's
           // business.)
           if (mon.lastPreempted && mon.lastPreempted === it.id && sending) fail('I2c', 'the first show after a preemption was the preempted item')
-          if (sending) mon.lastPreempted = null
+          // A round's show takes no slot, so it is not the show that follows
+          // a preemption.
+          if (sending && !roundShow) mon.lastPreempted = null
           it.shows += 1
           if (roundShow) {
+            // I2: a round's show waits for the slot: it is made by the item
+            // holding the slot, or while the slot is free.
+            const other = [...mon.items.values()].find((x) => x !== it && x.open && (x.state === 'active' || x.state === 'acknowledged'))
+            if (other) fail('I2', `a round's show was made while another item (${other.origin}) held the slot`)
             // It takes nothing: the item keeps the state it had.
             it.roundOwed -= 1
             it.roundShown += 1
@@ -493,6 +525,7 @@ function onRecord(mon, h, r) {
           const counted = it.state !== 'deferred'
           if (counted) it.counted += 1
           else it.deferredShows = (it.deferredShows ?? 0) + 1
+          if (sending && it.state !== 'active' && it.state !== 'acknowledged') it.tookSlot = mon.currentTick
           it.state = 'active'
           mon.stats.shows += 1
           // I13: a new ask found no counted show left, so nothing is shown for it.
@@ -554,7 +587,6 @@ function onRecord(mon, h, r) {
                 // A prompt round after the limit is owed exactly one show.
                 it.roundOwed = 1
                 it.roundJoins += 1
-                it.roundTick = mon.lastTickOf.get(b.source) ?? true
               } else it.noShow = true
               mon.stats.joins = (mon.stats.joins ?? 0) + 1
             } else if (b.ask.op === 'end') {
@@ -642,6 +674,7 @@ function onRecord(mon, h, r) {
         default:
           break
       }
+      checkCounters(it, b)
       // I1: per-episode bounds, from this monitor's own count...
       if (it.reminders > 2) fail('I1b', `${it.reminders} reminders in one episode`)
       if (it.returns > 1) fail('I1c', `${it.returns} returns in one episode`)
@@ -708,16 +741,21 @@ function onTickClosed(mon, h, r) {
     if (it.state === 'queued' && holder && holder !== it) continue
     fail('I13', `an owner item owed a show for a new ask is ${it.state === 'queued' ? 'queued with the slot free' : it.state} at the end of the tick, not shown`)
   }
-  // I13, for prompt rounds after the limit: the round's one show is made by
-  // the end of its tick, at once if the item held the slot, else as the tick
-  // fills the slot; still owed at the end, the item must be waiting behind
-  // another that holds the slot.
+  // I13, for prompt rounds after the limit: a round's one show stays owed,
+  // from this monitor's own account, until it is made, its prompt ask ends,
+  // or an ordinary show serves it. At every tick's end an item still owed one
+  // must be waiting behind another item that holds the slot: one that held it
+  // before this tick filled the slot, or, for a queued item, one ahead of it
+  // in the queue that took it now. Holding the slot itself, or with the slot
+  // free, it should have been shown.
+  const tickTime = Date.parse(r.ts)
   for (const it of mon.items.values()) {
-    if (it.roundTick !== tick) continue
-    it.roundTick = null
     if (!it.open || it.roundOwed === 0) continue
-    if (holder && holder !== it) continue
-    fail('I13', `a prompt round that joined with the counted shows used was not shown (item ${it.state}${holder ? ', holding the slot' : ', the slot free'})`)
+    if (holder && holder !== it) {
+      const queuedNow = it.state === 'queued' || (it.state === 'deferred' && it.deferUntil != null && tickTime >= it.deferUntil)
+      if (queuedNow || holder.tookSlot !== tick) continue
+    }
+    fail('I13', `a prompt round owed its show was not shown (item ${it.state}${holder ? (holder === it ? ', holding the slot' : ', the slot taken this tick by another') : ', the slot free'})`)
   }
   for (const it of mon.items.values()) it.noShow = false
   const budget = cfg.investigation_budget_per_tick

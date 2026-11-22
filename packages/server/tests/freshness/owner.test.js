@@ -616,6 +616,56 @@ describe('prompt rounds after the show limit', () => {
     assert.equal(h.openItems().filter((i) => i.origin === 'attention').length, 0)
   })
 
+  // An exhausted item owed a round while another item holds the slot for
+  // several ticks.
+  function waitingRound(policy) {
+    const { h, mon, sk, id } = setup(ONE, policy)
+    const o = W.addSession(h.world, { source: 'chroxy', native_id: 'o', scope: 'repo' })
+    const step = (mm) => {
+      h.tick('chroxy', at(mm))
+      checkStep(mon, h)
+    }
+    const owner = (intent, ref, mm) => {
+      h.owner(id, intent, ref, { at: at(mm) })
+      checkStep(mon, h)
+    }
+    const owed = []
+    const run = () => {
+      W.author(h.world, sk, T0, ownerBlock())
+      step(15)
+      owner('done', 'm1', 16)
+      step(30)
+      owner('done', 'm2', 31)
+      step(45)
+      W.author(h.world, o, at(46), ownerBlock('another'))
+      step(60)
+      W.raisePrompt(h.world, sk, at(61), 7200)
+      for (const mm of [75, 90, 105]) {
+        step(mm)
+        owed.push(h.item(id).roundOwed)
+      }
+      W.author(h.world, o, at(106), { state: 'running', next: 'go' })
+      step(120)
+    }
+    return { h, id, run, owed }
+  }
+
+  it('a round that waits several ticks behind another item keeps its show owed, and is shown once the slot frees', () => {
+    const { h, id, run, owed } = waitingRound()
+    run()
+    assert.deepEqual(owed, [1, 1, 1], 'owed through three ticks of the other item\'s hold')
+    assert.deepEqual(sent(h, id), ['shown1', 'returned1', 'shown2'])
+    assert.equal(h.item(id).roundOwed, 0)
+    assert.equal(h.item(id).state, 'exhausted')
+  })
+
+  it('mutations: a waiting round forgotten turns I13 red; a round shown while another holds the slot turns I2 red; a round show stored as counted turns I1d red', () => {
+    for (const [name, expect] of [['I13.wait', 'I13'], ['I2.slotless', 'I2'], ['I1d.counted', 'I1d']]) {
+      const { run } = waitingRound(MUTANTS[name])
+      assert.throws(run, (e) => e instanceof InvariantError && e.id === expect, name)
+    }
+  })
+
   it('mutation: a round given no show (the earlier rule) turns I13 red; a round given two shows turns I1a red; a round taking the slot turns I2 red', () => {
     for (const [name, expect] of [['I13.round', 'I13'], ['I2.round', 'I2']]) {
       const { h, mon, sk, id } = setup(ONE, MUTANTS[name])

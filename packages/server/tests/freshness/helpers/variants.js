@@ -209,6 +209,12 @@ export const MUTANTS = {
   }),
   // A round's show takes the slot like an ordinary show.
   'I2.round': withPolicy({ roundShowTakesSlot: true }),
+  // A round's show made without waiting for the slot.
+  'I2.slotless': withPolicy({ roundWaitsForSlot: false }),
+  // A round that had to wait past its own tick is never shown.
+  'I13.wait': withPolicy({ roundStillOwed: (item, now) => now <= item.roundSince }),
+  // A round's show is also counted against the limit.
+  'I1d.counted': withPolicy({ roundShowCounters: (c) => ({ ...c, presentation: c.presentation + 1, shows_counted: c.shows_counted + 1, round_shows: (c.round_shows ?? 0) + 1 }) }),
   // An ask that joins is shown even with the item's counted shows used.
   'I13.none': withPolicy({ newAskShows: () => true }),
   // The owner item closes when its first ask ends, though another is live.

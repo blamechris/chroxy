@@ -275,8 +275,9 @@ export const DEFAULT_POLICY = Object.freeze({
   },
   // An ask that joins an open owner item is a reason to show it again: a
   // counted show from the item's own limit, made at once if the item holds
-  // the slot, else when it next reaches the slot. With the limit used, the
-  // new ask only changes the content.
+  // the slot, else when it next reaches the slot. With the limit used, a
+  // prompt round is still owed one show (`promptRoundShows`); a declared ask
+  // only changes the content.
   newAskShows(item, config) {
     return item.counters.shows_counted < config.surface.max_presentations
   },
@@ -289,6 +290,14 @@ export const DEFAULT_POLICY = Object.freeze({
   },
   // How many shows one round earns.
   showsPerRound: 1,
+  // A round's show stays owed until it is made, however long the round waits
+  // behind another item (or its prompt ask ends first).
+  roundStillOwed(_item, _now) {
+    return true
+  },
+  // A round's show waits for the slot: it is made only by the item holding
+  // it, or while it is free.
+  roundWaitsForSlot: true,
   // DESIGN-GAP: where a round's show is counted. The model keeps it out of
   // `shows_counted`, in a fifth counter `round_shows`, so every rule that
   // reads `shows_counted` against the limit (a new ask's counted show, the
@@ -312,7 +321,9 @@ export const DEFAULT_POLICY = Object.freeze({
   // deadline passes before it is shown (a crash between the preemption and
   // the show, replayed minutes later), the preempted item outranks the item
   // that preempted it and is shown straight back. The model shows a still
-  // queued preemptor first. Reorders `queue` in place.
+  // queued preemptor first. Reorders `queue` in place. It looks only at the
+  // head, so `fillSlot` hands it queued items only: a round's show for an
+  // item that is not queued is made before, outside this order.
   preemptorFirst(queue) {
     const head = queue[0]
     if (!head?.preemptedBy) return

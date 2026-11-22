@@ -518,7 +518,10 @@ function applyStep(it, b, at, seq, policy) {
         if (b.ask.op === 'join') {
           it.usedRefs.add(b.ask.opened_by)
           it.showDue = Boolean(b.show_now)
-          if (b.round_owed) it.roundOwed = b.round_owed
+          if (b.round_owed) {
+            it.roundOwed = b.round_owed
+            it.roundSince = at
+          }
           // The show a new ask is owed is a counted one, whatever deferral came before.
           if (b.counted_next) it.afterDeferral = false
         }

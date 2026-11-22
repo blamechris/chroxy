@@ -5,7 +5,7 @@
  * opens an episode and the only evidence that closes it. Every step is one
  * row of the item transition table (README) and writes one `surface` record (or, for
  * the three sending steps, an attempt record, the send, and an outcome
- * record). Four counters are stored on every surface record and copied
+ * record). Five counters are stored on every surface record and copied
  * forward, so a restart reads them back rather than recounting.
  *
  * A "send" here is only a returned effect description: `{ op: 'send' }`.
@@ -374,8 +374,9 @@ function* askChange(ctx, item, { now, op, ask, asks, extra = {} }) {
  * pending then applies to the earlier content and is not verified; a queued
  * item (behind another, preempted, or back from expiry) keeps its place and
  * its next show is a counted one; a deferred or exhausted item is queued
- * again, so the new ask cancels a deferral. With no counted show left the
- * ask only changes the content: nothing is sent and an exhausted item stays
+ * again, so the new ask cancels a deferral. With no counted show left, a
+ * prompt round is still owed one show (see `roundShow`); a declared ask only
+ * changes the content: nothing is sent and an exhausted item stays
  * exhausted.
  */
 function* addAsk(ctx, session, ask, now) {
@@ -540,6 +541,11 @@ function* showNewAsks(ctx, now) {
     } else if (it.roundOwed > 0) {
       yield* roundShow(ctx, it, now)
     }
+  }
+  if (P.roundWaitsForSlot) return
+  // Only a broken rule reaches this: a round shown without waiting for the slot.
+  for (const it of openItems(st)) {
+    if (it.roundOwed > 0 && !P.slotHolderStates.has(it.state)) yield* roundShow(ctx, it, now)
   }
 }
 
@@ -713,23 +719,34 @@ function* fillSlot(ctx, now) {
   const P = ctx.policy
   const cfg = st.config
   if (openItems(st).some((it) => P.slotHolderStates.has(effectiveState(it, now)))) return
-  // The queue, and any item a prompt round owes a show, each in its own place.
+  const byOrder = (a, b) => compareKeys(P.orderKey(a, now), P.orderKey(b, now))
+  // Rounds owed to items that are not queued (deferred or exhausted) are
+  // shown first, in their order. They take no slot, so they are kept out of
+  // the pass below: an item at the head of it that is not queued would hide a
+  // still-queued preemptor from the preemptor-first rule.
+  const rounds = openItems(st).filter((it) => it.roundOwed > 0 && effectiveState(it, now) !== 'queued' && P.roundStillOwed(it, now)).sort(byOrder)
+  for (const it of rounds) {
+    yield* roundShow(ctx, it, now)
+    if (P.slotHolderStates.has(it.state)) return
+  }
   const queue = openItems(st)
-    .filter((it) => effectiveState(it, now) === 'queued' || it.roundOwed > 0)
-    .sort((a, b) => compareKeys(P.orderKey(a, now), P.orderKey(b, now)))
+    .filter((it) => effectiveState(it, now) === 'queued')
+    .sort(byOrder)
   P.preemptorFirst(queue)
   for (const it of queue) {
-    if (effectiveState(it, now) === 'queued' && P.canShow(it, cfg)) {
+    if (P.canShow(it, cfg)) {
       const counted = P.showIsCounted(it)
       const c = { ...it.counters, presentation: it.counters.presentation + 1, shows_counted: it.counters.shows_counted + (counted ? 1 : 0) }
       yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted } })
       return
     }
-    if (it.roundOwed > 0) {
+    // A queued item with no counted show left: its round's show, if one is
+    // owed, then exhausted at the slot as usual.
+    if (it.roundOwed > 0 && P.roundStillOwed(it, now)) {
       yield* roundShow(ctx, it, now)
       if (P.slotHolderStates.has(it.state)) return
     }
-    if (effectiveState(it, now) === 'queued') yield* step(ctx, it, 'exhausted', { now })
+    yield* step(ctx, it, 'exhausted', { now })
   }
 }
 
