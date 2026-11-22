@@ -11,7 +11,7 @@ import { updateModels, saveModelsCache, updateContextWindow, getModels, getRoste
 import { isWellFormedThinkingLevel, resolveThinkingLevels, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import { effortRoster, annotateSupportedModels } from './claude-model-refresh.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
-import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission, NOT_ADMITTED_ADMISSION } from './base-session.js'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -1132,6 +1132,15 @@ export class SdkSession extends BaseSession {
     }
     if (this._destroying) {
       this._isBusy = false
+      return
+    }
+    // #9242: the verification above is an await; re-ask admission before any turn state
+    // or the query exists. Refused: no dispatch; follow-ups that queued meanwhile go on.
+    if (!this._admitPreparedSend(sendOptions)) {
+      this._isBusy = false
+      this._permissions.clearUserStopInFlight()
+      reportInputAdmission(sendOptions, NOT_ADMITTED_ADMISSION)
+      if (this._outgoingQueue.length) this.dequeueNextOutgoing()
       return
     }
     // #7376: a turn starts with no Stop requested, whatever the last one did.
