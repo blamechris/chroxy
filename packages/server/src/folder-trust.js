@@ -772,8 +772,9 @@ const pidAlive = (pid) => {
 
 /**
  * Expired: older than the lease, or dated in the future by more than one lease. The second case
- * tolerates clock steps and skewed network file systems: such a lock is treated as expired, and a
- * live holder recovers it at its next beat (the heartbeat sets the mtime to its own clock).
+ * tolerates clock steps and skewed network file systems: such a lock is treated as expired. A live
+ * holder recovers its lease at its next beat (the heartbeat sets the mtime to its own clock) only if
+ * no reclaimer removed the lock first: a beat never recreates a lock file.
  */
 function leaseExpired(path, leaseMs) {
   try {

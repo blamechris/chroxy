@@ -891,6 +891,58 @@ describe('store lock: creation, lease, fencing', () => {
     await holder
   })
 
+  it('a heartbeat whose first open failed stops retrying once the file at the path is not ours', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+    let opens = 0
+    setLockOpenForTest((path, flags) => {
+      opens += 1
+      if (opens === 1) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' })
+      return openSync(path, flags)
+    })
+    let refreshes = 0
+    setLockFutimesForTest((fd, a, m) => { refreshes += 1; futimesSync(fd, a, m) })
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const holder = withInterprocessLock(folderTrustStorePath(), async () => { await gate })
+    await Promise.resolve()
+    // Our lock is replaced by another holder's before the retry.
+    rmSync(lockPath())
+    writeFileSync(lockPath(), bodyOf(process.ppid, 'replacement', null, null))
+    mock.timers.tick(3750)
+    assert.equal(opens, 2, 'the first retry looked at the file')
+    for (let i = 0; i < 8; i += 1) mock.timers.tick(3750)
+    assert.equal(opens, 2, 'and found it not ours: no further open')
+    assert.equal(refreshes, 0, 'and nothing was refreshed')
+    release()
+    await holder
+  })
+
+  it('a heartbeat whose open succeeds but whose ownership read throws retries on the next beat', async () => {
+    mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
+    mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+    let opens = 0
+    setLockOpenForTest((path, flags) => {
+      opens += 1
+      // A directory opens read-only but cannot be read: the ownership read throws (EISDIR).
+      if (opens === 1) return openSync(process.env.CHROXY_CONFIG_DIR, 'r')
+      return openSync(path, flags)
+    })
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const holder = withInterprocessLock(folderTrustStorePath(), async () => { await gate })
+    await Promise.resolve()
+    assert.equal(opens, 1)
+    const t = new Date(Date.now() - 5000)
+    utimesSync(lockPath(), t, t)
+    const before = statLockIdentity(lockPath())
+    mock.timers.tick(3750)
+    assert.equal(opens, 2, 'a read that threw is not a verdict: the next beat opened again')
+    assert.notEqual(statLockIdentity(lockPath()).mtimeNs, before.mtimeNs, 'and refreshed the lease')
+    release()
+    await holder
+  })
+
   it('the fence also checks that the file written is the store the held lock protects', async () => {
     mkdirSync(process.env.CHROXY_CONFIG_DIR, { recursive: true })
     await withInterprocessLock(folderTrustStorePath(), async () => {
