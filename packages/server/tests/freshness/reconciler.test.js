@@ -134,6 +134,28 @@ describe('reports and checks', () => {
     assert.equal(b.report_age_s, null)
   })
 
+  it('a source clock off by more than the limit on a read with no status line: outcome error, no native state; two in a row raise repeated_error', () => {
+    const h = setup()
+    const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+    const c = session(h, 'chroxy', 'c')
+    W.raisePrompt(h.world, c.sk, T0 + MIN, 7200)
+    // The adapter's own read: no line yet, the source's clock 15 minutes ahead.
+    h.world.sources.chroxy.clockOffsetMs = 15 * MIN
+    for (const m of [15, 30]) {
+      h.tick('chroxy', T0 + m * MIN)
+      checkStep(mon, h)
+    }
+    const cs = tickChecks(h, c.sk)
+    assert.deepEqual(cs.map((r) => [r.body.outcome, r.body.freshness, r.body.error_code]), [['error', 'error', 'clock_skew'], ['error', 'error', 'clock_skew']])
+    assert.ok(cs.every((r) => r.body.native_available === false && r.body.report_id == null), 'no report and no native state from a skewed read')
+    assert.equal(h.records('activity').length, 0)
+    assert.equal(h.item(itemIds.owner(c.s)), undefined, 'a prompt seen only through a skewed read raises nothing')
+    assert.equal(h.lastCheck(c.sk).flags.repeated_error, true)
+    // The only session of its source: the source-level investigation.
+    const inv = [...h.ctx.state.investigations.values()].filter((i) => i.source === 'chroxy')
+    assert.deepEqual(inv.map((i) => [i.trigger, i.sourceLevel]), [['repeated_error', true]])
+  })
+
   it('a session rewound to an older line: a report_regressed record; the older report is the report, with its own age', () => {
     const h = setup()
     const x = session(h, 'codex', 'x')

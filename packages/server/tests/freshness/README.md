@@ -55,7 +55,11 @@ caller.
   `relayed_declaration`.
 - A report stamped later than the check by more than the skew limit, or a
   source clock off by more than the limit, makes the read `error: clock_skew`;
-  exactly the limit is not skew. A line whose time cannot be trusted writes no report record.
+  exactly the limit is not skew. Its outcome is `error` whatever the read
+  found, a status line or none, so it counts toward `repeated_error` and a
+  source-level outage like any errored check; it writes no report record and
+  no native state is taken from it. A line whose time cannot be trusted
+  writes no report record.
 - On a source that stamps a declaration only when it changes, an identical
   repeat is not a new report, and that source's decisions are carried forward
   (`possibly_inherited`).
@@ -431,7 +435,7 @@ ledger and the simulated world for inspection.
 | I7h | Every investigation that opens closes in the same tick |
 | I7i | An investigation is opened only for a trigger the monitor also sees holding |
 | I8 | Freshness never improves for one report under one configuration |
-| I8b | Graded freshness equals the monitor's own computation |
+| I8b | Graded freshness equals the monitor's own computation, a source clock off by more than the limit giving `error` on any read the adapter answered (a read with no status line included); and a read so graded has outcome `error`, no report and no native state |
 | I9 | A session never has two open owner items, and never an open attention item beside its open owner item, whatever its trigger |
 | I10 | By the end of each tick every live ask, as the monitor sees it, is an ask on the session's open owner item: the latest prompt pending at a live read always, whatever ask stood on it before; an authored owner-block report unless a declared ask that stood on that line already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
 | I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner item whose content names it; no owner item names a condition that has ended; and the list each carried-condition record states equals the changes so far |

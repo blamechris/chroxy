@@ -271,6 +271,14 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     assert.ok(runSequence(f.seed).ok)
   })
 
+  it('I8b (fault): a read with no status line graded clock_skew but recorded as no_report is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'check' && d.body.error_code === 'clock_skew' && d.body.last_report_at == null ? { ...d, body: { ...d.body, outcome: 'no_report' } } : d)
+    const f = firstFailure('I8b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /graded clock_skew has outcome no_report/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
   it('I4c (fault): a derived state that drops an open item is caught', () => {
     const afterStep = (h, i) => {
       if (i !== 60) return

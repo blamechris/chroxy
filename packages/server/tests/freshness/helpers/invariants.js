@@ -116,11 +116,16 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
  * the check is not a trusted, authored, listed read.
  */
 function ownBand(mon, b) {
-  if (b.listed === false || b.last_report_at == null) return null
+  if (b.listed === false) return null
   const cfg = mon.configs.get(b.config_ref)
   if (!cfg) return null
   const skew = cfg.max_source_skew_seconds * 1000
-  if (b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
+  // A source clock off by more than the limit is `error` whatever the read
+  // found, a read with no status line included. A read the adapter itself
+  // failed (with its own error code) or was refused is graded by that.
+  const adapterFailed = b.outcome === 'blocked' || (b.outcome === 'error' && b.error_code !== 'clock_skew')
+  if (!adapterFailed && b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
+  if (b.last_report_at == null) return null
   const rep = b.report_id ? mon.reports.get(b.report_id) : null
   // A relayed declaration is never graded by its time, so it is `unknown`
   // even when that time is beyond the skew limit (the same order as the
@@ -378,6 +383,11 @@ function onRecord(mon, h, r) {
       if (own != null && b.read_kind !== 'activity') {
         const model = b.freshness
         if (own !== model) fail('I8b', `freshness graded ${model} where the report's age gives ${own}`)
+        // A read this monitor grades as skewed is an errored read: outcome
+        // `error`, no report and no native state taken from it.
+        if (own === 'error' && (b.outcome !== 'error' || b.report_id != null || b.native_available)) {
+          fail('I8b', `a read graded clock_skew has outcome ${b.outcome}${b.report_id != null ? ', a report' : ''}${b.native_available ? ', native state' : ''}`)
+        }
       }
       if (b.trigger === 'tick') {
         mon.latestTick.set(sk, { ...b, sk, tickId: r.refs?.tick, own })
