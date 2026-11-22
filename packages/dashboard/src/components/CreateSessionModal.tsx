@@ -99,6 +99,8 @@ type PermissionModeCapabilities = {
   planMode?: boolean
 }
 
+type AdvancedChoices = Pick<CreateSessionData, 'permissionMode' | 'worktree' | 'environmentId' | 'skipPermissions' | 'codexSandbox'>
+
 const PERMISSION_MODE_LABELS: Record<string, string> = {
   approve: 'Approve',
   acceptEdits: 'Accept Edits',
@@ -576,6 +578,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setWorktree(false)
     setCodexSandbox('')
     setSkipPermissions('inherit')
+    // #9145: a stale environment id would otherwise be submitted after reopen.
+    setEnvironmentId('')
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     setBrowsing(false)
@@ -661,6 +665,32 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     if (permissionMode === 'auto' && selectedProviderAutoBlocked) setPermissionMode('approve')
   }, [permissionMode, selectedProviderAutoBlocked])
 
+  // #9145: the ONE source for what the Advanced section submits. `submit` spreads
+  // it into onCreate and the collapsed toggle's summary is derived from it, so
+  // the disclosure cannot drift from the payload.
+  const advancedChoices = useMemo<AdvancedChoices>(() => ({
+    permissionMode: permissionMode || undefined,
+    worktree: effectiveWorktree || undefined,
+    environmentId: environmentId || undefined,
+    // #4208/#4244: only the TUI provider forwards skipPermissions. Tri-state:
+    // 'inherit' -> undefined (server default wins), 'on' -> true, 'off' -> false
+    // (overrides a server launched with --dangerously-skip-permissions).
+    skipPermissions: provider === 'claude-tui'
+      ? (skipPermissions === 'on' ? true : skipPermissions === 'off' ? false : undefined)
+      : undefined,
+    // #6689/#6903: codex only, and only when explicitly picked ('' = Default -> omit).
+    codexSandbox: provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined,
+  }), [permissionMode, effectiveWorktree, environmentId, skipPermissions, codexSandbox, provider])
+  const advancedSummary = useMemo(() => {
+    const parts: string[] = []
+    if (advancedChoices.permissionMode) parts.push(`permission mode: ${PERMISSION_MODE_LABELS[advancedChoices.permissionMode] ?? advancedChoices.permissionMode}`)
+    if (advancedChoices.codexSandbox) parts.push(`Codex sandbox: ${CODEX_SANDBOX_MODE_META.find(m => m.id === advancedChoices.codexSandbox)?.label ?? advancedChoices.codexSandbox}`)
+    if (advancedChoices.skipPermissions !== undefined) parts.push(advancedChoices.skipPermissions ? 'permission prompts: skipped' : 'permission prompts: required')
+    if (advancedChoices.environmentId) parts.push(`environment: ${environments.find(e => e.id === advancedChoices.environmentId)?.name ?? advancedChoices.environmentId}`)
+    if (advancedChoices.worktree) parts.push('worktree isolation')
+    return parts.join(', ')
+  }, [advancedChoices, environments])
+
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
     if (!trimmed && !projectNaming) {
@@ -674,26 +704,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     if (selectedProviderUnready) return
     if (permissionMode === 'auto' && selectedProviderAutoBlocked) return
     const model = resolveCreateSessionModel(provider, defaultModel, modelsByProvider)
-    // #4208/#4244: gate on the TUI provider at submit time as well as in the
-    // UI. The radio group is hidden for non-TUI providers, but a user who
-    // flips provider AFTER changing state would otherwise carry the stale
-    // value forward — and the server-side handler doesn't gate by provider
-    // (forwards via providerOpts; non-TUI providers ignore it). Belt +
-    // braces: undefined unless the active provider is `claude-tui`.
-    // Tri-state mapping: 'inherit' → undefined (server default wins), 'on'
-    // → true (force skip), 'off' → false (force require, overrides a server
-    // launched with --dangerously-skip-permissions).
-    const skipPermissionsOut: boolean | undefined = provider === 'claude-tui'
-      ? (skipPermissions === 'on' ? true : skipPermissions === 'off' ? false : undefined)
-      : undefined
-    // #6689/#6903: only forward the sandbox mode for codex, and only when the
-    // user explicitly picked one — '' is the "Default" option → omit so the
-    // daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is honored
-    // instead of being silently overridden. Other providers never forward it.
-    const codexSandboxOut: CodexSandboxMode | undefined =
-      provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
-    onCreate({ name: trimmed || undefined, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: effectiveWorktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoBlocked, projectNaming])
+    onCreate({ name: trimmed || undefined, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, model, ...advancedChoices })
+  }, [onCreate, provider, connectionId, defaultModel, modelsByProvider, advancedChoices, selectedProviderUnready, selectedProviderAutoBlocked, projectNaming])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -1269,8 +1281,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           aria-expanded={showAdvanced}
         >
           {showAdvanced ? '\u25BC' : '\u25B6'} Advanced
-          {/* #8221: disclose the submitted choice even while its checkbox is hidden. */}
-          {!showAdvanced && effectiveWorktree && ' (worktree isolation selected)'}
+          {/* #8221/#9145: disclose every submitted choice even while its control is hidden. */}
+          {!showAdvanced && advancedSummary && (
+            <span data-testid="advanced-summary" className="advanced-summary">{` (${advancedSummary})`}</span>
+          )}
         </button>
       </div>
       {showAdvanced && (

@@ -6,7 +6,7 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
-const SELECTED = 'worktree isolation selected'
+const SELECTED = 'worktree isolation'
 const PROVIDER = { name: 'claude-tui', capabilities: {}, auth: { ready: true, source: 'static', detail: '' } }
 type CheckResult = { path: string; isGitRepo: boolean | null; requestId: string }
 let requests: Array<{ path: string; requestId: string }>
@@ -64,7 +64,7 @@ function expectDisclosure(selected: boolean) {
   expect(advanced()).toBeVisible()
   if (selected) {
     expect(advanced()).toHaveTextContent(SELECTED)
-    expect(screen.getByText(/worktree isolation selected/)).toBeVisible()
+    expect(screen.getByTestId('advanced-summary')).toBeVisible()
   } else expect(advanced()).not.toHaveTextContent(SELECTED)
 }
 function expectSubmitted(onCreate: ReturnType<typeof vi.fn>, cwd: string, worktree?: boolean) {
