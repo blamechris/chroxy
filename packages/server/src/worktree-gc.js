@@ -49,6 +49,13 @@ import { GIT } from './git.js'
 // agent-session lifetime); the clean-tree guard remains the hard safety net.
 const DEFAULT_MAX_LOCK_AGE_MS = 0
 
+// The removal guard's own runner: a status listing can be large, and a hung git must
+// read as "keep" (the throw lands in isClean's / the caller's catch), not stall the
+// scheduler. Worktree GC keeps defaultGit (1 MB default buffer, no timeout).
+function strictGit(cwd, args) {
+  return execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30_000 })
+}
+
 function defaultGit(cwd, args) {
   return execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' })
 }
@@ -258,7 +265,10 @@ function isClean(git, worktreePath, { strict = false } = {}) {
     // a worktree holding real work as clean. The GC callers keep their historical
     // command (strict=false) unchanged.
     const args = strict
-      ? ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored', '--untracked-files=all', '--ignore-submodules=none']
+      // `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
+      // is one line, not thousands) while `--untracked-files=all` still enumerates
+      // every untracked file; any ignored entry at all still reads as not clean.
+      ? ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
       : ['status', '--porcelain', '--ignored']
     return git(worktreePath, args).trim().length === 0
   } catch {
@@ -280,10 +290,26 @@ function isClean(git, worktreePath, { strict = false } = {}) {
  * @returns {boolean}
  */
 export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
-  const { git = defaultGit } = deps
+  const { git = strictGit, exists = existsSync } = deps
+  // A directory that is already gone holds nothing that removal could lose.
+  if (!exists(worktreePath)) return false
   if (isClean(git, worktreePath, { strict: true }) !== true) return true
   try {
-    return git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0
+    if (git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0) return true
+    // Work `status` cannot see. (1) A tracked file flagged assume-unchanged (lowercase
+    // tag; also what `core.ignoreStat` effectively does) or skip-worktree (`S`) can be
+    // edited without any status line. (2) A submodule's own status probe runs without
+    // `--ignored`, so a populated submodule can hold ignored files (a `.env`) while the
+    // parent reads clean: ANY populated gitlink is kept. Both are the simple fail-safe
+    // (keep) rather than recursing into each submodule.
+    for (const rec of git(worktreePath, ['ls-files', '-v', '-z']).split('\0')) {
+      if (/^[a-zS] /.test(rec)) return true
+    }
+    for (const rec of git(worktreePath, ['ls-files', '-s', '-z']).split('\0')) {
+      const m = /^160000 [0-9a-f]+ \d\t(.+)$/s.exec(rec)
+      if (m && exists(joinPath(worktreePath, m[1], '.git'))) return true
+    }
+    return false
   } catch {
     return true
   }

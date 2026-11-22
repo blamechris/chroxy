@@ -530,3 +530,73 @@ describe('TurnDriver — an `interrupted` result is terminal but NOT a success (
     assert.equal((await settleOrPending(p)).kind, 'resolved')
   })
 })
+
+describe('TurnDriver — dispatch-time admission (#9242)', () => {
+  it('a caller that passes no `admit` is unchanged: sent at once, no admitAtFlush option', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go')
+    assert.equal(s.sent.length, 1)
+    assert.equal('admitAtFlush' in s.sent[0].opts, false)
+    sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} })
+    assert.equal((await p).text, '')
+  })
+
+  it('an `admit` that stays true sends the prompt and hands the provider an admitAtFlush that agrees', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go', { admit: () => true })
+    assert.equal(s.sent.length, 1)
+    assert.equal(s.sent[0].opts.admitAtFlush(), true)
+    sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} })
+    await p
+  })
+
+  it('a queued turn whose `admit` flips false while it waits behind the mutex rejects NOT_ADMITTED and never calls sendMessage', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const first = driver.driveTurn('s1', 'first')
+    let admitted = true
+    const second = driver.driveTurn('s1', 'second', { admit: () => admitted })
+    assert.equal(s.sent.length, 1, 'premise: the second turn is waiting on the mutex')
+    admitted = false
+    sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} })
+    await first
+    const r = await settleOrPending(second)
+    assert.equal(r.kind, 'rejected')
+    assert.equal(r.err.code, 'NOT_ADMITTED')
+    assert.deepEqual(s.sent.map((x) => x.prompt), ['first'], 'the refused prompt was never sent')
+  })
+
+  it('a refusal at provider flush rejects NOT_ADMITTED and frees the mutex for the next turn', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    let admitted = true
+    const p = driver.driveTurn('s1', 'queued', { admit: () => admitted })
+    const next = driver.driveTurn('s1', 'next')
+    admitted = false
+    assert.equal(s.sent[0].opts.admitAtFlush(), false)
+    const r = await settleOrPending(p)
+    assert.equal(r.err.code, 'NOT_ADMITTED')
+    await flush()
+    assert.equal(s.sent.length, 2, 'the following turn started')
+    sm.ev('s1', 'result', { cost: 0, duration: 1, usage: {} })
+    await next
+  })
+
+  for (const [label, admit] of [['throws', () => { throw new Error('boom') }], ['returns 1', () => 1], ['returns undefined', () => undefined], ['returns the string "true"', () => 'true']]) {
+    it(`an \`admit\` that ${label} is a refusal (only === true admits)`, async () => {
+      const { sm, addSession } = mkStub()
+      const s = addSession('s1')
+      driver = new TurnDriver({ sessionManager: sm })
+      const r = await settleOrPending(driver.driveTurn('s1', 'go', { admit }))
+      assert.equal(r.kind, 'rejected')
+      assert.equal(r.err.code, 'NOT_ADMITTED')
+      assert.equal(s.sent.length, 0)
+    })
+  }
+})

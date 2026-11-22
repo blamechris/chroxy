@@ -117,6 +117,15 @@ const log = createLogger('scheduler')
  * know to poke us, and a large wall-clock jump (suspend/resume, NTP step) can
  * never park us on a stale multi-day deadline.
  */
+// #9242: consecutive fires skipped because the session was mid-turn before the task
+// is declared stuck (error outcome + ownership released, so the next fire mints a fresh
+// session and the stuck one stays inspectable). Count-based on purpose: it needs no
+// notion of how long a turn legitimately runs, and 3 slots of a stuck turn is already
+// a task that has silently not run for 3 cadences.
+export const BUSY_SKIP_LIMIT = 3
+// A one-shot task skipped for a busy session is NOT retired; it is retried after this.
+const DEFAULT_BUSY_RETRY_MS = 60_000
+
 export const MAX_SLEEP_MS = 60 * 1000
 
 /**
@@ -239,9 +248,10 @@ class ScheduledRunRefusedError extends Error {
  * session that is merely busy).
  */
 class ScheduledRunSkippedError extends Error {
-  constructor(message) {
+  constructor(message, { busy = false } = {}) {
     super(message)
     this.name = 'ScheduledRunSkippedError'
+    this.busy = busy
   }
 }
 
@@ -383,6 +393,7 @@ export class SchedulerEngine extends EventEmitter {
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
     overdueGraceMs = DEFAULT_OVERDUE_GRACE_MS,
     maxSleepMs = MAX_SLEEP_MS,
+    busyRetryMs = DEFAULT_BUSY_RETRY_MS,
     logger = log,
   } = {}) {
     super()
@@ -412,7 +423,12 @@ export class SchedulerEngine extends EventEmitter {
       : DEFAULT_RUN_TIMEOUT_MS
     this._overdueGraceMs = overdueGraceMs
     this._maxSleepMs = Math.max(1, Math.floor(maxSleepMs) || MAX_SLEEP_MS)
+    this._busyRetryMs = Number.isFinite(busyRetryMs) && busyRetryMs >= 0 ? busyRetryMs : DEFAULT_BUSY_RETRY_MS
     this._log = logger
+    /** @type {Map<string,number>} taskId -> consecutive busy-skips (#9242). */
+    this._busySkips = new Map()
+    /** @type {Map<string,number>} taskId -> epoch ms before which a busy-skipped one-shot is not retried. */
+    this._retryAt = new Map()
 
     this._timer = null
     this._started = false
@@ -552,7 +568,8 @@ export class SchedulerEngine extends EventEmitter {
       for (const task of this._store.list()) {
         if (!task.enabled || !Number.isFinite(task.nextRun)) continue
         if (this._running.has(task.id) || this._quarantined.has(task.id)) continue
-        if (earliest === null || task.nextRun < earliest) earliest = task.nextRun
+        const due = Math.max(task.nextRun, this._retryAt.get(task.id) ?? 0)
+        if (earliest === null || due < earliest) earliest = due
       }
     }
     // Even with nothing scheduled we re-check on the max-sleep cadence, so a task
@@ -595,6 +612,9 @@ export class SchedulerEngine extends EventEmitter {
       if (this._running.has(taskId)) continue
       this._sessionByTask.delete(taskId)
       this._destroyTaskSession(taskId, sessionId)
+    }
+    for (const map of [this._busySkips, this._retryAt]) {
+      for (const id of [...map.keys()]) if (!this._store.get(id)) map.delete(id)
     }
   }
 
@@ -742,7 +762,8 @@ export class SchedulerEngine extends EventEmitter {
     return this._store
       .list()
       .filter((t) => t.enabled && Number.isFinite(t.nextRun) && t.nextRun <= now
-        && !this._running.has(t.id) && !this._quarantined.has(t.id))
+        && !this._running.has(t.id) && !this._quarantined.has(t.id)
+        && !((this._retryAt.get(t.id) ?? 0) > now))
       .sort((a, b) => a.nextRun - b.nextRun)
   }
 
@@ -798,6 +819,16 @@ export class SchedulerEngine extends EventEmitter {
     }
 
     const status = outcome?.status
+    // #9242: a one-shot task skipped because its session was busy has not run, and
+    // recording the skip would retire it. Leave it unrecorded (still due) and retry
+    // after a delay so it cannot spin; the overdue grace bounds how long it keeps trying.
+    if (outcome?.busy === true && status === 'skipped' && task.cadence?.kind === 'once') {
+      this._retryAt.set(task.id, this._now() + this._busyRetryMs)
+      this._log.warn(`Scheduled one-shot task ${task.id} not run: ${outcome.error} — retrying in ${this._busyRetryMs}ms`)
+      this.emit('run-end', { taskId: task.id, at, status: 'skipped', ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}), error: String(outcome.error).slice(0, 500) })
+      this._armNextTick()
+      return
+    }
     const result = {
       at,
       status: PASSTHROUGH_STATUSES.has(status) ? status : 'error',
@@ -946,11 +977,15 @@ export class SchedulerEngine extends EventEmitter {
    * meaningful (the operator can open it and read what the run actually did), and
    * gives a recurring task continuity across runs. Sessions are NOT auto-destroyed
    * after a run — they are ordinary sessions the operator can inspect and close.
-   * A recurring task therefore keeps exactly one session between fires, so within
-   * one daemon process the cache is bounded by the number of tasks in the registry;
-   * there is no idle reap and no cap. (A restart restores old sessions without
-   * their task link.) The session ends when the task is DELETED: see
-   * _releaseSessions (#7006). Pausing, resuming or retiring a task leaves it be.
+   * A task keeps one session between fires while NOBODY ELSE uses it. The mapping
+   * is bounded by the number of tasks, but the SESSIONS are not: a person using the
+   * task's session (typing, answering a question, restoring files) releases it to an
+   * ordinary session, and a stuck-busy one is released after BUSY_SKIP_LIMIT skips
+   * (#9242); the next fire then mints a fresh session, so one task can leave one
+   * ordinary session per takeover. There is no idle reap and no cap. (A restart
+   * re-adopts the owned session, #8571.) The session ends when the task is DELETED
+   * and still owns it with no unsaved worktree work: see _releaseSessions (#7006).
+   * Pausing, resuming or retiring a task leaves it be.
    *
    * Because they are ordinary sessions, the operator can also change their
    * permission mode. That makes reuse an escalation vector, so the clamped mode is
@@ -967,7 +1002,7 @@ export class SchedulerEngine extends EventEmitter {
       sessionId = this._resolveSession(task, ctx)
     } catch (err) {
       if (err instanceof ScheduledRunRefusedError) return { status: REFUSED_STATUS, error: err.message }
-      if (err instanceof ScheduledRunSkippedError) return { status: 'skipped', error: err.message }
+      if (err instanceof ScheduledRunSkippedError) return this._skipOutcome(task, err, undefined)
       return { status: 'error', error: `session create failed: ${err?.message || err}` }
     }
     if (!sessionId) return { status: 'error', error: 'session create failed (no sessionId)' }
@@ -1005,6 +1040,7 @@ export class SchedulerEngine extends EventEmitter {
       // #9242: the start wait is an await — a person may have taken the session over
       // (or started a turn in it) meanwhile. Judge again, right before the send.
       this._assertDrivable(task, sessionId)
+      this._busySkips.delete(task.id) // reached dispatch: not stuck
       const driver = this._ensureTurnDriver()
       // The start wait spends part of the run budget: the turn gets the REMAINDER,
       // so `timeout` keeps meaning total run time (floored so it stays a valid timer).
@@ -1028,7 +1064,7 @@ export class SchedulerEngine extends EventEmitter {
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
       return { status: 'success', sessionId }
     } catch (err) {
-      if (err instanceof ScheduledRunSkippedError) return { status: 'skipped', sessionId, error: err.message }
+      if (err instanceof ScheduledRunSkippedError) return this._skipOutcome(task, err, sessionId)
       // ORDER IS LOAD-BEARING. `runState.blocked` is checked FIRST, ahead of the
       // TURN_STOPPED arm below, because the engine's own deny path reaches this
       // catch through exactly the same rejection: it answers `deny`, interrupts
@@ -1053,6 +1089,37 @@ export class SchedulerEngine extends EventEmitter {
     } finally {
       this._ownedRuns.delete(sessionId)
       if (this._ownedRuns.size === 0) this._detachPermissionListener()
+    }
+  }
+
+  /**
+   * @private (#9242) — the outcome of a fire that declined to drive its session. A
+   * takeover is a plain `skipped`. A BUSY session is `skipped` too, up to
+   * BUSY_SKIP_LIMIT fires in a row; past that the task is stuck behind a session that
+   * never goes idle, so the outcome becomes a visible `error` and the session is
+   * released to an ordinary one (still there to inspect) so the next fire mints a fresh
+   * session instead of being skipped forever.
+   */
+  _skipOutcome(task, err, sessionId) {
+    if (!err.busy) {
+      this._busySkips.delete(task.id)
+      return { status: 'skipped', ...(sessionId ? { sessionId } : {}), error: err.message }
+    }
+    const n = (this._busySkips.get(task.id) ?? 0) + 1
+    if (n < BUSY_SKIP_LIMIT) {
+      this._busySkips.set(task.id, n)
+      return { status: 'skipped', busy: true, ...(sessionId ? { sessionId } : {}), error: err.message }
+    }
+    this._busySkips.delete(task.id)
+    const stuck = this._sessionByTask.get(task.id)
+    if (stuck) {
+      this._sm.releaseScheduledOwnership?.(stuck, task.id)
+      this._sessionByTask.delete(task.id)
+    }
+    return {
+      status: 'error',
+      ...(stuck ? { sessionId: stuck } : {}),
+      error: `session ${stuck ?? ''} has been busy for ${n} consecutive scheduled fires — the task has not run; the session was released (it stays open to inspect) and the next fire starts a fresh one`,
     }
   }
 
@@ -1144,7 +1211,7 @@ export class SchedulerEngine extends EventEmitter {
     }
     const session = this._sm.getSession?.(sessionId)?.session
     if (session && busyStateOf(session).busyReason === 'turn') {
-      throw new ScheduledRunSkippedError(`session ${sessionId} is busy (a turn is in progress) — not driving a scheduled prompt into it; the next slot will run`)
+      throw new ScheduledRunSkippedError(`session ${sessionId} is busy (a turn is in progress) — not driving a scheduled prompt into it; the next slot will run`, { busy: true })
     }
   }
 

@@ -3074,8 +3074,23 @@ export class SessionManager extends EventEmitter {
     if (!entry || entry.restoredScheduledTaskId === undefined) return false
     if (isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)) return false
     delete entry.restoredScheduledTaskId
-    this._schedulePersist()
+    // #9242: NOW, not on the debounce: a crash in the window would resurrect the hint.
+    this._flushPersistOrWarn(sessionId)
     return true
+  }
+
+  /**
+   * #9242: a person is using this session — end its scheduled-task link in BOTH forms
+   * (an adopted ownership and an unadopted restore hint), each persisted at once.
+   * The one entry point for every person-driven release (`recordUserIntent`, a
+   * checkpoint Files restore).
+   * @param {string} sessionId
+   * @returns {boolean} whether any link was released
+   */
+  releaseScheduledTaskLink(sessionId) {
+    const hint = this.releaseRestoreHint(sessionId)
+    const owned = this.releaseScheduledOwnership(sessionId)
+    return hint || owned
   }
 
   /**
@@ -5903,12 +5918,11 @@ export class SessionManager extends EventEmitter {
     // #8571: a person using a session ends any unadopted scheduled-task restore
     // hint on it. Only the CLIENT input handlers call this (the scheduler's turn
     // driver goes through `session.sendMessage` directly, never here).
-    this.releaseRestoreHint(sessionId)
     // #9242: and ends an ADOPTED task's ownership too. The scheduler drives its
     // session by `session.sendMessage` and never reaches here, so this is a person
     // by construction. Their session is no longer the task's: the next fire gets a
     // fresh one, and deleting the task leaves it alone.
-    this.releaseScheduledOwnership(sessionId)
+    this.releaseScheduledTaskLink(sessionId)
     this._userStopped.delete(sessionId)
     // #8326: a person typing is also what ends a run of consecutive daemon wakes.
     this._daemonWakeCount.delete(sessionId)

@@ -187,9 +187,12 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     // checkpoint WITHOUT touching the working tree.
     let checkpoint
     if (restoreFiles) {
+      // #9242: a person is about to rewrite this session's working tree. Claim it for
+      // them BEFORE the first await (the restore waits on a directory lock and async
+      // git): a scheduled fire that becomes due meanwhile must not drive it, and a
+      // task must not own or later adopt it. Both link forms, one entry point.
+      ctx.sessions.sessionManager?.releaseScheduledTaskLink?.(sid)
       checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId, { isAuthorized: authorizedFor(ctx, client) })
-      // #9242: a person rewrote this session's working tree; a scheduled task no longer owns it.
-      ctx.sessions.sessionManager?.releaseScheduledOwnership?.(sid)
     } else {
       checkpoint = ctx.services.checkpointManager.getCheckpoint(sid, msg.checkpointId)
       if (!checkpoint) throw new Error(`Checkpoint not found: ${msg.checkpointId}`)
