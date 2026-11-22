@@ -1806,7 +1806,7 @@ export class ClaudeByokSession extends BaseSession {
           toolRoundCapReached,
           interrupted: true,
           // #9241: only an abort is the Stop; any other error that raced it is not
-          stopRequested: err instanceof APIUserAbortError || err?.name === 'AbortError',
+          stopRequested: ClaudeByokSession._isGenuineAbort(err),
           turnStartedAt,
           turnUsage,
           turnCost,
@@ -2908,9 +2908,46 @@ export class ClaudeByokSession extends BaseSession {
 
   /** True when `err` is the abort of an in-flight stream (see _emitTurnError). */
   _isAbortError(err) {
+    // #9266: an aborted controller used to make ANY error an abort, so an
+    // upstream HTTP 500 that raced a Stop ended as a quiet stopped turn and the
+    // error was never shown. Now an error carrying evidence that it came from
+    // upstream (an SDK APIError with an HTTP status, or an SSE `error` body) is
+    // surfaced even after the Stop. Once the signal IS aborted, every other
+    // error is treated as the Stop's own fallout: the shapes the SDK/undici throw
+    // BECAUSE of the abort (an abort on the `cause` chain, or a bare `terminated`/
+    // connection error with no status, incl. APIConnectionTimeoutError) are
+    // deliberately quiet, so a real Stop never shows a spurious error. With no
+    // Stop, only the error's own top-level abort shape counts (pre-#9266).
+    if (ClaudeByokSession._isUpstreamError(err)) return false
     return err instanceof APIUserAbortError ||
       err?.name === 'AbortError' ||
       !!this._abortController?.signal?.aborted
+  }
+
+  /**
+   * #9266: the error itself says it is an abort: the SDK's APIUserAbortError, a
+   * fetch/DOMException `AbortError`, or either of those anywhere on its `cause`
+   * chain (undici's `terminated` and the SDK's AnthropicError/APIConnectionError
+   * wrappers carry the abort as `cause`). No signal state is consulted.
+   */
+  static _isGenuineAbort(err) {
+    for (let e = err, depth = 0; e && depth < 5; e = e.cause, depth++) {
+      if (e instanceof APIUserAbortError || e.name === 'AbortError') return true
+    }
+    return false
+  }
+
+  /**
+   * #9266: evidence that `err` is a real upstream response, independent of any
+   * abort: an HTTP status, or the body of an SSE `error` event (the SDK keeps it
+   * as the parsed object, or as the raw string when it is not JSON).
+   */
+  static _isUpstreamError(err) {
+    if (ClaudeByokSession._isGenuineAbort(err)) return false
+    if (Number.isInteger(err?.status)) return true
+    const body = err?.error
+    return (body != null && typeof body === 'object') ||
+      (typeof body === 'string' && body.length > 0)
   }
 
   /**
