@@ -202,6 +202,8 @@ const PTY_EXITED_BEFORE_PROMPT_MESSAGE = 'Claude exited before your message coul
 const PTY_EXITED_MID_TURN_MESSAGE = 'Claude exited mid-turn — restarting.'
 const PROMPT_EMPTY_MESSAGE = 'Your message was empty after removing control characters, so nothing was sent.'
 const PTY_RESPAWN_EXHAUSTED_MESSAGE = 'Claude kept exiting; stopped restarting it.'
+// #9241: Claude Code's reply-line glyph, U+23FA on macOS and U+25CF elsewhere (see _appendToOutputTail).
+const REPLY_GLYPH_RE = /[\u23FA\u25CF]/
 
 /**
  * ClaudeTuiSession — drives the interactive `claude` TUI under a PTY so the
@@ -4374,13 +4376,16 @@ export class ClaudeTuiSession extends BaseSession {
     // #9241: the first assistant line on the screen is the earliest sign claude began
     // answering, and for a text-only reply it is the ONLY one until the Stop hook (no
     // PreToolUse fires, and the text reaches `emit` as a stream_delta at the end).
-    // Claude Code prefixes assistant text and tool lines with U+23FA. DEPENDENCY: if a
-    // Claude Code release stops printing it, a Stop over visible text can again be
-    // marked "stopped before a reply" (the marker errs toward showing, not hiding).
+    // Claude Code prefixes assistant text and tool lines with a platform-dependent glyph:
+    // its own `macos ? '\u23FA' : '\u25CF'` (U+23FA on macOS, U+25CF on every other
+    // platform), so BOTH are accepted. U+25CF also appears elsewhere in its UI, but an
+    // over-match only suppresses the marker, never mints it over visible text (fail-safe).
+    // DEPENDENCY: if a Claude Code release changes either glyph, a Stop over visible text
+    // can again be marked "stopped before a reply" (the marker errs toward showing).
     // Armed only once this turn's prompt has been written (`_markPromptWritten`), so the
     // echo of the prompt and the previous turn's screen do not count; a redraw that
     // re-prints an older glyph line after that only suppresses the marker (fail-safe).
-    if (this._replyGlyphWatch && this._isBusy && rawStr.includes('\u23FA')) {
+    if (this._replyGlyphWatch && this._isBusy && REPLY_GLYPH_RE.test(rawStr)) {
       this._replyGlyphWatch = false
       this._noteTurnOutput()
     }

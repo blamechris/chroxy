@@ -523,6 +523,13 @@ describe('claude-tui: a provider that mints its own stopped result (#9241)', () 
       assert.equal(w.markers().length, 0)
     })
 
+    it('the Linux/Windows glyph (U+25CF) counts the same: NO marker', async () => {
+      turnSession((s) => stopAfter(['\u25CF Here is the first part of my reply.\r\n'])(s))
+      await run()
+      assert.equal(session._turnOutputSeen, true)
+      assert.equal(w.markers().length, 0)
+    })
+
     it('spinner / status chunks and a resize without the glyph stay quiet: the Stop is marked', async () => {
       turnSession((s) => {
         stopAfter(['\u273B Thinking\u2026 (esc to interrupt)', '> hello', '\u001b[2K\u001b[1G'])(s)
@@ -534,6 +541,12 @@ describe('claude-tui: a provider that mints its own stopped result (#9241)', () 
 
     it('the glyph arriving in a LATER chunk still counts', async () => {
       turnSession((s) => stopAfter(['\u273B Thinking\u2026', '\u001b[1m\u23FA\u001b[0m Hello'])(s))
+      await run()
+      assert.equal(w.markers().length, 0)
+    })
+
+    it('the U+25CF glyph arriving in a LATER chunk still counts', async () => {
+      turnSession((s) => stopAfter(['\u273B Thinking\u2026', '\u001b[1m\u25CF\u001b[0m Hello'])(s))
       await run()
       assert.equal(w.markers().length, 0)
     })

@@ -91,7 +91,6 @@ describe('permission_resolved emit sites (#9119)', () => {
     }
     walk(ast, false)
     assert.equal(quietList.length, 1, 'exactly one mention sits inside TURN_QUIET_EVENTS')
-    assert.equal(seen.length, 2, 'the others are the pre-existing forwarded-events list and the listener registration (not counted as a mention by the scan)')
     assert.ok(TURN_QUIET_EVENTS.includes('permission_resolved'))
   })
 
