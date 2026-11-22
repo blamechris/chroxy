@@ -341,11 +341,17 @@ describe('crashes around sends', () => {
       checkStep(mon, h)
       if (evidenceBefore) W.author(h.world, x.sk, T0 + 17 * MIN, { state: 'running', next: 'go' })
       let crashed = false
+      // What the killed tick had written: its verification, its return
+      // attempt, its resolution.
+      let atCrash = null
       try {
         h.tick('chroxy', T0 + 30 * MIN, { crashAfter: op })
       } catch (e) {
         if (!(e instanceof Crash)) throw e
         crashed = true
+        const v = h.records('owner_ack').find((r) => r.body.phase === 'verify')
+        const tail = steps(h, id)
+        atCrash = { verified: v ? v.body.verified : null, returned: tail.includes('returned'), resolved: tail.includes('resolved'), sent: sent(h, id) }
         checkStep(mon, h, { complete: false })
         h.restart()
       }
@@ -353,8 +359,11 @@ describe('crashes around sends', () => {
       h.tick('chroxy', T0 + 50 * MIN)
       checkStep(mon, h)
       const verifies = h.records('owner_ack').filter((r) => r.body.phase === 'verify')
-      return { h, id, crashed, verifies }
+      return { h, id, crashed, verifies, atCrash }
     }
+    // The exact end of a run: the one verification, every step, what was sent, the state.
+    const outcome = (r) => ({ verified: r.verifies.map((v) => v.body.verified), steps: steps(r.h, r.id), sent: sent(r.h, r.id), state: r.h.item(r.id).state, episode: r.h.item(r.id).episode })
+    const returnSent = (r) => (r.atCrash && !r.atCrash.sent.includes('returned1') ? [] : ['returned1'])
     const each = (opts, check) => {
       let points = 0
       for (let op = 0; ; op++) {
@@ -370,12 +379,24 @@ describe('crashes around sends', () => {
       assert.ok(points > 3, `${points} crash points exercised`)
     }
 
-    it('closing evidence arrives after the restart: the item is resolved, by the ordinary row', () => {
+    it('closing evidence arrives after the restart: the item is resolved, by the ordinary row; a verification already recorded stands', () => {
+      const seen = new Set()
       each({ evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, { state: 'running', next: 'go' }) }, (r, op) => {
-        assert.equal(r.h.item(r.id).state, 'closed', `closed: crash at op ${op}`)
-        assert.equal(steps(r.h, r.id).at(-1), 'resolved')
-        assert.ok(r.h.sendsFor(r.id).filter((s) => s.step === 'returned').length <= 1)
+        const c = r.atCrash
+        const kind = !c ? 'no crash' : c.verified == null ? 'killed before the verification' : c.returned ? 'killed after the return attempt' : 'killed after the verification'
+        seen.add(kind)
+        const expected = {
+          // The later tick finds the evidence and is the first to verify.
+          'killed before the verification': { verified: [true], steps: ['queued', 'shown', 'resolved'], sent: ['shown1'], state: 'closed', episode: 1 },
+          // "Not verified" stands; the evidence resolves the item; the return it called for is not sent.
+          'killed after the verification': { verified: [false], steps: ['queued', 'shown', 'resolved'], sent: ['shown1'], state: 'closed', episode: 1 },
+          // The return attempt was recorded (sent only if the kill came after the send).
+          'killed after the return attempt': { verified: [false], steps: ['queued', 'shown', 'returned', 'resolved'], sent: ['shown1', ...returnSent(r)], state: 'closed', episode: 1 },
+          'no crash': { verified: [false], steps: ['queued', 'shown', 'returned', 'resolved'], sent: ['shown1', 'returned1'], state: 'closed', episode: 1 },
+        }[kind]
+        assert.deepEqual(outcome(r), expected, `${kind}: crash at op ${op}`)
       })
+      assert.equal(seen.size, 4, `every case reached: ${[...seen]}`)
     })
 
     it('no evidence at all: the step the verification called for is made once (returned), then the item is active', () => {
@@ -388,11 +409,27 @@ describe('crashes around sends', () => {
       })
     })
 
-    it('closing evidence found by the crashed tick, then gone (a new owner block) after the restart: no conflict, the item moves on', () => {
+    // The killed tick found the evidence and recorded "verified"; before the
+    // next tick the session authored a new owner block. The verification is
+    // not rewritten, and the next tick follows the evidence it finds: no
+    // closing evidence, so the "not yet confirmed" return. In that one case
+    // the ledger holds a verified record followed by a return (README).
+    it('closing evidence found by the crashed tick, then gone (a new owner block) after the restart: a recorded "verified" stands and the later tick returns the item', () => {
+      const seen = new Set()
       each({ evidenceBefore: true, evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, ownerBlock('approve the other merge')) }, (r, op) => {
-        const it = r.h.item(r.id)
-        assert.notEqual(it.state, 'acknowledged', `moved on from acknowledged: crash at op ${op}`)
+        const c = r.atCrash
+        const kind = !c || c.resolved ? 'resolved before the kill' : c.verified == null ? 'killed before the verification' : 'killed after "verified"'
+        seen.add(kind)
+        const expected = {
+          // The later tick is the first to verify, and finds no evidence.
+          'killed before the verification': { verified: [false], steps: ['queued', 'shown', 'updated', 'returned'], sent: ['shown1', 'returned1'], state: 'active', episode: 1 },
+          'killed after "verified"': { verified: [true], steps: ['queued', 'shown', 'updated', 'returned'], sent: ['shown1', 'returned1'], state: 'active', episode: 1 },
+          // Resolved by the first tick; the new block is a new episode.
+          'resolved before the kill': { verified: [true], steps: ['queued', 'shown', 'resolved', 'queued', 'shown'], sent: ['shown1', 'shown1'], state: 'active', episode: 2 },
+        }[kind]
+        assert.deepEqual(outcome(r), expected, `${kind}: crash at op ${op}`)
       })
+      assert.equal(seen.size, 3, `every case reached: ${[...seen]}`)
     })
 
     it('mutation: a verification written again without looking it up conflicts with itself, and I3a goes red', () => {

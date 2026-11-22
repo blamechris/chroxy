@@ -227,6 +227,9 @@ export const MUTANTS = {
   'I13.none': withPolicy({ newAskShows: () => true }),
   // An investigation left open by a tick never replayed stays open.
   'I7h.abandoned': withPolicy({ closeAbandonedInvestigations: false }),
+  // An abandoned investigation counted as a cycle of its onset (and a second
+  // cycle allowed after it): the next one opens as cycle 2.
+  'I7a.abandoned': withPolicy({ abandonedIsCycle: true, secondCycleAfter: new Set(['inconclusive', 'running_claim_unverified', 'abandoned']) }),
   // A surfacing decision of a tick never replayed is never applied.
   'I11.abandoned': withPolicy({ recoverAbandonedSignals: false }),
   // The owner item closes when its first ask ends, though another is live.

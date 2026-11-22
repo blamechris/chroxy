@@ -463,6 +463,9 @@ function onRecord(mon, h, r) {
             if (!run) fail('I7i', `an investigation was opened for ${b.trigger}, which the monitor does not see holding`)
             run.cycles += 1
             mon.openInv.get(b.investigation_id).run = run
+            // The cycle number is this monitor's own count of the run's
+            // cycles, an abandoned investigation not counted.
+            if (b.cycle !== run.cycles) fail('I7a', `cycle ${b.cycle} opened as the run's cycle ${run.cycles}`)
             if (run.cycles > 2) fail('I7a', `${run.cycles} cycles of ${b.trigger} in one unbroken run of the trigger`)
           }
         }

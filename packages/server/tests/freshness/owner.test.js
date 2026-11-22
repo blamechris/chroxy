@@ -302,6 +302,21 @@ describe('a prompt the ask opened on, still pending when the ask ends', () => {
     assert.ok(points > 5, `${points} crash points exercised`)
   })
 
+  it('a pending prompt no earlier ask opened on is added on its own id, even after a prompt ask ended', () => {
+    // P1 and P2 pending when the ask opens: it opens on P2 and P1 is never
+    // used. P2 answered: P1 opens the next episode under its own id.
+    const { h, sk, id, tick } = setup()
+    W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+    const p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+    const p2 = W.raisePrompt(h.world, sk, at(2), 7200)
+    tick(15)
+    assert.equal(promptAsk(h, id).opened_by, p2)
+    W.answerPrompt(h.world, sk, p2, at(16))
+    tick(30)
+    assert.equal(h.item(id).episode, 2)
+    assert.deepEqual([promptAsk(h, id).opened_by, promptAsk(h, id).content_ref], [p1, p1])
+  })
+
   it('fault: a prompt ask added again for a prompt that is no longer pending is caught by I5', () => {
     const { h, mon, sk, p1, tick } = movedPast()
     W.answerPrompt(h.world, sk, p1, at(46))

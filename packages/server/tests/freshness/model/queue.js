@@ -138,6 +138,17 @@ function* raise(ctx, { itemId, kind, origin, session, source, ref, fingerprint, 
  * no closing evidence completes the failed-verification step (returned or
  * exhausted), which is sent at most once, as every send is. The item holds
  * the slot as acknowledged until then, and no other item takes it.
+ *
+ * A recorded verification is the answer the first tick found, not the
+ * item's fate: a later tick may find the other answer. In one case the
+ * ledger therefore holds a "verified" record followed by a return: the
+ * tick that found closing evidence wrote "verified" and was killed before
+ * `resolved`, and before the next tick the session authored a new owner
+ * block, so that tick finds no closing evidence and returns the item, "not
+ * yet confirmed". It is what happens without any crash when a block clears
+ * and comes back between two ticks. Not chosen: resolving the item from the
+ * recorded verification and letting the new block open a new episode, which
+ * would close an item on evidence its own tick no longer sees.
  */
 function* verification(ctx, item, verified, now) {
   const vk = ownerAckKey(item.itemId, item.episode, item.ack.ackRef, 'verify')

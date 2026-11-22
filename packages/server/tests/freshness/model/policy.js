@@ -292,6 +292,15 @@ export const DEFAULT_POLICY = Object.freeze({
   // ending yields a new reference. So a prompt is added again at most once
   // per ending of a prompt ask, never at a tick that brings no new owner
   // answer, and never once it is not pending. Declared asks are unchanged.
+  //
+  // Either component of the derived reference alone keeps it new, given that
+  // a prompt is pending once and then answered or lapsed. The ended ask's
+  // opening reference is never reused. And two endings each followed by the
+  // same prompt added again both left it pending, so each was an owner
+  // answer to that ask's own latest prompt (an answer to another prompt, or
+  // a lapse, ends an ask only when nothing is pending), and a prompt is
+  // answered once. Both components are kept, as stated; no test shows a
+  // repeated key with one dropped, for that reason.
   promptAskRef(item, prompt) {
     if (!item || !item.usedRefs.has(prompt.ref) || !item.lastPromptEnd) return prompt.ref
     const last = item.lastPromptEnd
@@ -440,6 +449,8 @@ export const DEFAULT_POLICY = Object.freeze({
   // applies the signals of those it did close. Read by investigation.js.
   closeAbandonedInvestigations: true,
   recoverAbandonedSignals: true,
+  // An abandoned investigation is no cycle of its onset. Read by the fold.
+  abandonedIsCycle: false,
 
   // ── investigation ──
   // DESIGN-GAP: several triggers can hold at once, and the rules allow one

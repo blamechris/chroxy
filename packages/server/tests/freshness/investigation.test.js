@@ -509,3 +509,136 @@ describe('a tick killed by a crash and never replayed (the process back in a lat
     assert.ok(redAt(MUTANTS['I11.abandoned'], 'I11'))
   })
 })
+
+describe('the decisions of a tick never replayed, applied by the source\'s next tick', () => {
+  // Build a run, then kill the tick at `at` just after an investigation
+  // decided to surface `surface` and before the item was raised. Returns the
+  // run restarted, or null if no such point exists.
+  function killedAfterDecision(build, { source, at, surface, item }) {
+    for (let op = 0; op < 300; op++) {
+      const sc = build()
+      try {
+        sc.h.tick(source, at, { crashAfter: op })
+        return null
+      } catch (e) {
+        if (!(e instanceof Crash)) throw e
+      }
+      const decided = sc.h.records('investigation').some((r) => r.body.phase === 'close' && r.body.surface === surface && r.body.classified_at === at)
+      if (decided && queued(sc.h, item(sc)).length === 0) {
+        sc.h.restart()
+        return sc
+      }
+    }
+    return null
+  }
+  const queued = (h, id) => h.surface(id).filter((r) => r.body.step === 'queued')
+  const at = (m) => T0 + m * MIN
+  const SHORT = { freshness: { blocked: { fresh_max_s: 600, stale_after_s: 3600 } } }
+
+  // A blocked line on CI, stale and surfaced (blocked_unresolved) at +75.
+  const blockedOnCi = () => {
+    const h = setup(SHORT)
+    const x = session(h, 'codex', 'x')
+    session(h, 'claude-desktop', 'd')
+    W.author(h.world, x.sk, T0, { state: 'blocked', blocked_on: 'waiting on CI' })
+    for (const m of [15, 30, 45, 60]) h.tick('codex', at(m))
+    return { h, x, att: itemIds.attention(x.s, h.ctx.state.sessions.get(x.sk).latestAuthored) }
+  }
+
+  it('attention: a newer line authored before the next tick: nothing is raised for the old line', () => {
+    const sc = killedAfterDecision(blockedOnCi, { source: 'codex', at: at(75), surface: 'attention', item: (s) => s.att })
+    assert.ok(sc)
+    W.author(sc.h.world, sc.x.sk, at(76), { state: 'running', next: 'go' })
+    sc.h.tick('codex', at(90))
+    assert.equal(queued(sc.h, sc.att).length, 0)
+    assert.equal(sc.h.conflicts().length, 0)
+  })
+
+  it('attention for a session that had no line: its first line, before the next tick, is the closing evidence', () => {
+    // x never authored and every read of it fails: repeated_error, two
+    // inconclusive cycles, surfaced at +45 with no report.
+    const build = () => {
+      const h = setup()
+      const x = session(h, 'codex', 'x')
+      const y = session(h, 'codex', 'y')
+      W.author(h.world, y.sk, T0, { state: 'idle' })
+      h.world.sessions[x.sk].flaky = 1000
+      for (const m of [15, 30]) h.tick('codex', at(m))
+      return { h, x, att: itemIds.attention(x.s, null) }
+    }
+    const sc = killedAfterDecision(build, { source: 'codex', at: at(45), surface: 'attention', item: (s) => s.att })
+    assert.ok(sc)
+    sc.h.world.sessions[sc.x.sk].flaky = 0
+    W.author(sc.h.world, sc.x.sk, at(46), { state: 'running', next: 'go' })
+    sc.h.tick('codex', at(60))
+    assert.equal(queued(sc.h, sc.att).length, 0)
+  })
+
+  it('gone: the session listed again before the next tick: no gone item', () => {
+    const build = () => {
+      const h = setup()
+      const c = session(h, 'chroxy', 'c')
+      W.author(h.world, c.sk, T0, { state: 'running', next: 'a' })
+      h.tick('chroxy', at(15))
+      h.world.sessions[c.sk].listed = false
+      return { h, c, gone: itemIds.gone(c.s) }
+    }
+    const sc = killedAfterDecision(build, { source: 'chroxy', at: at(30), surface: 'gone', item: (s) => s.gone })
+    assert.ok(sc)
+    sc.h.world.sessions[sc.c.sk].listed = true
+    sc.h.tick('chroxy', at(45))
+    assert.equal(queued(sc.h, sc.gone).length, 0)
+  })
+
+  it('outage: the source readable again before the next tick: no outage item', () => {
+    const build = () => {
+      const h = setup()
+      const x = session(h, 'codex', 'x')
+      W.author(h.world, x.sk, T0, { state: 'idle' })
+      h.tick('codex', at(15))
+      h.world.sources.codex.up = false
+      h.tick('codex', at(30))
+      return { h, x, outage: itemIds.outage('codex') }
+    }
+    const sc = killedAfterDecision(build, { source: 'codex', at: at(45), surface: 'outage', item: (s) => s.outage })
+    assert.ok(sc)
+    sc.h.world.sources.codex.up = true
+    sc.h.tick('codex', at(60))
+    assert.equal(queued(sc.h, sc.outage).length, 0)
+  })
+
+  it('applied by its own source\'s next tick only: a tick of another source in between applies nothing', () => {
+    const sc = killedAfterDecision(blockedOnCi, { source: 'codex', at: at(75), surface: 'attention', item: (s) => s.att })
+    assert.ok(sc)
+    sc.h.tick('claude-desktop', at(80))
+    assert.equal(queued(sc.h, sc.att).length, 0, 'not by another source\'s tick')
+    sc.h.tick('codex', at(90))
+    assert.equal(queued(sc.h, sc.att).length, 1, 'by its own source\'s next tick')
+  })
+
+  it('superseded once a later tick of the source closes: a decision skipped then is not applied by any tick after', () => {
+    // The outage decision of the killed tick at +45 is skipped at +60 (the
+    // source is readable again), and +60 closes. The source fails again
+    // before +75, so the evidence is gone; +75 alone holds no outage trigger
+    // (one failed tick), and the superseded decision must not open the item.
+    const build = () => {
+      const h = setup()
+      const x = session(h, 'codex', 'x')
+      W.author(h.world, x.sk, T0, { state: 'idle' })
+      h.tick('codex', at(15))
+      h.world.sources.codex.up = false
+      h.tick('codex', at(30))
+      return { h, x, outage: itemIds.outage('codex') }
+    }
+    const sc = killedAfterDecision(build, { source: 'codex', at: at(45), surface: 'outage', item: (s) => s.outage })
+    assert.ok(sc)
+    sc.h.world.sources.codex.up = true
+    sc.h.tick('codex', at(60))
+    sc.h.world.sources.codex.up = false
+    sc.h.tick('codex', at(75))
+    assert.equal(queued(sc.h, sc.outage).length, 0)
+    // A second failed tick is a new outage of its own.
+    sc.h.tick('codex', at(90))
+    assert.equal(queued(sc.h, sc.outage).length, 1)
+  })
+})

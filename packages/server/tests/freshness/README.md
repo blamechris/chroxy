@@ -194,7 +194,15 @@ verification stands and is not written again, and the item follows the
 evidence that tick finds: closing evidence resolves it by the "any open,
 closing evidence" row; none completes the failed-verification step
 (`returned` or `exhausted`), sent at most once as any send. Until then it
-holds the slot as acknowledged.
+holds the slot as acknowledged. A recorded verification is the answer the
+first tick found and is not rewritten; a later tick may find the other
+answer. So in one case the ledger holds a "verified" record followed by a
+return: the tick that found closing evidence wrote "verified" and was killed
+before `resolved`, the session then authored a new owner block, and the next
+tick, finding no closing evidence, returned the item "not yet confirmed",
+as it would have with no crash had the block cleared and come back between
+two ticks. The alternative not chosen is to resolve the item from the
+recorded verification and let the new block open a new episode.
 
 Edges at exact equality: a reminder or the time limit is due at the very
 moment its interval has passed since the latest show or return. A deadline
@@ -402,7 +410,10 @@ replayed in its own slot, or, for some crashes (chosen from a separate
 random stream, so a seed's events are unchanged up to its first such
 restart), the process comes back only after the slot has passed and the
 source's next tick, in a later slot, runs instead; until it has, only the
-checks that hold mid-tick are made. The soak runs
+checks that hold mid-tick are made, and a run that ends with such a source
+waiting ticks it once more and then makes every check. So a breach of the
+checks made only at a complete step (I2, I4c, I7h, I9, I11) that appears and
+heals entirely inside such a waiting window is not seen. The soak runs
 4,000 sequences of the default length and 600 of 600 steps, and takes a few
 minutes.
 
@@ -432,7 +443,7 @@ ledger and the simulated world for inspection.
 | I4c | The model's open items equal the monitor's own account of the ledger |
 | I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it; and a prompt ask added for a prompt an earlier ask of the item opened on is added only while that prompt is pending at the session's latest live read, and at most once after each ending of a prompt ask of the item, with no prompt ask added in between |
 | I6 | An exhausted item sends nothing unless its content changed while a counted show remained, or a prompt round is owed its show |
-| I7a | At most two cycles per onset, onsets derived by the monitor itself; an investigation closed as abandoned is no cycle |
+| I7a | At most two cycles per onset, onsets derived by the monitor itself; an investigation closed as abandoned is no cycle, and each per-session cycle opens under the number the monitor's own count of its onset's cycles gives |
 | I7b | At most one investigation per session per tick |
 | I7c | Both budgets respected |
 | I7d | Rechecks never take a cycle that a stale session needs |

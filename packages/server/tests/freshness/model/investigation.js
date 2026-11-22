@@ -306,7 +306,10 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
  * outage) is applied by the source's next tick, as a replay in the same slot
  * would have applied it, unless the item's closing evidence has arrived
  * since; once a later tick of the source closes, the crashed tick is
- * superseded and nothing more is taken from it.
+ * superseded and nothing more is taken from it. A crashed tick replayed
+ * after a later tick abandoned its investigation would count the abandoned
+ * one in its spent budget and its signal loop; the model cannot reach that,
+ * because a tick is replayed only within its own slot.
  */
 function afterAbandoned(st, id) {
   let next = id
@@ -399,7 +402,8 @@ export function* planInvestigations(ctx, { source, tickId, now, world }) {
   }
   // Signals from investigations closed by an earlier tick of this source
   // that was never replayed (see `closeAbandoned`), unless their closing
-  // evidence has arrived since.
+  // evidence has arrived since. (The `abandoned` filter is belt and braces:
+  // an abandoned close surfaces nothing, so it yields no signal anyway.)
   for (const inv of P.recoverAbandonedSignals ? st.investigations.values() : []) {
     if (!inv.closed || inv.abandoned || inv.tickId === tickId || inv.source !== source) continue
     const t = st.ticks.get(inv.tickId)
@@ -413,7 +417,11 @@ export function* planInvestigations(ctx, { source, tickId, now, world }) {
   return { signals, srcHeld, srcOnset: srcHeld ? sourceOnset(st, source, tickId) : null }
 }
 
-/** Whether the item a recovered signal would raise already has its closing evidence at this tick. */
+/**
+ * Whether the item a recovered signal would raise already has its closing
+ * evidence at this tick. (The `tickId` tests always hold here: every session
+ * of the source has its check of this tick before investigations run.)
+ */
 function evidenceSince(st, sig, source, tickId) {
   if (sig.type === 'outage') return sessionsOf(st, source).some((s) => s.cur && s.cur.tickId === tickId && (s.cur.outcome === 'ok' || s.cur.outcome === 'no_report'))
   const s = st.sessions.get(sig.sk)

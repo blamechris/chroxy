@@ -399,6 +399,10 @@ export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe 
       fault?.afterStep?.(h, i)
       checkStep(mon, h, { complete: g.pending.size === 0 })
     }
+    // A source still waiting for the tick after a crash that was not
+    // replayed gets it now, so the run ends with every check made.
+    for (const src of [...g.pending].sort()) runStep(g, h, mon, { kind: 'tick', source: src, at: Math.max(g.now, g.nextSlot[src]), crash: null })
+    checkStep(mon, h)
     if (probe) probeClosable(h, policy)
   } catch (e) {
     if (!(e instanceof InvariantError)) {

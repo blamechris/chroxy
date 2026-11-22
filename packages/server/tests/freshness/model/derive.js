@@ -282,7 +282,7 @@ function foldInvestigation(state, r) {
   }
   // An abandoned investigation (its tick was never replayed) decided
   // nothing: it closes, but counts as no cycle and is no session's latest.
-  if (b.phase === 'close' && b.classification === 'abandoned') {
+  if (b.phase === 'close' && b.classification === 'abandoned' && !state.policy.abandonedIsCycle) {
     if (!inv.closed) {
       inv.closed = true
       inv.abandoned = true
