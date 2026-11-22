@@ -248,3 +248,114 @@ describe('useChatKeyboard (#6287)', () => {
     }
   })
 })
+
+// #9270 — a held permission shortcut must answer ONE prompt. Once the first
+// keydown answers req-1 the store flips it to answered, req-2 becomes primary,
+// the submitted latch clears, and the next auto-repeat keydown (repeat: true)
+// of the same held key used to answer req-2.
+describe('useChatKeyboard held key (#9270)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const held: Array<[string, KeyboardEventInit & { key: string }, string, string, string]> = [
+    ['Escape', { key: 'Escape' }, 'deny', 'Bash', 'Bash'],
+    ['Cmd+Y', { key: 'y', metaKey: true }, 'allow', 'Bash', 'Bash'],
+    ['Cmd+Shift+Y', { key: 'y', metaKey: true, shiftKey: true }, 'allowSession', 'Read', 'Edit'],
+  ]
+
+  it.each(held)('held %s answers one prompt, not the next', (_name, init, decision, tool1, tool2) => {
+    const send = vi.fn()
+    const { rerender } = renderHook((args: UseChatKeyboardArgs) => useChatKeyboard(args), {
+      initialProps: baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', tool1), promptMsg('m2', 'req-2', tool2)],
+      }),
+    })
+    fireKey(init)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith('req-1', decision)
+
+    rerender(
+      baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', tool1, 'answered'), promptMsg('m2', 'req-2', tool2)],
+      }),
+    )
+    fireKey({ ...init, repeat: true })
+    fireKey({ ...init, repeat: true })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('a repeat does not answer a prompt that arrives after the first was answered', () => {
+    const send = vi.fn()
+    const { rerender } = renderHook((args: UseChatKeyboardArgs) => useChatKeyboard(args), {
+      initialProps: baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', 'Bash')],
+      }),
+    })
+    fireKey({ key: 'y', metaKey: true })
+    expect(send).toHaveBeenCalledTimes(1)
+
+    rerender(
+      baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', 'Bash', 'allow'), promptMsg('m2', 'req-2', 'Bash')],
+      }),
+    )
+    fireKey({ key: 'y', metaKey: true, repeat: true })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('a repeat never answers a prompt, even with no earlier fresh press', () => {
+    const send = vi.fn()
+    renderHook(() =>
+      useChatKeyboard(
+        baseArgs({
+          sendPermissionResponse: send,
+          storeMessages: [promptMsg('m1', 'req-1', 'Bash')],
+        }),
+      ),
+    )
+    fireKey({ key: 'y', metaKey: true, repeat: true })
+    fireKey({ key: 'Escape', repeat: true })
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('two separate fresh presses answer req-1 then req-2', () => {
+    const send = vi.fn()
+    const { rerender } = renderHook((args: UseChatKeyboardArgs) => useChatKeyboard(args), {
+      initialProps: baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', 'Bash'), promptMsg('m2', 'req-2', 'Bash')],
+      }),
+    })
+    fireKey({ key: 'y', metaKey: true })
+    rerender(
+      baseArgs({
+        sendPermissionResponse: send,
+        storeMessages: [promptMsg('m1', 'req-1', 'Bash', 'allow'), promptMsg('m2', 'req-2', 'Bash')],
+      }),
+    )
+    fireKey({ key: 'y', metaKey: true })
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenNthCalledWith(1, 'req-1', 'allow')
+    expect(send).toHaveBeenNthCalledWith(2, 'req-2', 'allow')
+  })
+
+  it('a repeat Cmd+Y is still preventDefaulted when a primary prompt exists', () => {
+    const send = vi.fn()
+    renderHook(() =>
+      useChatKeyboard(
+        baseArgs({
+          sendPermissionResponse: send,
+          storeMessages: [promptMsg('m1', 'req-1', 'Bash')],
+        }),
+      ),
+    )
+    const ev = fireKey({ key: 'y', metaKey: true, repeat: true })
+    expect(ev.defaultPrevented).toBe(true)
+    expect(send).not.toHaveBeenCalled()
+  })
+})
