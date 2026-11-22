@@ -6,7 +6,7 @@
 // the real RunLedger, reducer, budget evaluator and TurnDriver remain in use.
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, it, mock } from 'node:test'
@@ -267,7 +267,7 @@ it('driver: callers passing no onLateUsage see the unchanged drain', async (t) =
 
 function breakLedger(f) {
   let thrown = 0
-  f.ledger.recordTurnUsage = (...args) => { thrown += 1; throw new Error('ledger write failed') }
+  f.ledger.recordTurnUsage = () => { thrown += 1; throw new Error('ledger write failed') }
   return () => thrown
 }
 
