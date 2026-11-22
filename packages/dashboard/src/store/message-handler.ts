@@ -161,6 +161,7 @@ import {
   // #7326 — the chip for a truncated / refused / stopped turn, appended on the
   // same unconditional live-or-replayed `result` path (turn-outcome-marker.ts).
   appendTurnOutcomeMarker,
+  isStopTurnOutcome,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -6398,6 +6399,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           : {}),
         lastResultCost: resolvedCost,
         lastResultDuration: normalized.lastResultDuration,
+        // #9272: a turn a Stop (or a restart) ended is not "finished" — the
+        // unfocused-window notification reads this. Rewritten by every result,
+        // cleared by agent_busy.
+        lastTurnStopped: isStopTurnOutcome(normalized.turnOutcome?.outcome),
       };
       // #6627 — reconcile the queue against the result's authoritative queueLength
       // so a stale "Queued" bubble (from a dropped/late message_dequeued) self-heals

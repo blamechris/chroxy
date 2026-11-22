@@ -805,6 +805,13 @@ export interface SessionState extends BaseSessionState {
   // right after a model change, or the CLI could not answer) and renders as
   // "unknown"; `undefined` = this provider makes no such report.
   effectiveThinkingLevel?: ThinkingLevel | null;
+  /**
+   * #9272 — true when the most recent `result` ended its turn as stopped or
+   * interrupted (`isStopTurnOutcome`). Written by the `result` handler, cleared
+   * by `agent_busy`. Dashboard-only: gates the unfocused-window "Finished"
+   * notification (see `sessionEndedByStop`).
+   */
+  lastTurnStopped?: boolean;
   // Per-session auto-approval rules (mirrors server-side sessionRules, updated
   // via permission_rules_updated). Used by the "Allow for Session" flow to
   // append new rules without losing existing ones. Optional: undefined until

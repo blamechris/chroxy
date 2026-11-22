@@ -58,6 +58,17 @@
  *   decision; see its contract. Pre-checking is what let the pre-#7351 code
  *   scatter a guard nothing satisfied.
  *
+ * - **Ended by a Stop (#9272)** — a turn a Stop ended is not "finished". The
+ *   session carries `endedByStop` (a `session_stopped`, or a `result` whose
+ *   outcome is `stopped` / `stopped_before_output` / `interrupted`), so a Stop
+ *   sent from the phone or an agent does not announce itself on the desktop.
+ *   ORDERING: for most Stops the signal is already recorded when the session
+ *   idles, but a Stop answered by a plain `result` (claude-sdk / claude-cli
+ *   after output, #8461) idles the session FIRST and `session_stopped` follows
+ *   as the next frame, so the edge alone cannot tell. The dispatch is therefore
+ *   held for {@link STOP_SIGNAL_GRACE_MS} and `endedByStop` re-read from the
+ *   latest sessions when it elapses.
+ *
  * The gates suppress the *dispatch* only. Busy-state bookkeeping runs
  * unconditionally on every pass (short of a disconnect), so a mute toggled
  * mid-turn, or a window focused mid-turn, does not leave stale state that
@@ -65,6 +76,14 @@
  */
 import { useEffect, useRef } from 'react'
 import { sendNativeNotification } from '../utils/native-notifications'
+
+/**
+ * How long a completed-turn notification is held so a `session_stopped` that
+ * trails the idling `result` by one frame can still suppress it (#9272). The
+ * server emits both in the same tick, so this only has to outlast a frame or
+ * two of delivery; it is invisible to a person.
+ */
+export const STOP_SIGNAL_GRACE_MS = 300
 
 export interface TurnCompleteSession {
   sessionId: string
@@ -81,6 +100,12 @@ export interface TurnCompleteSession {
    * `usePermissionNotification` already covers that moment.
    */
   awaitingPermission: boolean
+  /**
+   * Whether the session's most recent turn ended because it was stopped
+   * (#9272) rather than finished. Suppresses the dispatch like
+   * `awaitingPermission`; bookkeeping still runs.
+   */
+  endedByStop: boolean
 }
 
 export interface UseTurnCompleteNotificationOptions {
@@ -114,11 +139,26 @@ export function useTurnCompleteNotification(
     clickRef.current = onNotificationClick
   }, [onNotificationClick])
 
+  // The latest sessions, for the deferred stop re-check below, and the pending
+  // grace timers (cleared on disconnect and unmount so none outlives the hook).
+  const latestRef = useRef(sessions)
+  latestRef.current = sessions
+  const timersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => {
+      for (const t of timers) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
+
   useEffect(() => {
     const wasBusy = busyRef.current
 
     if (!connected) {
       wasBusy.clear()
+      for (const t of timersRef.current) clearTimeout(t)
+      timersRef.current.clear()
       return
     }
 
@@ -144,8 +184,7 @@ export function useTurnCompleteNotification(
     if (!enabled) return
     if (document.hasFocus()) return
 
-    for (const session of finished) {
-      if (session.awaitingPermission) continue
+    const send = (session: TurnCompleteSession) => {
       sendNativeNotification(`Chroxy: ${session.name}`, {
         body: 'Finished — awaiting your input.',
         // Collapse repeat completions of the same session into one card
@@ -156,6 +195,20 @@ export function useTurnCompleteNotification(
         sessionId: session.sessionId,
         onClick: () => clickRef.current?.(session.sessionId),
       })
+    }
+
+    for (const session of finished) {
+      if (session.awaitingPermission) continue
+      if (session.endedByStop) continue
+      // Hold the dispatch so a trailing `session_stopped` can still suppress it
+      // (#9272, see the header). The latest sessions decide when it elapses.
+      const timer = setTimeout(() => {
+        timersRef.current.delete(timer)
+        const latest = latestRef.current.find(s => s.sessionId === session.sessionId)
+        if (latest?.endedByStop) return
+        send(session)
+      }, STOP_SIGNAL_GRACE_MS)
+      timersRef.current.add(timer)
     }
   }, [sessions, enabled, connected])
 }
