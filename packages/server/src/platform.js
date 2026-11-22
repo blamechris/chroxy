@@ -595,6 +595,153 @@ export function killProcessTree(child, { force = false, ...deps } = {}) {
 }
 
 /**
+ * #9267: the start wall-clock of `pid` (`ps -o lstart=`), or null when the
+ * process is gone or unreadable. Fixed for a process's lifetime and different
+ * for a recycled pid's new occupant, so equality is the "same incarnation"
+ * check (the same one the user-shell orphan reaper uses). `deps.startTimeOf` is
+ * the test seam.
+ */
+export function processStartTime(pid, deps = {}) {
+  if (deps.startTimeOf) return deps.startTimeOf(pid) || null
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * #9267: one bounded snapshot of the process table, `pid ppid lstart`, parsed
+ * once. Returns a Map pid -> { ppid, started } or null when `ps` is unavailable.
+ * `lstart` is kept verbatim (never parsed as a date: it is locale-dependent) and
+ * only ever compared for equality with the same `ps` formatting. `deps.ps` is the
+ * test seam (returns the raw table).
+ */
+function processTableSnapshot(deps = {}) {
+  let raw
+  try {
+    raw = deps.ps
+      ? deps.ps()
+      : execFileSync('ps', ['-axo', 'pid=,ppid=,lstart='], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+        maxBuffer: 16 * 1024 * 1024,
+      })
+  } catch {
+    return null
+  }
+  const table = new Map()
+  for (const line of String(raw || '').split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S.*?)\s*$/.exec(line)
+    if (m) table.set(Number(m[1]), { ppid: Number(m[2]), started: m[3] })
+  }
+  return table
+}
+
+/** Node has not reaped `child`: its pid is still ours and cannot have been recycled. */
+function isLiveOwnedChild(child) {
+  return !!child && child.exitCode == null && !child.signalCode
+}
+
+/**
+ * #9267: snapshot `child`'s live descendants as `{ pid, started }` BEFORE
+ * anything is signalled, so a later escalation can still reach a descendant
+ * after its parent has exited and reparented it (a parent's exit erases the
+ * ppid links the enumeration depends on).
+ *
+ * Ownership argument: the root is `child`, which Node has not reaped
+ * (`exitCode`/`signalCode` unset), so its pid is still ours -- an unreaped child
+ * holds its pid, it cannot have been recycled. A child already reaped records
+ * NOTHING (its pid may belong to someone else now; the caller signals through
+ * the handle only). The descendant set AND each descendant's start time come
+ * from the SAME single process-table snapshot, so a pid reused between an
+ * enumeration and a separate start-time lookup cannot be stored with the
+ * replacement's identity. The root's own start time is not compared: a
+ * handle-liveness check is stronger than comparing a locale-formatted string
+ * against a spawn time we never recorded in that format. POSIX only (Windows
+ * reaps the tree with `taskkill /T`). `deps.ps` is the test seam.
+ */
+export function recordProcessTree(child, deps = {}) {
+  const win = deps.isWindows ?? isWindows
+  if (win || !isLiveOwnedChild(child) || !Number.isInteger(child.pid) || child.pid <= 0) return []
+  const table = processTableSnapshot(deps)
+  if (!table || !table.has(child.pid)) return [] // the root is not demonstrably alive: record nothing
+  const childrenOf = new Map()
+  for (const [pid, { ppid }] of table) {
+    if (!childrenOf.has(ppid)) childrenOf.set(ppid, [])
+    childrenOf.get(ppid).push(pid)
+  }
+  const out = []
+  const seen = new Set([child.pid])
+  const stack = [child.pid]
+  while (stack.length) {
+    for (const pid of childrenOf.get(stack.pop()) || []) {
+      if (seen.has(pid)) continue
+      seen.add(pid)
+      out.push({ pid, started: table.get(pid).started })
+      stack.push(pid)
+    }
+  }
+  return out
+}
+
+/**
+ * #9267: signal `child` and the descendants recorded by {@link recordProcessTree}.
+ * PID-reuse safe by construction: a recorded descendant is signalled only while
+ * a process with that pid is alive AND still reports the start time recorded
+ * for it, so a recycled pid is never touched. The direct child is signalled
+ * through its handle (a no-op once Node has reaped it), never by pid. Deepest
+ * descendant first, the parent last, as {@link killProcessTree} does. Does NOT
+ * re-enumerate, which is the point: it works after the parent has exited.
+ * `force` selects SIGKILL over SIGTERM; `deps.kill` is the `process.kill` seam.
+ *
+ * Windows: records no descendants, and a numeric-pid `taskkill` of a child that
+ * may have exited (and whose pid may be recycled) is never acceptable. The tree
+ * `taskkill` runs only for a child Node has not reaped and only when the caller
+ * is not on a delayed path (`handleOnly` -- the escalation and destroy()); every
+ * other case goes through the Node handle, a no-op once the child is reaped.
+ * `deps.isWindows` forces the branch and `deps.taskkill(pid)` is the seam, so no
+ * test reaches the real binary.
+ */
+export function killRecordedTree(child, recorded = [], { force = false, handleOnly = false, ...deps } = {}) {
+  if (!child) return
+  const win = deps.isWindows ?? isWindows
+  if (win) {
+    if (!handleOnly && isLiveOwnedChild(child) && Number.isInteger(child.pid) && child.pid > 0) {
+      try {
+        const taskkill = deps.taskkill || ((pid) => execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 5000,
+        }))
+        taskkill(child.pid)
+        return
+      } catch { /* fall through to the handle */ }
+    }
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    return
+  }
+  const signal = force ? 'SIGKILL' : 'SIGTERM'
+  const kill = deps.kill || process.kill
+  // ONE bounded snapshot decides every descendant (not one `ps -p` per pid), which also
+  // narrows the check-to-kill window. No snapshot: signal no descendant, the handle still runs.
+  const table = recorded.length > 0 ? processTableSnapshot(deps) : null
+  for (let i = recorded.length - 1; table && i >= 0; i--) {
+    const { pid, started } = recorded[i]
+    if (!started) continue // no identity, never signalled
+    if (table.get(pid)?.started !== started) continue // gone, or a recycled pid
+    try { kill(pid, signal) } catch { /* already gone */ }
+  }
+  try { child.kill(signal) } catch { /* already gone */ }
+}
+
+/**
  * Force-kill `child` and its whole descendant tree (#6643, #7606). POSIX
  * SIGKILLs the enumerated tree; Windows reaps it via taskkill. See
  * {@link killProcessTree}. `deps` are the same test seams.
