@@ -106,7 +106,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useNotificationPermission } from './hooks/useNotificationPermission'
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useTurnCompleteNotification, type TurnCompleteSession } from './hooks/useTurnCompleteNotification'
-import { sessionEndedByStop } from './utils/turn-ended-by-stop'
+import { sessionStopStamp } from './utils/turn-ended-by-stop'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
 import { SymbolSearchPalette } from './components/SymbolSearchPalette'
@@ -2778,12 +2778,12 @@ export function App() {
     }),
   )
   // #9272: per-session "the last turn was ended by a Stop" — see
-  // `sessionEndedByStop`. A selector of primitives, so it re-renders only when a
-  // flag flips.
-  const sessionEndedByStopById = useConnectionStore(
+  // `sessionStopStamp`. A selector of primitives, so it re-renders only when a
+  // Stop is recorded.
+  const sessionStopStampById = useConnectionStore(
     useShallow((s) => {
-      const out: Record<string, boolean> = {}
-      for (const id in s.sessionStates) out[id] = sessionEndedByStop(s.sessionStates[id])
+      const out: Record<string, number> = {}
+      for (const id in s.sessionStates) out[id] = sessionStopStamp(s.sessionStates[id])
       return out
     }),
   )
@@ -2794,9 +2794,9 @@ export function App() {
         name: s.name,
         busy: sessionBusyById[s.sessionId] ?? false,
         awaitingPermission: (pendingPermissionCounts[s.sessionId] ?? 0) > 0,
-        endedByStop: sessionEndedByStopById[s.sessionId] ?? false,
+        stopStamp: sessionStopStampById[s.sessionId] ?? 0,
       })),
-    [sessions, sessionBusyById, sessionEndedByStopById, pendingPermissionCounts],
+    [sessions, sessionBusyById, sessionStopStampById, pendingPermissionCounts],
   )
   useTurnCompleteNotification(turnCompleteSessions, {
     enabled: turnCompleteNotificationEnabled,

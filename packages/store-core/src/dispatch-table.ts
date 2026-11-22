@@ -247,10 +247,6 @@ export interface DispatchSessionBase {
   // real `SessionState` carry them.
   stoppedAt?: number | null
   stoppedCode?: number | null
-  // `lastTurnStopped` (#9272) — dashboard-only: the last `result` ended the turn
-  // as stopped/interrupted. Written by the dashboard's `result` handler, cleared
-  // by agent_busy so a new turn starts clean. Optional: the app never sets it.
-  lastTurnStopped?: boolean
   // --- slice 2 reads (epic #5556) ---
   // `activeAgents` — read+rewritten by agent_spawned / agent_completed
   // `pendingBackgroundShells` — read+rewritten by background_work_changed
@@ -1269,8 +1265,6 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
         patch.stoppedAt = null
         patch.stoppedCode = null
       }
-      // #9272: same for the dashboard's "last turn ended by a stop" flag.
-      if (ss.lastTurnStopped) patch.lastTurnStopped = false
       return patch as Partial<S>
     })
   }

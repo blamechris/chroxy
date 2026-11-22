@@ -6399,10 +6399,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           : {}),
         lastResultCost: resolvedCost,
         lastResultDuration: normalized.lastResultDuration,
-        // #9272: a turn a Stop (or a restart) ended is not "finished" — the
-        // unfocused-window notification reads this. Rewritten by every result,
-        // cleared by agent_busy.
-        lastTurnStopped: isStopTurnOutcome(normalized.turnOutcome?.outcome),
+        // #9272: a turn a Stop (or a restart) ended is not "finished" — stamp
+        // it for the unfocused-window notification. A REPLAYED result (history
+        // replay, or the restore-time `interrupted` one) is an old turn's end and
+        // must not mark the current one, mirroring handleResultUsage's own test.
+        ...(isStopTurnOutcome(normalized.turnOutcome?.outcome)
+          && typeof msg.historySeq !== 'number' && msg.replayed !== true
+          ? { lastTurnStoppedAt: Date.now() }
+          : {}),
       };
       // #6627 — reconcile the queue against the result's authoritative queueLength
       // so a stale "Queued" bubble (from a dropped/late message_dequeued) self-heals

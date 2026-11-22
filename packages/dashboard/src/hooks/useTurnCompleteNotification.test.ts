@@ -85,7 +85,7 @@ function session(overrides: Partial<TurnCompleteSession> = {}): TurnCompleteSess
     name: 'chroxy',
     busy: false,
     awaitingPermission: false,
-    endedByStop: false,
+    stopStamp: 0,
     ...overrides,
   }
 }
@@ -405,7 +405,6 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
 
     settle()
     expect(onNotificationClick).not.toHaveBeenCalled()
-    settle()
     const sent = mockSend.mock.calls[0]![1]!
     sent.onClick!()
     expect(onNotificationClick).toHaveBeenCalledWith('s2')
@@ -453,42 +452,58 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
 })
 
 describe('useTurnCompleteNotification — a turn ended by a Stop (#9272)', () => {
-  it('does not notify when the session idles already marked as ended by a Stop', () => {
+  it('does not notify when a Stop is stamped during the turn', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
-    rerender({ sessions: [session({ busy: false, endedByStop: true })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
 
     settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
 
-  it('notifies the same edge for a normal completion — control for the case above', () => {
+  it('notifies the same edge when no Stop is stamped — control for the case above', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
-    rerender({ sessions: [session({ busy: false, endedByStop: false })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 0 })], options: DEFAULTS })
 
     settle()
     expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
 
-  it('does not notify when the Stop signal lands AFTER the idle edge (result, then session_stopped)', () => {
-    // The ordering race: claude-sdk / claude-cli answer a Stop after output with
-    // a plain `result` (which idles the session) and only then `session_stopped`.
+  it('does not notify when the Stop lands AFTER the idle edge (result, then session_stopped)', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
     rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
     expect(mockSend).not.toHaveBeenCalled() // held, not yet sent
-    rerender({ sessions: [session({ busy: false, endedByStop: true })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
 
     settle()
     expect(mockSend).not.toHaveBeenCalled()
     unmount()
   })
 
-  it('notifies the next normal turn after a Stop-ended one (the flag resets)', () => {
+  it('a stamp that was already there when the turn began does not suppress it', () => {
+    const { rerender, unmount } = mount([session({ busy: true, stopStamp: 50 })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('a stamp cleared during the turn (e.g. claude_ready) is not a Stop', () => {
+    const { rerender, unmount } = mount([session({ busy: true, stopStamp: 50 })])
+    rerender({ sessions: [session({ busy: false, stopStamp: 0 })], options: DEFAULTS })
+
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
+    unmount()
+  })
+
+  it('notifies the next normal turn after a Stop-ended one', () => {
     const { rerender, unmount } = mount([session({ busy: true })])
-    rerender({ sessions: [session({ busy: false, endedByStop: true })], options: DEFAULTS })
-    rerender({ sessions: [session({ busy: true, endedByStop: false })], options: DEFAULTS })
-    rerender({ sessions: [session({ busy: false, endedByStop: false })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: true, stopStamp: 50 })], options: DEFAULTS })
+    rerender({ sessions: [session({ busy: false, stopStamp: 50 })], options: DEFAULTS })
 
     settle()
     expect(mockSend).toHaveBeenCalledOnce()
@@ -512,6 +527,62 @@ describe('useTurnCompleteNotification — a turn ended by a Stop (#9272)', () =>
 
     settle()
     expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+})
+
+describe('useTurnCompleteNotification — gates re-read when the held dispatch fires (#9272)', () => {
+  function idleEdge() {
+    const m = mount([session({ busy: true })])
+    m.rerender({ sessions: [session({ busy: false })], options: DEFAULTS })
+    expect(mockSend).not.toHaveBeenCalled()
+    return m
+  }
+
+  it('does not fire if the window gained focus during the grace', () => {
+    const { unmount } = idleEdge()
+    document.hasFocus = () => true
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the operator muted during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: false })], options: { ...DEFAULTS, enabled: false } })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the session was removed during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if the session went busy again during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: true })], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('does not fire if a permission prompt was raised during the grace', () => {
+    const { rerender, unmount } = idleEdge()
+    rerender({ sessions: [session({ busy: false, awaitingPermission: true })], options: DEFAULTS })
+    settle()
+    expect(mockSend).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('still fires when nothing changed during the grace — control', () => {
+    const { unmount } = idleEdge()
+    settle()
+    expect(mockSend).toHaveBeenCalledOnce()
     unmount()
   })
 })
