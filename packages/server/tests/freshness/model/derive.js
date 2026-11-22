@@ -356,6 +356,9 @@ function newItem(r) {
     showDue: false,
     // Shows still owed to a prompt round that joined with the counted shows used.
     roundOwed: 0,
+    // The prompt ask of this item that ended last, in any episode: its
+    // opening reference and its ending evidence (policy `promptAskRef`).
+    lastPromptEnd: null,
     history: [],
   }
 }
@@ -527,7 +530,10 @@ function applyStep(it, b, at, seq, policy) {
         }
         // DESIGN-GAP: a show owed to a round is dropped when that round's
         // prompt ask ends before it is shown: the round it was for is over.
-        if (b.ask.op === 'end' && b.ask.kind === 'prompt') it.roundOwed = 0
+        if (b.ask.op === 'end' && b.ask.kind === 'prompt') {
+          it.roundOwed = 0
+          it.lastPromptEnd = { opened_by: b.ask.opened_by, evidence: b.ask.evidence ?? null }
+        }
       }
       if (b.requeue) {
         it.state = 'queued'
@@ -536,6 +542,9 @@ function applyStep(it, b, at, seq, policy) {
       break
     case 'resolved':
     case 'withdrawn':
+      if (b.closing_ask === 'prompt' && it.asks.has('prompt')) {
+        it.lastPromptEnd = { opened_by: it.asks.get('prompt').opened_by, evidence: b.resolution_evidence ?? null }
+      }
       it.open = false
       it.state = 'closed'
       break

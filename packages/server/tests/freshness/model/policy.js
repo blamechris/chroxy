@@ -269,9 +269,33 @@ export const DEFAULT_POLICY = Object.freeze({
   // pending when the ask ends (its newer prompt was answered). Treating it as
   // used would leave a prompt the owner never answered with no item, so for a
   // prompt ask only the opening reference is used, and such a prompt opens
-  // an ask of its own.
+  // an ask of its own on its own reference (see `promptAskRef` for the
+  // prompt the ask opened on).
   mayAddAsk(item, ref, _kind) {
     return !item || !item.usedRefs.has(ref)
+  },
+  // The reference a prompt ask is added on, for the latest prompt pending at
+  // a live read when the item has no live prompt ask: the prompt's own id,
+  // unless an earlier prompt ask of the item opened on it.
+  //
+  // DESIGN-GAP: the prompt an ask opened on is a used reference, yet it can
+  // still be pending when the ask ends (the content moved to a newer prompt,
+  // and that one was answered). Refused, the session would wait on the owner
+  // with no item for as long as the prompt stays pending. The model adds the
+  // ask again under a reference derived from the prompt and from the prompt
+  // ask that last ended (its opening reference and its ending evidence): new,
+  // because each ask ends once and no other reference is formed this way;
+  // and the same on a replay, because both come from the ledger. It cannot
+  // loop: an ask is added only while no prompt ask of the item is live, and
+  // only for a prompt pending at a live read; the ask added stays live until
+  // an owner answer ends it (a lapse needs nothing pending), and only a new
+  // ending yields a new reference. So a prompt is added again at most once
+  // per ending of a prompt ask, never at a tick that brings no new owner
+  // answer, and never once it is not pending. Declared asks are unchanged.
+  promptAskRef(item, prompt) {
+    if (!item || !item.usedRefs.has(prompt.ref) || !item.lastPromptEnd) return prompt.ref
+    const last = item.lastPromptEnd
+    return H('prompt_again', prompt.ref, last.opened_by, last.evidence ?? null)
   },
   // An ask that joins an open owner item is a reason to show it again: a
   // counted show from the item's own limit, made at once if the item holds

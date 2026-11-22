@@ -215,6 +215,25 @@ function newAsk(_mon, _sk, a) {
   return { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
 }
 
+/**
+ * I5, for a prompt ask added for a prompt an earlier ask of the item stood
+ * on (its opening reference): it is added under a reference of its own (the
+ * used-reference checks above see to that), only while that prompt is
+ * pending at the session's latest live read, and at most once after each
+ * prompt ask of the item ends, with no other prompt ask added in between. So
+ * it never comes back for a prompt that is not pending, nor tick after tick.
+ */
+function checkPromptAdd(mon, it, sk, a) {
+  if (a.kind !== 'prompt') return
+  const again = a.content_ref != null && it.stood.has(a.content_ref)
+  if (again) {
+    if (!mon.livePending.get(sk)?.has(a.content_ref)) fail('I5', 'a prompt ask was added again for a prompt that is not pending at the latest live read')
+    if (!it.promptEnded) fail('I5', 'a prompt ask was added again with no prompt ask of the item ended since the last one was added')
+    mon.stats.promptAgain = (mon.stats.promptAgain ?? 0) + 1
+  }
+  it.promptEnded = false
+}
+
 /** At a tick's end: a live declared ask covers the session's latest authored owner-block report, whatever its fingerprint. */
 function follow(x, ask, ref) {
   ask.stood.add(ref)
@@ -316,6 +335,7 @@ function endClosingAsk(it, b) {
   if (it.origin !== 'owner') return
   const ask = it.asks.get(b.closing_ask)
   if (ask) for (const ref of ask.stood) it.endedRefs.add(ref)
+  if (ask && b.closing_ask === 'prompt') it.promptEnded = true
   it.asks = new Map()
 }
 
@@ -468,6 +488,7 @@ function onRecord(mon, h, r) {
         if (b.ask) {
           // I5: an ask opens only on a reference no earlier ask of the item stood on.
           if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${b.ask.kind} ask opened an owner item on a reference an earlier ask stood on`)
+          checkPromptAdd(mon, it, sk, b.ask)
           it.asks = new Map([[b.ask.kind, newAsk(mon, sk, b.ask)]])
           it.stood.add(b.ask.opened_by)
           checkAsks(it, b)
@@ -577,6 +598,7 @@ function onRecord(mon, h, r) {
               if (it.usedRefs.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference already used`)
               if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference an earlier ask stood on`)
               if (it.asks.has(kind)) fail('I10', `a second ${kind} ask joined one owner item`)
+              checkPromptAdd(mon, it, sk, b.ask)
               it.usedRefs.add(b.ask.opened_by)
               it.asks.set(kind, newAsk(mon, sk, b.ask))
               it.stood.add(b.ask.opened_by)
@@ -594,7 +616,10 @@ function onRecord(mon, h, r) {
               if (!mine) fail('I10', `an owner item ended a ${kind} ask it does not carry`)
               if (!askEnded(mon, sk, kind, mine, b.ask.how)) fail('I4b', `a ${kind} ask was ended (${b.ask.how}) without its evidence`)
               it.asks.delete(kind)
-              if (kind === 'prompt') it.roundOwed = 0
+              if (kind === 'prompt') {
+                it.roundOwed = 0
+                it.promptEnded = true
+              }
               for (const ref of mine.stood) it.endedRefs.add(ref)
               changed = false
             } else {
@@ -801,10 +826,12 @@ function onTickClosed(mon, h, r) {
     if (g > 1) fail('I7g', `a session was rechecked ${g} ticks running while nothing was working or waiting`)
     // I10: every live ask is on the session's open owner item, by the end of
     // the tick, as this monitor sees the asks: the latest prompt pending at a
-    // live read, and an authored report that is an owner block. The only
-    // exception is a line or prompt that an ask already stood on and that ask
-    // has ended (a session rewound to it), which never brings it back. And no owner item
-    // still carries a declared ask that a newer, non-owner-block report ended.
+    // live read, and an authored report that is an owner block. A pending
+    // prompt has no exception: whatever ask stood on it before, while it is
+    // pending the session waits on the owner for it. A declared line has one:
+    // a line that a declared ask already stood on and that ask has ended (a
+    // session rewound to it) never brings it back. And no owner item still
+    // carries a declared ask that a newer, non-owner-block report ended.
     const owners = [...mon.items.values()].filter((x) => x.sk === sk && OWNER_BLOCK_ORIGINS.has(x.origin))
     const carrying = (kind) => owners.some((x) => x.open && x.asks.has(kind))
     const askGone = (ref) => owners.some((x) => x.endedRefs.has(ref))
@@ -823,7 +850,7 @@ function onTickClosed(mon, h, r) {
       const d = x.asks.get('declared')
       if (d && ob) follow(x, d, la)
     }
-    if (latest && !carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
+    if (latest && !carrying('prompt')) fail('I10', `a prompt pending at a live read is not an ask on an open owner item${askGone(latest.ref) ? ' (an earlier ask stood on it)' : ''}`)
     if (ob && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
     for (const x of owners) {
       const d = x.open ? x.asks.get('declared') : null

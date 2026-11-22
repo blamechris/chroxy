@@ -89,7 +89,11 @@ carried-condition change once the item has carried one; k (1 or 2) for
 H('ask', change, kind, the ask's opening reference, and for new content the
 changing report or prompt id) for a change to an owner item's asks, or
 H('carried', change, attention item, opening reference) for a carried
-condition.
+condition. An ask's opening reference is its report or prompt id, except for
+a prompt ask added again for the prompt an earlier prompt ask opened on,
+which opens on H('prompt_again', prompt id, the opening reference of the
+prompt ask that last ended, its ending evidence) (see "Items and the single
+slot").
 
 A send is an **attempt** record, then the send, then an **outcome** record. An
 attempt uses up its step whether or not the send is confirmed; an attempt with
@@ -132,11 +136,25 @@ joining one, on a used reference, so a session rewound to a line a declared
 ask already covered never brings that ask back.
 
 The two kinds differ on purpose. For a prompt ask only its opening reference
-is used, not the prompts its content moved through. A prompt the ask moved
-away from can still be pending, unanswered, when the ask ends (its newer
-prompt was answered); the session is still waiting on the owner for it, so it
-must have an owner item and opens an ask of its own. Here keeping every
-pending prompt in front of the owner comes before never asking twice.
+is used, not the prompts its content moved through. Whenever a read that
+carried native state shows a prompt pending and the owner item has no live
+prompt ask, a prompt ask is added for the latest pending prompt, opening a
+new episode if the item is closed or joining it if a declared ask kept it
+open. A prompt the ended ask's content moved away from is added on its own
+id. The prompt the ended ask opened on is a used reference, yet it too can
+still be pending, unanswered, when the ask ends (its content moved to a newer
+prompt and that one was answered); it is added under a reference derived from
+the prompt and from the prompt ask that last ended:
+H('prompt_again', prompt, that ask's opening reference, its ending evidence).
+That reference is new (each ask ends once) and the same on a replay, and a
+second such addition (the prompt still pending after a third prompt was
+raised and answered) gets another. A prompt ask is added only for a prompt
+pending at a live read and only while no prompt ask of the item is live, and
+the added ask stays until an owner answer ends it, so a prompt is added again
+at most once per ending of a prompt ask, never tick after tick. Here keeping
+every pending prompt in front of the owner comes before never asking twice.
+Declared asks have no such rule: a declared ask never comes back on a line it
+covered.
 
 Five counters are stored on every surface record: `presentation`,
 `shows_counted`, `reminders_used`, `returns_used`, and `round_shows` (the
@@ -229,8 +247,9 @@ or both.
   uncounted show when the deferral ends).
 - **Each prompt round after the limit earns one show.** Once the item has
   used its counted shows, a prompt round, that is a prompt ask joining the
-  item (the first prompt on an item a declared block opened, or a new
-  prompt after the earlier prompt ask ended), is shown once anyway. A newer
+  item (the first prompt on an item a declared block opened, or a prompt
+  pending after the earlier prompt ask ended, including the prompt that
+  ask opened on), is shown once anyway. A newer
   prompt replacing the latest within a live prompt ask is no new round. The
   show restores nothing: it is kept in its own counter (`round_shows`), not
   in `shows_counted`, so every rule that reads the limit is unchanged; it
@@ -390,7 +409,7 @@ ledger and the simulated world for inspection.
 | I4a | Every open item closes when its origin's evidence is supplied |
 | I4b | Every resolution and withdrawal is backed by its evidence |
 | I4c | The model's open items equal the monitor's own account of the ledger |
-| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it |
+| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it; and a prompt ask added for a prompt an earlier ask of the item opened on is added only while that prompt is pending at the session's latest live read, and at most once after each ending of a prompt ask of the item, with no prompt ask added in between |
 | I6 | An exhausted item sends nothing unless its content changed while a counted show remained, or a prompt round is owed its show |
 | I7a | At most two cycles per onset, onsets derived by the monitor itself |
 | I7b | At most one investigation per session per tick |
@@ -404,7 +423,7 @@ ledger and the simulated world for inspection.
 | I8 | Freshness never improves for one report under one configuration |
 | I8b | Graded freshness equals the monitor's own computation |
 | I9 | A session never has two open owner items, and never an open attention item beside its open owner item, whatever its trigger |
-| I10 | By the end of each tick every live ask, as the monitor sees it (the latest prompt pending at a live read; an authored owner-block report), is an ask on the session's open owner item, unless an ask that stood on that line or prompt already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
+| I10 | By the end of each tick every live ask, as the monitor sees it, is an ask on the session's open owner item: the latest prompt pending at a live read always, whatever ask stood on it before; an authored owner-block report unless a declared ask that stood on that line already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
 | I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner item whose content names it; no owner item names a condition that has ended; and the list each carried-condition record states equals the changes so far |
 | I12 | One condition, across every attention episode it opens, gets at most the show limit in counted shows, two reminders and one return |
 | I13 | An ask joining an open owner item with a counted show left is shown by the end of that tick (at once if the item held the slot, else queued behind the item that holds it); with none left, a prompt round is owed one show until it is made, its prompt ask ends, or an ordinary show serves it, and at every tick's end an item still owed one is waiting behind another item that holds the slot; a declared ask is shown nothing and leaves an exhausted item exhausted |
@@ -533,6 +552,11 @@ attention item's `queued`.
   reports are derived in the fold from the tick checks already in the
   ledger, so no record is written for them. A prompt the content moved away
   from stays free, because it may still be pending when the ask ends.
+- The prompt an ended prompt ask opened on, still pending, is added again
+  under a reference derived from it and from the prompt ask that last ended
+  (its opening reference and ending evidence), so it is never left without
+  an item, no key repeats, and it is added again at most once per ending of
+  a prompt ask.
 - A two-ask item's natural order is the earliest of its live asks.
 - The reverse order (an attention item already open when its session gets
   an owner item) is merged too. (W)

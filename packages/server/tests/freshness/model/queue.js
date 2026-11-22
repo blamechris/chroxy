@@ -523,7 +523,10 @@ function* ownerAsks(ctx, source, now) {
       yield* addAsk(ctx, s.session, { kind: 'declared', opened_by: s.latestAuthored, report_id: s.latestAuthored, fingerprint: P.blockFingerprint(latest), content_at: latest.last_report_at, order_time: latest.last_report_at }, now)
     }
     if (lp && !ownerWith(ctx, s.session, 'prompt')) {
-      yield* addAsk(ctx, s.session, { kind: 'prompt', opened_by: lp.ref, content_ref: lp.ref, content_at: lp.raised_at ?? null, deadline: lp.deadline ?? null, order_time: lp.raised_at ?? now }, now)
+      // The prompt's own id, or, for a prompt an earlier prompt ask of the
+      // item opened on, a reference derived from it (policy `promptAskRef`).
+      const opened = P.promptAskRef(st.items.get(P.ownerItemOf(s.session, 'prompt')), lp)
+      yield* addAsk(ctx, s.session, { kind: 'prompt', opened_by: opened, content_ref: lp.ref, content_at: lp.raised_at ?? null, deadline: lp.deadline ?? null, order_time: lp.raised_at ?? now }, now)
     }
   }
 }

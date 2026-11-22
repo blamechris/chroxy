@@ -219,4 +219,7 @@ export const MUTANTS = {
   'I13.none': withPolicy({ newAskShows: () => true }),
   // The owner item closes when its first ask ends, though another is live.
   'I10.close': withPolicy({ closesOnAskEnd: () => true }),
+  // The earlier rule: a prompt ask is added only on the prompt's own id, so
+  // the prompt an ended ask opened on, still pending, is refused as used.
+  'I10.prompt': withPolicy({ promptAskRef: (_item, prompt) => prompt.ref }),
 }
