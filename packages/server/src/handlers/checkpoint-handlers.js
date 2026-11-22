@@ -188,6 +188,8 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     let checkpoint
     if (restoreFiles) {
       checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId, { isAuthorized: authorizedFor(ctx, client) })
+      // #9242: a person rewrote this session's working tree; a scheduled task no longer owns it.
+      ctx.sessions.sessionManager?.releaseScheduledOwnership?.(sid)
     } else {
       checkpoint = ctx.services.checkpointManager.getCheckpoint(sid, msg.checkpointId)
       if (!checkpoint) throw new Error(`Checkpoint not found: ${msg.checkpointId}`)

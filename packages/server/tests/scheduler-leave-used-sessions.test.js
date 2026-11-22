@@ -9,6 +9,7 @@ import { SessionManager } from '../src/session-manager.js'
 import { ScheduledTaskStore } from '../src/scheduled-task-store.js'
 import { SchedulerEngine } from '../src/scheduler.js'
 import { registerProvider } from '../src/providers.js'
+import { BaseSession } from '../src/base-session.js'
 import { GIT } from '../src/git.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
 import { worktreeHasUnsavedWork } from '../src/worktree-gc.js'
@@ -55,6 +56,36 @@ class Prov extends EventEmitter {
 }
 declareUnknownCustomization(Prov)
 registerProvider('test-leave-used-9242', Prov)
+
+// A real BaseSession (so the real outgoing queue and its flush-time admission run) that
+// queues a send while `draining` is set, like SdkSession's draining query (#8321).
+class QueueProv extends BaseSession {
+  static dispatched = []
+  static get capabilities() { return { inProcessPermissions: true } }
+  constructor(opts) {
+    super({ ...opts, provider: 'test-queue-9242' })
+    this.draining = false
+    this.resumeSessionId = null
+  }
+  async start() { this._processReady = true }
+  sendMessage(prompt, attachments, sendOptions) {
+    if (this.draining) {
+      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+      return undefined
+    }
+    QueueProv.dispatched.push(prompt)
+    setImmediate(() => this.emit('result', { cost: 0, duration: 1 }))
+    return undefined
+  }
+  respondToPermission() {}
+  respondToQuestion() {}
+  destroy() { this._destroying = true }
+  interrupt() {}
+  setModel() {}
+  setPermissionMode() {}
+}
+declareUnknownCustomization(QueueProv)
+registerProvider('test-queue-9242', QueueProv)
 
 const settleMs = (ms) => new Promise((r) => setTimeout(r, ms))
 async function waitFor(pred, what) {
@@ -272,23 +303,90 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.equal(sm.getSession(mine).metadata?.scheduledTaskId, undefined)
     })
 
-    it('releaseScheduledOwnership schedules a state write, and it reaches the file', async () => {
-      const sm = newMgr()
-      const id = sm.createSession({ cwd: '/tmp', provider: 'test-leave-used-9242', metadata: { scheduledTaskId: 't-disk' } })
-      await waitFor(() => linkOnDisk(id) === 't-disk', 'the creation write')
-      let persists = 0
-      const real = sm._schedulePersist.bind(sm)
-      sm._schedulePersist = () => { persists += 1; return real() }
-      assert.equal(sm.releaseScheduledOwnership(id, 't-disk'), true)
-      assert.equal(persists, 1, 'the release schedules exactly one write')
-      await waitFor(() => linkOnDisk(id) === undefined, 'the debounced write to drop the key')
-    })
-
     it('release keeps the session\'s other metadata', () => {
       const sm = newMgr()
       const id = sm.createSession({ cwd: '/tmp', provider: 'test-leave-used-9242', metadata: { scheduledTaskId: 't-x', orchestrationRunId: 'run_1' } })
       sm.recordUserIntent(id)
       assert.deepEqual(sm.getSession(id).metadata, { orchestrationRunId: 'run_1' })
+    })
+  })
+
+  describe('every human answer and the dispatch/crash windows (#9242 round 2)', () => {
+    it('answering a question in the task session releases it (real user_question_response handler)', async () => {
+      const sm = newMgr()
+      const eng = newEngine(sm)
+      const task = addTask()
+      const s = (await fire(eng, task)).sessionId
+      assert.deepEqual(codes(sm, s), ['automation_owned'])
+      const ctx = nsCtx({
+        sessionManager: { getSession: (id) => sm.getSession(id), recordUserIntent: (id) => sm.recordUserIntent(id), recordQuestionAnswered: () => {} },
+        send: () => {}, broadcast: () => {}, broadcastToSession: () => {},
+        permissionSessionMap: new Map(), questionSessionMap: new Map(), pendingPermissions: new Map(), clients: new Map(),
+      })
+      await handleSessionMessage({}, { id: 'c1', activeSessionId: s, clientCapabilities: new Set() }, { type: 'user_question_response', answer: 'yes' }, ctx)
+      assert.deepEqual(codes(sm, s), [], 'the answer released the session')
+      const second = await fire(eng, task)
+      assert.notEqual(second.sessionId, s)
+      assert.deepEqual(promptsTo(sm, s), ['scheduled prompt'])
+    })
+
+    it('release is written to the state file immediately, before any timer', () => {
+      const sm = newMgr({ persistDebounceMs: 600000 })
+      const id = sm.createSession({ cwd: '/tmp', provider: 'test-leave-used-9242', metadata: { scheduledTaskId: 't-crash' } })
+      sm._flushPersist()
+      assert.equal(linkOnDisk(id), 't-crash', 'control: the link is on disk')
+      assert.equal(sm.releaseScheduledOwnership(id, 't-crash'), true)
+      assert.equal(linkOnDisk(id), undefined, 'gone from disk with no timer having run')
+      sm.destroyAll()
+      const fresh = newMgr()
+      assert.ok(fresh.restoreState())
+      assert.deepEqual(fresh.listScheduledTaskSessions(), [], 'a restart cannot re-adopt it')
+    })
+
+    it('a scheduled prompt queued inside the provider is dropped, not dispatched, when a person takes over before the flush', async () => {
+      QueueProv.dispatched = []
+      const sm = newMgr()
+      const eng = new SchedulerEngine({ sessionManager: sm, store, config: { features: { scheduler: true } }, validateCwd: () => null, setTimer: () => 1, clearTimer: () => {}, logger: silentLog })
+      engines.push(eng)
+      eng.start()
+      const task = store.add({ prompt: 'queued scheduled', cadence: { kind: 'interval', everyMs: 3600000, anchor: 1000 }, target: { provider: 'test-queue-9242' } })
+      const ended = new Promise((resolve) => eng.once('run-end', resolve))
+      const s = sm.createSession({ cwd: '/tmp', provider: 'test-queue-9242', metadata: { scheduledTaskId: task.id } })
+      eng.refresh()
+      const live = sm.getSession(s).session
+      live.draining = true
+      const firing = eng._fire(store.get(task.id), Date.now())
+      await settleMs(20)
+      assert.equal(live._outgoingQueue.length, 1, 'premise: the prompt is queued inside the provider')
+      sm.recordUserIntent(s) // the person takes over before the queue flushes
+      live.draining = false
+      live.dequeueNextOutgoing()
+      await firing
+      const res = await ended
+      assert.deepEqual(QueueProv.dispatched, [], 'the scheduled prompt was never dispatched')
+      assert.equal(res.status, 'skipped', res.error)
+      assert.match(res.error, /taken over/)
+    })
+
+    it('control: a queued scheduled prompt still flushes while the task owns the session', async () => {
+      QueueProv.dispatched = []
+      const sm = newMgr()
+      const eng = new SchedulerEngine({ sessionManager: sm, store, config: { features: { scheduler: true } }, validateCwd: () => null, setTimer: () => 1, clearTimer: () => {}, logger: silentLog })
+      engines.push(eng)
+      eng.start()
+      const task = store.add({ prompt: 'queued scheduled', cadence: { kind: 'interval', everyMs: 3600000, anchor: 1000 }, target: { provider: 'test-queue-9242' } })
+      const ended = new Promise((resolve) => eng.once('run-end', resolve))
+      const s = sm.createSession({ cwd: '/tmp', provider: 'test-queue-9242', metadata: { scheduledTaskId: task.id } })
+      eng.refresh()
+      const live = sm.getSession(s).session
+      live.draining = true
+      const firing = eng._fire(store.get(task.id), Date.now())
+      await settleMs(20)
+      live.draining = false
+      live.dequeueNextOutgoing()
+      await firing
+      assert.equal((await ended).status, 'success')
+      assert.deepEqual(QueueProv.dispatched, ['queued scheduled'])
     })
   })
 
@@ -364,6 +462,31 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.ok(existsSync(join(wt, 'work.txt')))
     })
 
+    it('git config that hides untracked/ignored entries cannot make a dirty worktree read clean', async () => {
+      for (const [file, content, ignoreFirst] of [['draft.txt', 'untracked draft', false], ['.env', 'K=1', true]]) {
+        const repo = makeRepo()
+        if (ignoreFirst) {
+          writeFileSync(join(repo, '.gitignore'), '.env\n')
+          execFileSync(GIT, ['-C', repo, 'add', '--', '.gitignore'], { stdio: 'pipe' })
+          execFileSync(GIT, ['-C', repo, 'commit', '-m', 'ignore'], { stdio: 'pipe' })
+        }
+        execFileSync(GIT, ['-C', repo, 'config', 'status.showUntrackedFiles', 'no'], { stdio: 'pipe' })
+        const sm = newMgr()
+        const eng = newEngine(sm)
+        const task = addTask()
+        const s = worktreeSession(sm, repo, eng, task.id)
+        const wt = sm.getSession(s).worktreePath
+        writeFileSync(join(wt, file), content)
+        assert.equal(worktreeHasUnsavedWork(wt), true, `${file} is unsaved work despite the config`)
+        store.remove(task.id)
+        eng.refresh()
+        await settleMs(50)
+        assert.ok(sm.getSession(s), `${file}: session kept`)
+        assert.equal(readFileSync(join(wt, file), 'utf8'), content)
+        store.add({ prompt: 'x', cadence: { kind: 'interval', everyMs: 3600000, anchor: 1000 }, target: { provider: 'test-leave-used-9242' } })
+      }
+    })
+
     it('a CLEAN owned worktree session is still destroyed and its worktree removed (control)', async () => {
       const repo = makeRepo()
       const sm = newMgr()
@@ -394,7 +517,7 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
 
   describe('worktreeHasUnsavedWork (injected git)', () => {
     const git = (status, revList) => (cwd, args) => {
-      const r = args[0] === 'status' ? status : revList
+      const r = args.includes('status') ? status : revList
       if (r instanceof Error) throw r
       return r
     }

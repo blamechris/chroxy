@@ -250,9 +250,17 @@ export function planRepoGc(repoPath, deps = {}) {
  * un-versioned files. Treating any ignored entry (`!! ...`) as not-clean keeps
  * such worktrees in the skip set instead of silently deleting their contents.
  */
-function isClean(git, worktreePath) {
+function isClean(git, worktreePath, { strict = false } = {}) {
   try {
-    return git(worktreePath, ['status', '--porcelain', '--ignored']).trim().length === 0
+    // #9242 (strict): the removal guard must not depend on the user's or repo's git
+    // configuration. `status.showUntrackedFiles=no` hides untracked AND ignored
+    // entries, and `diff.ignoreSubmodules` hides a dirty submodule; each would read
+    // a worktree holding real work as clean. The GC callers keep their historical
+    // command (strict=false) unchanged.
+    const args = strict
+      ? ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored', '--untracked-files=all', '--ignore-submodules=none']
+      : ['status', '--porcelain', '--ignored']
+    return git(worktreePath, args).trim().length === 0
   } catch {
     return null
   }
@@ -273,7 +281,7 @@ function isClean(git, worktreePath) {
  */
 export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
   const { git = defaultGit } = deps
-  if (isClean(git, worktreePath) !== true) return true
+  if (isClean(git, worktreePath, { strict: true }) !== true) return true
   try {
     return git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0
   } catch {

@@ -105,7 +105,7 @@ export class TurnError extends Error {
   constructor(code, message, { partialText = '', result = null, terminalEvent = null } = {}) {
     super(message || code)
     this.name = 'TurnError'
-    this.code = code // TURN_ERROR | TURN_TIMEOUT | TURN_STOPPED | SESSION_GONE | SEND_FAILED
+    this.code = code // TURN_ERROR | TURN_TIMEOUT | TURN_STOPPED | SESSION_GONE | SEND_FAILED | NOT_ADMITTED
     this.partialText = partialText
     this.result = result // projected terminal accounting, never thrown error metadata
     this.terminalEvent = terminalEvent // result | error; null without a terminal payload
@@ -168,15 +168,22 @@ export class TurnDriver {
    * tick after the prior turn releases — never inside the frame that released it
    * (_scheduleNext).
    * @returns {Promise<{ text: string, result: { cost, duration, usage, modelUsage, model, numTurns, apiDurationMs } }>}
+   *
+   * `admit` (optional, #9242): a predicate re-asked at the moment the prompt would
+   * actually reach the provider — when this turn starts after waiting on the
+   * per-session mutex, and (through the provider's flush-time admission hook,
+   * BaseSession `admitAtFlush`) when a provider that queued the send dispatches it.
+   * Anything but `true`, or a throw, means NOT admitted: the prompt is never sent
+   * and the turn rejects `NOT_ADMITTED`. Callers that pass none are unchanged.
    * @throws {TurnError}
    */
-  driveTurn(sessionId, prompt, { label = null, timeoutMs = null } = {}) {
+  driveTurn(sessionId, prompt, { label = null, timeoutMs = null, admit = null } = {}) {
     if (this._disposed) return Promise.reject(new TurnError('SESSION_GONE', 'TurnDriver disposed'))
     const entry = this._sm.getSession?.(sessionId)
     if (!entry || !entry.session) return Promise.reject(new TurnError('SESSION_GONE', `session ${sessionId} not found`))
 
     return new Promise((resolve, reject) => {
-      const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs }, resolve, reject)
+      const start = () => this._beginTurn(sessionId, prompt, { label, timeoutMs, admit }, resolve, reject)
       if (!this._occupied.has(sessionId)) {
         this._occupy(sessionId)
         start()
@@ -188,12 +195,22 @@ export class TurnDriver {
     })
   }
 
-  _beginTurn(sessionId, prompt, { label, timeoutMs }, resolve, reject) {
+  _admitted(admit) {
+    if (typeof admit !== 'function') return true
+    try { return admit() === true } catch { return false }
+  }
+
+  _beginTurn(sessionId, prompt, { label, timeoutMs, admit = null }, resolve, reject) {
     // Re-fetch the session at START time, not at driveTurn() time: a queued turn
     // may have waited behind the mutex while its session was destroyed/replaced.
     const entry = this._sm.getSession?.(sessionId)
     if (!entry || !entry.session) {
       reject(new TurnError('SESSION_GONE', `session ${sessionId} gone before its turn started`))
+      this._scheduleNext(sessionId)
+      return
+    }
+    if (!this._admitted(admit)) {
+      reject(new TurnError('NOT_ADMITTED', `turn for session ${sessionId} was not admitted at dispatch`))
       this._scheduleNext(sessionId)
       return
     }
@@ -227,7 +244,20 @@ export class TurnDriver {
     // Fire-and-forget send; a rejection (closing socket, etc.) is SEND_FAILED —
     // NEVER leave it unhandled (an unhandled rejection crashes the daemon).
     try {
-      const ret = entry.session.sendMessage(prompt, [], { clientMessageId: `orch-${label || 'turn'}` })
+      const ret = entry.session.sendMessage(prompt, [], {
+        clientMessageId: `orch-${label || 'turn'}`,
+        // #9242: a provider that QUEUES this send re-asks at flush; a refusal drops the
+        // prompt (never sent) and ends this turn instead of leaving it to time out.
+        ...(typeof admit === 'function'
+          ? {
+              admitAtFlush: () => {
+                const ok = this._admitted(admit)
+                if (!ok) this._finishTurn(ctx, () => ctx.reject(new TurnError('NOT_ADMITTED', `queued turn for session ${sessionId} was not admitted at flush`, { partialText: ctx.text() })))
+                return ok
+              },
+            }
+          : {}),
+      })
       if (ret && typeof ret.then === 'function') {
         ret.catch((err) => {
           this._finishTurn(ctx, () => ctx.reject(new TurnError('SEND_FAILED', (err && err.message) || 'sendMessage rejected', { partialText: ctx.text() })))

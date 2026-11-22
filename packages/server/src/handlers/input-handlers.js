@@ -1551,6 +1551,10 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
 
   const entry = ctx.sessions.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
+    // #9242: a person answering a session's question is taking part in its
+    // conversation: a scheduled task stops owning the session, exactly as when they
+    // type. Before delivery, so the turn their answer resumes is already theirs.
+    ctx.sessions.sessionManager?.recordUserIntent?.(questionSessionId)
     // #4604: log the incoming response shape so a multi-question form
     // wedge is correlatable from chroxy.log alone (toolUseId + map-key
     // count distinguishes the SDK's per-question form from the TUI's

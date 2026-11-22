@@ -3112,7 +3112,11 @@ export class SessionManager extends EventEmitter {
     const { scheduledTaskId: _released, ...rest } = entry.metadata
     entry.metadata = Object.keys(rest).length > 0 ? rest : null
     delete entry.restoredScheduledTaskId
-    this._schedulePersist()
+    // Written NOW, not on the debounce: a crash inside the debounce window would
+    // resurrect the old link as a restore hint and re-adopt a session a person is
+    // using. (A failed write is logged and emitted by _flushPersistOrWarn; the
+    // in-memory release stands either way.)
+    this._flushPersistOrWarn(sessionId)
     return true
   }
 

@@ -1012,6 +1012,9 @@ export class SchedulerEngine extends EventEmitter {
       await driver.driveTurn(sessionId, task.prompt, {
         label: `scheduled:${task.id}`,
         timeoutMs: remainingMs,
+        // #9242: asked again at dispatch (after the mutex, and at a provider's queue
+        // flush): the person may have taken the session over since the check above.
+        admit: () => !(typeof this._sm.ownsScheduledTask === 'function') || this._sm.ownsScheduledTask(sessionId, task.id),
       })
       // `success` is the NARROWEST outcome, asserted positively: the turn
       // completed AND no permission prompt was ever raised on this run. Any
@@ -1034,6 +1037,9 @@ export class SchedulerEngine extends EventEmitter {
       // keep the `error` status it has always had. Only an interrupt with NO
       // permission activity is the benign operator Stop.
       if (runState.blocked) return this._blockedOutcome(runState, sessionId)
+      if (err instanceof TurnError && err.code === 'NOT_ADMITTED') {
+        return { status: 'skipped', sessionId, error: `session ${sessionId} was taken over before the scheduled prompt was dispatched — it was not sent` }
+      }
       if (err instanceof TurnError && err.code === 'TURN_TIMEOUT') {
         return { status: 'timeout', sessionId, error: `run exceeded ${ctx.runTimeoutMs}ms` }
       }
