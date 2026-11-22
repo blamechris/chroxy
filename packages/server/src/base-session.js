@@ -177,6 +177,12 @@ export const SOFT_HANDOFF_BLOCKER_CODES = Object.freeze(new Set(['background_she
  * Async sendMessage implementations call this before their first await when
  * possible, or later when an async transport handshake proves admission.
  */
+/** #9242: the admission shape for a send refused by its own predicate after provider preparation. */
+export const NOT_ADMITTED_ADMISSION = Object.freeze({
+  status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+  reason: 'not_admitted', message: 'The input was no longer admitted after preparation; it was not dispatched.',
+})
+
 export function reportInputAdmission(sendOptions, admission) {
   const callback = sendOptions?.onInputAdmission
   if (typeof callback === 'function') callback(admission)
@@ -1392,12 +1398,30 @@ export class BaseSession extends EventEmitter {
     // The connection that queued this follow-up may have ended while it waited:
     // a revoked or expired credential must not get its queued input dispatched.
     if (!stillAuthorized(item?.sendOptions?.isAuthorized)) return false
-    const predicate = item?.sendOptions?.admitAtFlush
+    return this._admitPreparedSend(item?.sendOptions)
+  }
+
+  /**
+   * #9242: re-ask a send's admission predicate (`sendOptions.admitAtFlush`) at a
+   * provider's POST-PREPARATION point — after any await between `sendMessage` entry
+   * and the irreversible step (history mutation, query/stream dispatch). The flush
+   * check covers a send that was queued; this covers one that was never queued but
+   * waited inside the provider (project-settings scan, MCP prompt expansion). No
+   * predicate means admitted, so every caller that passes none is unchanged. Anything
+   * but `true`, or a throw, is a refusal; the CALLER must then release busy, report
+   * the refusal and continue the queue. (TurnDriver's predicate wrapper ends its own
+   * turn NOT_ADMITTED on a refusal.)
+   *
+   * @param {{ admitAtFlush?: () => boolean }} [sendOptions]
+   * @returns {boolean}
+   */
+  _admitPreparedSend(sendOptions) {
+    const predicate = sendOptions?.admitAtFlush
     if (typeof predicate !== 'function') return true
     try {
       return predicate() === true
     } catch (err) {
-      ;(this._log || log).warn(`Queued follow-up admission check threw; dropping it: ${err?.message || err}`)
+      ;(this._log || log).warn(`Send admission check threw; refusing the send: ${err?.message || err}`)
       return false
     }
   }

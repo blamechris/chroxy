@@ -25,7 +25,7 @@
 // is fully testable against real temp repos without poking the real home dir.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, join as joinPath, resolve as resolvePath } from 'node:path'
 import { chroxyWorktreeRepoPath } from '@chroxy/protocol/project'
 import { GIT } from './git.js'
@@ -48,6 +48,17 @@ import { GIT } from './git.js'
 // disk leak set a generous threshold (e.g. 14–30 days, well beyond any real
 // agent-session lifetime); the clean-tree guard remains the hard safety net.
 const DEFAULT_MAX_LOCK_AGE_MS = 0
+
+// The removal guard's own runner: a status listing can be large, and a hung git must
+// read as "keep" (the throw lands in isClean's / the caller's catch), not stall the
+// scheduler. Worktree GC keeps defaultGit (1 MB default buffer, no timeout).
+function strictGit(cwd, args) {
+  return execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30_000 })
+}
+
+function defaultGit(cwd, args) {
+  return execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' })
+}
 
 /**
  * Existence check for a pid without sending a real signal.
@@ -246,11 +257,80 @@ export function planRepoGc(repoPath, deps = {}) {
  * un-versioned files. Treating any ignored entry (`!! ...`) as not-clean keeps
  * such worktrees in the skip set instead of silently deleting their contents.
  */
-function isClean(git, worktreePath) {
+function isClean(git, worktreePath, { strict = false } = {}) {
   try {
-    return git(worktreePath, ['status', '--porcelain', '--ignored']).trim().length === 0
+    // #9242 (strict): the removal guard must not depend on the user's or repo's git
+    // configuration. `status.showUntrackedFiles=no` hides untracked AND ignored
+    // entries, and `diff.ignoreSubmodules` hides a dirty submodule; each would read
+    // a worktree holding real work as clean. The GC callers keep their historical
+    // command (strict=false) unchanged.
+    const args = strict
+      // `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
+      // is one line, not thousands) while `--untracked-files=all` still enumerates
+      // every untracked file; any ignored entry at all still reads as not clean.
+      ? ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
+      : ['status', '--porcelain', '--ignored']
+    return git(worktreePath, args).trim().length === 0
   } catch {
     return null
+  }
+}
+
+
+/**
+ * #9242: could removing this worktree lose work? True when its working tree is
+ * not clean (tracked edits, untracked files, and gitignored ones — see isClean),
+ * when HEAD holds a commit no branch, tag or remote ref reaches (a session
+ * worktree is DETACHED, so a commit made in it is reachable from nothing else and
+ * `git worktree remove` makes it unreachable), or when either question cannot be
+ * answered. Fails SAFE: unknown reads as "has work".
+ *
+ * Deliberately conservative, and accepted: in a SPARSE checkout every skip-worktree file
+ * carries the `S` tag, so such a session always reads as having work and is kept.
+ *
+ * @param {string} worktreePath
+ * @param {{ git?: (cwd: string, args: string[]) => string }} [deps]
+ * @returns {boolean}
+ */
+export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
+  const { git = strictGit, lstat = lstatSync, readdir = readdirSync } = deps
+  // A directory that is already gone (ENOENT, and only ENOENT) holds nothing that
+  // removal could lose. Any other stat error (EACCES, EIO, an unmounted volume) is
+  // "cannot tell", which is "keep".
+  try {
+    lstat(worktreePath)
+  } catch (err) {
+    return err?.code === 'ENOENT' ? false : true
+  }
+  if (isClean(git, worktreePath, { strict: true }) !== true) return true
+  try {
+    if (git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0) return true
+    // Work `status` cannot see. (1) A tracked file flagged assume-unchanged (lowercase
+    // tag; also what `core.ignoreStat` effectively does) or skip-worktree (`S`) can be
+    // edited without any status line. (2) A submodule's own status probe runs without
+    // `--ignored`, so a populated submodule can hold ignored files (a `.env`) while the
+    // parent reads clean. An UNINITIALISED submodule directory is not a submodule at all
+    // to git: a hand-made file in it is invisible to status. So ANY gitlink whose
+    // directory has any entry is kept, initialised or not. Both are the simple fail-safe
+    // (keep) rather than recursing into each submodule.
+    for (const rec of git(worktreePath, ['ls-files', '-v', '-z']).split('\0')) {
+      if (/^[a-zS] /.test(rec)) return true
+    }
+    for (const rec of git(worktreePath, ['ls-files', '-s', '-z']).split('\0')) {
+      const m = /^160000 [0-9a-f]+ \d\t(.+)$/s.exec(rec)
+      if (!m) continue
+      let entries
+      try {
+        entries = readdir(joinPath(worktreePath, m[1]))
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue // the gitlink's directory is absent: nothing there
+        return true // cannot tell (EACCES, ENOTDIR, ...): keep
+      }
+      if (entries.length > 0) return true
+    }
+    return false
+  } catch {
+    return true
   }
 }
 
@@ -288,7 +368,7 @@ function isClean(git, worktreePath) {
  */
 export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps = {} } = {}) {
   const {
-    git = (cwd, args) => execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' }),
+    git = defaultGit,
     readdir = (p) => readdirSync(p, { withFileTypes: true }),
     exists = existsSync,
   } = deps

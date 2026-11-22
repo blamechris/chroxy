@@ -15,7 +15,7 @@ import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { isGitRepoSync } from './utils/git-repo.js'
-import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
+import { sweepOrphanChroxyWorktrees, worktreeHasUnsavedWork } from './worktree-gc.js'
 import { hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { resolveTranscriptSource } from './transcript-sources.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
@@ -3074,8 +3074,79 @@ export class SessionManager extends EventEmitter {
     if (!entry || entry.restoredScheduledTaskId === undefined) return false
     if (isScheduledTaskIdShape(entry.metadata?.scheduledTaskId)) return false
     delete entry.restoredScheduledTaskId
-    this._schedulePersist()
+    // #9242: NOW, not on the debounce: a crash in the window would resurrect the hint.
+    this._flushPersistOrWarn(sessionId)
     return true
+  }
+
+  /**
+   * #9242: a person is using this session — end its scheduled-task link in BOTH forms
+   * (an adopted ownership and an unadopted restore hint), each persisted at once.
+   * The one entry point for every person-driven release (`recordUserIntent`, a
+   * checkpoint Files restore).
+   * @param {string} sessionId
+   * @returns {boolean} whether any link was released
+   */
+  releaseScheduledTaskLink(sessionId) {
+    const hint = this.releaseRestoreHint(sessionId)
+    const owned = this.releaseScheduledOwnership(sessionId)
+    return hint || owned
+  }
+
+  /**
+   * #9242: is this live session OWNED by scheduled task `taskId`? Ownership is
+   * `metadata.scheduledTaskId`; a restore hint or a session a person has taken over
+   * does not count. The scheduler asks before it drives or destroys a session.
+   * @param {string} sessionId
+   * @param {string} taskId
+   * @returns {boolean}
+   */
+  ownsScheduledTask(sessionId, taskId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying || !isScheduledTaskIdShape(taskId)) return false
+    return entry.metadata?.scheduledTaskId === taskId
+  }
+
+  /**
+   * #9242: end a scheduled task's ownership of a session, leaving an ordinary one
+   * (no `automation_owned` blocker, never driven or closed by the scheduler again).
+   * Called when a person uses the session (`recordUserIntent`) and when the task is
+   * deleted while its session still holds work. Drops the key from `metadata`
+   * (keeping any other), clears a stale hint, and persists so a restart agrees.
+   * With `taskId`, only releases a session owned by that task.
+   * @param {string} sessionId
+   * @param {string} [taskId]
+   * @returns {boolean} whether ownership was released
+   */
+  releaseScheduledOwnership(sessionId, taskId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return false
+    const current = entry.metadata?.scheduledTaskId
+    if (!isScheduledTaskIdShape(current)) return false
+    if (taskId !== undefined && current !== taskId) return false
+    const { scheduledTaskId: _released, ...rest } = entry.metadata
+    entry.metadata = Object.keys(rest).length > 0 ? rest : null
+    delete entry.restoredScheduledTaskId
+    // Written NOW, not on the debounce: a crash inside the debounce window would
+    // resurrect the old link as a restore hint and re-adopt a session a person is
+    // using. (A failed write is logged and emitted by _flushPersistOrWarn; the
+    // in-memory release stands either way.)
+    this._flushPersistOrWarn(sessionId)
+    return true
+  }
+
+  /**
+   * #9242: would destroying this session lose work? True when it has a worktree
+   * with uncommitted/untracked/ignored content or commits no ref reaches, or when
+   * that cannot be determined (fail safe). A session with no worktree is `false`:
+   * destroying it removes no files.
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  hasUnsavedWorktreeWork(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry?.worktreePath) return false
+    return worktreeHasUnsavedWork(entry.worktreePath)
   }
 
   /**
@@ -5847,7 +5918,11 @@ export class SessionManager extends EventEmitter {
     // #8571: a person using a session ends any unadopted scheduled-task restore
     // hint on it. Only the CLIENT input handlers call this (the scheduler's turn
     // driver goes through `session.sendMessage` directly, never here).
-    this.releaseRestoreHint(sessionId)
+    // #9242: and ends an ADOPTED task's ownership too. The scheduler drives its
+    // session by `session.sendMessage` and never reaches here, so this is a person
+    // by construction. Their session is no longer the task's: the next fire gets a
+    // fresh one, and deleting the task leaves it alone.
+    this.releaseScheduledTaskLink(sessionId)
     this._userStopped.delete(sessionId)
     // #8326: a person typing is also what ends a run of consecutive daemon wakes.
     this._daemonWakeCount.delete(sessionId)

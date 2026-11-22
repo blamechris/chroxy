@@ -400,14 +400,16 @@ describe('scheduler adopts its restored sessions after a restart (#8571)', () =>
       await waitFor(() => linkOnDisk(a) === undefined, 'the debounced write to drop the key')
     })
 
-    it('releaseRestoreHint is a no-op for an owned session and for one with no hint', () => {
+    it('releaseRestoreHint is a no-op for an owned session and for one with no hint (a person typing releases ownership, #9242)', () => {
       const sm = newMgr()
       const owned = sm.createSession({ cwd: '/tmp', provider: 'test-noop-8571', metadata: { scheduledTaskId: 't' } })
       const plain = sm.createSession({ cwd: '/tmp', provider: 'test-noop-8571' })
       assert.equal(sm.releaseRestoreHint(owned), false)
       assert.equal(sm.releaseRestoreHint(plain), false)
+      // #9242: typing into an adopted session ends its ownership (releaseRestoreHint
+      // itself still never touches an owned session).
       sm.recordUserIntent(owned)
-      assert.equal(sm.getSession(owned).metadata.scheduledTaskId, 't', 'typing into an adopted session leaves it owned')
+      assert.equal(sm.getSession(owned).metadata?.scheduledTaskId, undefined, 'typing into an adopted session releases it')
     })
   })
 

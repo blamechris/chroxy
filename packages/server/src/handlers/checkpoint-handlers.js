@@ -187,6 +187,14 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     // checkpoint WITHOUT touching the working tree.
     let checkpoint
     if (restoreFiles) {
+      // #9242: a person is about to rewrite this session's working tree. Claim it for
+      // them BEFORE the first await (the restore waits on a directory lock and async
+      // git): a scheduled fire that becomes due meanwhile must not drive it, and a
+      // task must not own or later adopt it. Both link forms, one entry point.
+      // Only once the (synchronous) checks above have passed and the connection is
+      // still authorized: a refused or unauthorized restore must not cost the task its
+      // session. The restore re-asserts the same authority itself (isAuthorized below).
+      if (stillAuthorized(authorizedFor(ctx, client))) ctx.sessions.sessionManager?.releaseScheduledTaskLink?.(sid)
       checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId, { isAuthorized: authorizedFor(ctx, client) })
     } else {
       checkpoint = ctx.services.checkpointManager.getCheckpoint(sid, msg.checkpointId)

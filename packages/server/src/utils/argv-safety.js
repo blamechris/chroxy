@@ -718,6 +718,15 @@ export const AUDITED_SINKS = [
     match: "execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' })",
     reason: 'cwd is always an absolute repo/worktree path from server config or resolveRepoSet discovery; the only variable positionals pushed through args are absolute paths reported by `git worktree list --porcelain` itself, or a --reason-bound lockReason value — never remote/WS-supplied text.',
   },
+  {
+    file: 'worktree-gc.js',
+    // #9242: the scheduler's removal guard (worktreeHasUnsavedWork) runner. Same shape
+    // as the entry above with a bigger buffer and a timeout; its only callers pass
+    // fully literal argv arrays (status / rev-list / ls-files) and the cwd of a
+    // session's own worktree path.
+    match: "execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30_000 })",
+    reason: "strictGit's callers (worktreeHasUnsavedWork/isClean) pass literal argv arrays only; cwd is a session worktree path under the daemon's worktree base, never remote text.",
+  },
 ]
 
 /**

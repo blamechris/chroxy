@@ -17,7 +17,7 @@
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { assertAuthorized, stillAuthorized } from './connection-authority.js'
 import { performance } from 'node:perf_hooks'
-import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission, NOT_ADMITTED_ADMISSION } from './base-session.js'
 import { BYOK_CUSTOMIZATION } from './provider-customization.js'
 import { loadByokInstructionPolicy } from './instruction-policy.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
@@ -1159,6 +1159,14 @@ export class ClaudeByokSession extends BaseSession {
             status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
             reason: 'connection_not_authorized', message: 'The sending connection is no longer authorized; the input was not dispatched.',
           })
+          return
+        }
+        // #9242: the expansion is an await; re-ask admission before the marker, the
+        // history entry and the stream. Refused: no dispatch, queued follow-ups go on.
+        if (!this._admitPreparedSend(sendOptions)) {
+          this._isBusy = false
+          this._permissions.clearUserStopInFlight()
+          reportInputAdmission(sendOptions, NOT_ADMITTED_ADMISSION)
           return
         }
       } catch (err) {
