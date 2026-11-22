@@ -15,7 +15,7 @@ import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { isGitRepoSync } from './utils/git-repo.js'
-import { sweepOrphanChroxyWorktrees, worktreeUnsavedWorkReport, describeUnsavedWork } from './worktree-gc.js'
+import { sweepOrphanChroxyWorktrees, worktreeUnsavedWorkReport, describeUnsavedWork, sanitizeNoticeText } from './worktree-gc.js'
 import { hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { resolveTranscriptSource } from './transcript-sources.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
@@ -3168,17 +3168,18 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    * @param {string} taskId
    * @param {{ kinds: string[], samples: Record<string, string[]> }} report
+   * @param {string} [taskName] - the deleted task's own name (not the session's, which may be renamed)
    * @returns {boolean} whether the notice was recorded
    */
-  noteScheduledSessionKept(sessionId, taskId, report) {
+  noteScheduledSessionKept(sessionId, taskId, report, taskName) {
     try {
       const entry = this._sessions.get(sessionId)
       if (!entry || entry._destroying) return false
       const what = describeUnsavedWork(report) || 'unsaved work'
-      const name = typeof entry.name === 'string' && entry.name ? entry.name : String(taskId).slice(0, 8)
+      const label = typeof taskName === 'string' && taskName ? `Scheduled task "${sanitizeNoticeText(taskName, 120)}"` : 'A scheduled task'
       const data = {
         type: 'system',
-        content: `Scheduled task "${name}" was deleted, but this session was kept open instead of being closed, because its worktree holds unsaved work: ${what}. ` +
+        content: `${label} was deleted, but this session was kept open instead of being closed, because its worktree holds unsaved work: ${what}. ` +
           'It is an ordinary session now and nothing has been removed. Review the worktree, then close the session yourself to remove it.',
         timestamp: Date.now(),
       }

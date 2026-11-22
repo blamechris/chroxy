@@ -438,6 +438,8 @@ export class SchedulerEngine extends EventEmitter {
     this._running = new Set()
     /** @type {Map<string,string>} taskId -> sessionId, so a recurring task RESUMES its session. */
     this._sessionByTask = new Map()
+    // #9286: last-seen task names, so the notice can name a task that is already deleted.
+    this._taskNames = new Map()
     this._staleModelWarned = new Set()
     /**
      * @type {Set<string>} task ids whose outcome could not be persisted. Recording
@@ -612,7 +614,9 @@ export class SchedulerEngine extends EventEmitter {
       if (this._store.get(taskId)) continue
       if (this._running.has(taskId)) continue
       this._sessionByTask.delete(taskId)
-      this._destroyTaskSession(taskId, sessionId)
+      const taskName = this._taskNames.get(taskId)
+      this._taskNames.delete(taskId)
+      this._destroyTaskSession(taskId, sessionId, taskName)
     }
     for (const map of [this._busySkips, this._retryAt]) {
       for (const id of [...map.keys()]) if (!this._store.get(id)) map.delete(id)
@@ -652,6 +656,7 @@ export class SchedulerEngine extends EventEmitter {
         ? [this._store.get(onlyTaskId)].filter(Boolean)
         : this._store.list()
       for (const task of tasks) {
+        if (typeof task.name === 'string' && task.name) this._taskNames.set(task.id, task.name)
         const mapped = this._sessionByTask.get(task.id)
         if (mapped) {
           if (this._sm.getSession?.(mapped)?.session) {
@@ -687,7 +692,7 @@ export class SchedulerEngine extends EventEmitter {
   }
 
   /** @private — destroy a removed task's session if it is still alive; never throws. */
-  _destroyTaskSession(taskId, sessionId) {
+  _destroyTaskSession(taskId, sessionId, taskName) {
     const warn = (err) => {
       this._log.warn(`Could not destroy the session of removed scheduled task ${taskId}: ${err?.message || err}`)
     }
@@ -712,7 +717,9 @@ export class SchedulerEngine extends EventEmitter {
       if (unsaved?.has) {
         this._sm.releaseScheduledOwnership?.(sessionId, taskId)
         // #9286: say so in the session itself; the log line alone is invisible to the person.
-        this._sm.noteScheduledSessionKept?.(sessionId, taskId, unsaved)
+        // The release and the note are two flushes: a crash between them keeps the session
+        // without a note (cosmetic), and a retry cannot duplicate the note.
+        this._sm.noteScheduledSessionKept?.(sessionId, taskId, unsaved, taskName)
         this._log.warn(`Scheduled task ${taskId} was removed — keeping its session ${sessionId} open: its worktree has unsaved work (uncommitted changes, unreachable commits, or an unreadable status). It is an ordinary session now; close it yourself once the work is safe.`)
         return
       }
@@ -1208,6 +1215,7 @@ export class SchedulerEngine extends EventEmitter {
     }
     if (created?.session) this._assertPermissionMode(created.session, ctx.permissionMode, sessionId)
     this._sessionByTask.set(task.id, sessionId)
+    if (typeof task.name === 'string' && task.name) this._taskNames.set(task.id, task.name)
     return sessionId
   }
 

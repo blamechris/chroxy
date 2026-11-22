@@ -12,7 +12,7 @@ import { registerProvider } from '../src/providers.js'
 import { BaseSession } from '../src/base-session.js'
 import { GIT } from '../src/git.js'
 import { declareUnknownCustomization } from './helpers/provider-customization.js'
-import { worktreeHasUnsavedWork, worktreeUnsavedWorkReport, describeUnsavedWork } from '../src/worktree-gc.js'
+import { worktreeHasUnsavedWork, worktreeUnsavedWorkReport, describeUnsavedWork, sanitizeNoticeText } from '../src/worktree-gc.js'
 import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
 import { nsCtx } from './test-helpers.js'
@@ -667,8 +667,10 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       ignoreEnv(repo)
       const sm = newMgr()
       const eng = newEngine(sm)
-      const task = addTask()
+      const task = store.add({ name: 'nightly report', prompt: 'p', cadence: { kind: 'interval', everyMs: 3600000, anchor: 1000 }, target: { provider: 'test-leave-used-9242' } })
+      eng.refresh()
       const s = worktreeSession(sm, repo, eng, task.id)
+      sm.renameSession(s, 'my renamed session')
       writeFileSync(join(sm.getSession(s).worktreePath, '.env'), 'K=1')
       const live = []
       sm.on('session_event', (e) => { if (e.sessionId === s && e.event === 'message') live.push(e.data) })
@@ -681,7 +683,8 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.ok(/ignored files/.test(text), 'names the kind')
       assert.ok(text.includes('.env'), 'names the path')
       assert.ok(/kept open instead of being closed/.test(text) && /close the session yourself/.test(text), 'says kept, and what to do')
-      assert.ok(text.includes(sm.getSession(s).name), 'names the task')
+      assert.ok(text.includes('Scheduled task "nightly report"'), 'names the TASK')
+      assert.ok(!text.includes('my renamed session'), 'not the renamed session')
       assert.equal(live.length, 1, 'also broadcast live')
       assert.equal(live[0].type, 'system')
     })
@@ -715,6 +718,35 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       const [n] = keptNotices(sm, s)
       assert.ok(n && /commits no branch, tag or remote reaches/.test(n.content), n?.content)
       assert.ok(!/untracked|ignored/.test(n.content), 'no wrong kind')
+    })
+
+    it('#9286: a session the task no longer owns gets no notice when the task is deleted', () => {
+      const repo = makeRepo()
+      const sm = newMgr()
+      const eng = newEngine(sm)
+      const task = addTask()
+      const s = worktreeSession(sm, repo, eng, task.id)
+      writeFileSync(join(sm.getSession(s).worktreePath, 'x.txt'), 'x')
+      sm.releaseScheduledOwnership(s, task.id)
+      store.remove(task.id)
+      eng.refresh()
+      assert.ok(sm.getSession(s), 'left open')
+      assert.equal(keptNotices(sm, s).length, 0)
+    })
+
+    it('#9286: noteScheduledSessionKept on an unknown or destroying session returns false and does not throw', () => {
+      const repo = makeRepo()
+      const sm = newMgr()
+      const eng = newEngine(sm)
+      const task = addTask()
+      const s = worktreeSession(sm, repo, eng, task.id)
+      const report = { has: true, kinds: ['untracked'], samples: {} }
+      assert.equal(sm.noteScheduledSessionKept('0'.repeat(32), task.id, report, 'n'), false)
+      sm._sessions.get(s)._destroying = true
+      assert.equal(sm.noteScheduledSessionKept(s, task.id, report, 'n'), false)
+      sm._sessions.get(s)._destroying = false
+      assert.equal(sm.noteScheduledSessionKept(s, task.id, report), true)
+      assert.ok(/^A scheduled task was deleted/.test(keptNotices(sm, s)[0].content), 'absent name falls back')
     })
 
     it('#9286: a CLEAN worktree is destroyed and no notice is recorded', async () => {
@@ -1036,6 +1068,13 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
         assert.equal(rep(g).has, has(g))
       }
       assert.equal(has(git('?? a\n', new Error('would not be asked'))), true, 'the boolean still stops at the first finding')
+    })
+    it('#9286 sanitizeNoticeText: strips bidi/zero-width characters and never splits a surrogate pair', () => {
+      assert.equal(sanitizeNoticeText('a\u202eb\u2066c\u2069d\u200be\ufefff\u200fg', 120), 'abcdefg')
+      const out = sanitizeNoticeText('\u{1F600}'.repeat(200), 120)
+      assert.equal(Array.from(out).length, 117 + 3, 'capped by code points')
+      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(out), 'no lone surrogate')
+      assert.ok(!describeUnsavedWork({ kinds: ['ignored'], samples: { ignored: ['evil\u202etxt.exe'] } }).includes('\u202e'))
     })
     it('#9286 describeUnsavedWork: names kinds and paths, strips control characters', () => {
       const text = describeUnsavedWork({ kinds: ['ignored', 'unreachable-commits'], samples: { ignored: ['.env', 'a\nb'] } })

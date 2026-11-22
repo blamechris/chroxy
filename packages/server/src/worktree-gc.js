@@ -248,6 +248,11 @@ export function planRepoGc(repoPath, deps = {}) {
   return { repo: repoPath, items }
 }
 
+// `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
+// is one line, not thousands) while `--untracked-files=all` still enumerates
+// every untracked file; any ignored entry at all still reads as not clean.
+const STRICT_STATUS_ARGS = ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
+
 /**
  * `git -C <worktree> status --porcelain --ignored` → clean? null when it can't
  * be run. The `--ignored` flag is load-bearing (#5244): `git worktree remove`
@@ -257,11 +262,6 @@ export function planRepoGc(repoPath, deps = {}) {
  * un-versioned files. Treating any ignored entry (`!! ...`) as not-clean keeps
  * such worktrees in the skip set instead of silently deleting their contents.
  */
-// `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
-// is one line, not thousands) while `--untracked-files=all` still enumerates
-// every untracked file; any ignored entry at all still reads as not clean.
-const STRICT_STATUS_ARGS = ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
-
 function isClean(git, worktreePath, { strict = false } = {}) {
   try {
     // #9242 (strict): the removal guard must not depend on the user's or repo's git
@@ -408,6 +408,17 @@ const UNSAVED_KIND_LABELS = {
   unreadable: 'state that could not be read (kept to be safe)',
 }
 
+// Control characters, bidi overrides/isolates and zero-width characters: text from git
+// or the filesystem must not be able to reorder or hide what the notice shows.
+// eslint-disable-next-line no-control-regex
+const NOTICE_STRIP = /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
+/** Strip spoofing characters, then cap at `max` code points (never splitting a surrogate pair). */
+export function sanitizeNoticeText(text, max) {
+  const chars = Array.from(String(text).replace(NOTICE_STRIP, ''))
+  return chars.length > max ? `${chars.slice(0, max - 3).join('')}...` : chars.join('')
+}
+
 /**
  * #9286: one human-readable line for a worktreeUnsavedWorkReport(), kinds in the
  * report's order, each with its sample paths. Paths come from git and the
@@ -419,11 +430,7 @@ export function describeUnsavedWork(report) {
   const kinds = Array.isArray(report?.kinds) ? report.kinds : []
   return kinds.map((kind) => {
     const label = UNSAVED_KIND_LABELS[kind] || kind
-    const paths = (report.samples?.[kind] || []).map((p) => {
-      // eslint-disable-next-line no-control-regex
-      const clean = String(p).replace(/[\u0000-\u001f\u007f]/g, '')
-      return clean.length > 120 ? `${clean.slice(0, 117)}...` : clean
-    })
+    const paths = (report.samples?.[kind] || []).map((p) => sanitizeNoticeText(p, 120))
     return paths.length > 0 ? `${label}: ${paths.join(', ')}` : label
   }).join('; ')
 }
