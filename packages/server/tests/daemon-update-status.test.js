@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { execFileSync, spawnSync } from 'node:child_process'
 import { constants as fsConstants, openSync as fsOpen, writeSync as fsWriteSync, closeSync as fsClose, renameSync as fsRename } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   DaemonUpdateStatus, buildDaemonUpdateStatus, readCappedJson, MAX_FILE_BYTES, POSTPONE_MS,
   PENDING_FILE, POSTPONE_FILE, REQUEST_FILE, LAST_DEPLOY_FILE, REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS,
@@ -441,7 +441,13 @@ describe('writes use unpredictable temp names (#8331)', () => {
       writeFileAtomic(join(dir, 'x.json'), '{}', { fs: fakeFs })
       for (const n of seen) names.add(n)
       assert.equal(names.size, 2)
-      assert.ok(seen.every((p) => !p.includes(String(process.pid))), 'no pid in the name')
+      // Assert the SHAPE of the basename, not whether the pid's digits occur anywhere in the path:
+      // the random hex or the temp dir can contain them by chance (#9277).
+      const SHAPE = /^x\.json\.tmp-[0-9a-f]{16}$/
+      const bases = seen.map((p) => basename(p))
+      for (const b of bases) assert.ok(SHAPE.test(b), `temp name has the x.json.tmp-<16 hex> shape: ${b.slice(0, 80)}`)
+      assert.equal(new Set(bases).size, 2, 'basenames differ across writes')
+      for (const b of bases) assert.notEqual(b, `x.json.tmp-${process.pid}`, 'not the old predictable pid-based name')
       void u
     })
   })
