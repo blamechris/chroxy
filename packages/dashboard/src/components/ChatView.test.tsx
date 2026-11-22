@@ -37,6 +37,13 @@ describe('ChatView', () => {
     expect(screen.getByText('Message 2')).toBeInTheDocument()
   })
 
+  it('renders the kept-session notice a deleted scheduled task leaves in its session (#9286)', () => {
+    const content = 'Scheduled task "nightly" was deleted, but this session was kept open instead of being closed, because its worktree holds unsaved work: ignored files (build output, node_modules, a local .env...): .env. It is an ordinary session now and nothing has been removed. Review the worktree, then close the session yourself to remove it.'
+    render(<ChatView messages={[{ id: 'kept', type: 'system', content, timestamp: 1 }]} isStreaming={false} />)
+    expect(screen.getByText(/was kept open instead of being closed/)).toBeInTheDocument()
+    expect(screen.getByText(/close the session yourself/)).toBeInTheDocument()
+  })
+
   it('shows the copy control only on finished, non-empty response bubbles (#6631)', () => {
     const messages: ChatViewMessage[] = [
       { id: 'r-done', type: 'response', content: 'finished answer', timestamp: 1 },

@@ -704,8 +704,15 @@ export class SchedulerEngine extends EventEmitter {
       // #9242: and never take work with it. A worktree with uncommitted changes (or
       // commits nothing else reaches), or one whose state cannot be read, is KEPT:
       // the session is released to an ordinary one and the person decides.
-      if (typeof this._sm.hasUnsavedWorktreeWork === 'function' && this._sm.hasUnsavedWorktreeWork(sessionId)) {
+      const unsaved = typeof this._sm.unsavedWorktreeWork === 'function'
+        ? this._sm.unsavedWorktreeWork(sessionId)
+        : (typeof this._sm.hasUnsavedWorktreeWork === 'function' && this._sm.hasUnsavedWorktreeWork(sessionId)
+          ? { has: true, kinds: [], samples: {} }
+          : null)
+      if (unsaved?.has) {
         this._sm.releaseScheduledOwnership?.(sessionId, taskId)
+        // #9286: say so in the session itself; the log line alone is invisible to the person.
+        this._sm.noteScheduledSessionKept?.(sessionId, taskId, unsaved)
         this._log.warn(`Scheduled task ${taskId} was removed — keeping its session ${sessionId} open: its worktree has unsaved work (uncommitted changes, unreachable commits, or an unreadable status). It is an ordinary session now; close it yourself once the work is safe.`)
         return
       }
