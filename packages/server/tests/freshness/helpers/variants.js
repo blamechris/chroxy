@@ -101,6 +101,14 @@ export const MUTANTS = {
   I2: withPolicy({ slotHolderStates: new Set() }),
   // The preempted item is not held behind a still-queued preemptor.
   I2c: withPolicy({ preemptorFirst: () => {} }),
+  // A challenger with no counted show left may preempt: it is exhausted as
+  // soon as it reaches the slot, and the preempted item is shown straight
+  // back.
+  'I2c.showable': withPolicy({
+    preempts(challenger, active, now, config) {
+      return DEFAULT_POLICY.preempts({ ...challenger, afterDeferral: true }, active, now, config)
+    },
+  }),
   // "Front of its class" applied to deadline items as well; that alone is
   // rescued by the preemptor-first rule, so both are broken.
   'I2c.front': withPolicy({

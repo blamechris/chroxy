@@ -8,7 +8,7 @@ import { append, createLedger } from './model/ledger.js'
 import { DEFAULT_POLICY, nextReminderAt, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
-import { literalPreempts } from './helpers/variants.js'
+import { MUTANTS, literalPreempts } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const FAST = { per_source: { chroxy: 15, codex: 15, 'claude-desktop': 15 } }
@@ -548,7 +548,7 @@ describe('origins and their closing evidence', () => {
     }
   })
 
-  it('a stale line surfaced as attention, then a prompt on the same session: a separate owner item that notifies', () => {
+  it('a stale line on one session surfaced as attention, then a prompt on another session: the prompt\'s owner item is a separate item', () => {
     const h = setup()
     const d = session(h, 'claude-desktop', 'd', null)
     const c = session(h, 'chroxy', 'c')
@@ -676,6 +676,39 @@ describe('preemption', () => {
     assert.ok(h.item(ia).counters.shows_counted >= 2, 'the preempted item spent its shows')
     assert.ok(seq.indexOf('b:shown') === -1 || seq.indexOf('b:shown') > 4, 'the earlier deadline waited behind the item it preempted')
     void ib
+  })
+
+  // b, shown once with a limit of one and back in the queue from expiry, gets
+  // a prompt whose deadline comes before a's next reminder: no counted show
+  // is left to it, so it does not preempt a.
+  function noShowLeft(policy) {
+    const h = setup({ surface: { reminder_after_minutes: [30, 45], item_time_limit_hours: 1, max_presentations: 1 } }, policy)
+    const a = session(h, 'chroxy', 'a')
+    const b = session(h, 'chroxy', 'b')
+    W.author(h.world, b.sk, T0, ownerBlock('review the plan'))
+    h.tick('chroxy', T0 + 15 * MIN)
+    W.author(h.world, a.sk, T0 + 16 * MIN, ownerBlock())
+    ticks(h, 'chroxy', T0 + 15 * MIN, 4)
+    const ia = itemIds.owner(a.s)
+    const ib = itemIds.owner(b.s)
+    assert.deepEqual([h.item(ia).state, h.item(ib).state, h.item(ib).counters.shows_counted], ['active', 'queued', 1], 'a took the slot when b expired')
+    // A deadline at +96, before a's first reminder at +105.
+    W.raisePrompt(h.world, b.sk, T0 + 76 * MIN, 20 * 60)
+    h.tick('chroxy', T0 + 90 * MIN)
+    return { h, ia, ib }
+  }
+
+  it('a challenger with no counted show left does not preempt, though its deadline comes first', () => {
+    const { h, ia, ib } = noShowLeft()
+    assert.equal(h.item(ib).deadline, T0 + 96 * MIN)
+    assert.equal(h.records('surface').filter((r) => r.body.step === 'preempted').length, 0)
+    assert.equal(h.item(ia).state, 'active')
+  })
+
+  it('mutation: without that check the active item is preempted for nothing: the challenger is exhausted at the slot, and so is the preempted item, its one show spent', () => {
+    const { h, ia, ib } = noShowLeft(MUTANTS['I2c.showable'])
+    assert.deepEqual(steps(h, ia).slice(-2), ['preempted', 'exhausted'])
+    assert.equal(steps(h, ib).at(-1), 'exhausted')
   })
 
   it('gap witness: read literally, two deadline items preempt each other on alternate ticks', () => {
