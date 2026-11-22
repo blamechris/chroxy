@@ -44,7 +44,11 @@
 //
 // Limits, stated so nobody mistakes them for cover: a signal sent to a tracked
 // child in the instant between its death and the 'exit' event is still allowed;
-// a grandchild whose parent
+// after a detached leader
+// exits its own `-pgid` form is refused even while observed members live (the
+// member pids still work); the lstart identity has one-second granularity, so a
+// pid reissued within the same second to a process with the same start text is
+// indistinguishable; a grandchild whose parent
 // exited BEFORE any snapshot (and which is not in the tracked pgid) cannot be
 // attributed and is refused — the fix is for the test to snapshot via a kill of
 // its own child, or to record the pid while the parent lives. With no `ps`
@@ -80,6 +84,33 @@ export function parsePsTable(text) {
     if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: m[3] === undefined ? null : Number(m[3]), start: m[4] === undefined ? null : m[4] })
   }
   return rows.length > 0 ? rows : null
+}
+
+/**
+ * The pid Node's `process.kill` will act on. Node 22 accepts any value with
+ * `pid == (pid | 0)` — numeric strings (' 12 ', '0x10', ''), booleans (true is
+ * pid 1, false is pid 0), `[String(pid)]`, `{ valueOf() { return pid } }` — then
+ * hands the integer to the binding. Checked against Node 22: number-likes above
+ * are accepted; null, undefined, NaN, 1.5, `{}`, a Date, a BigInt and a Symbol
+ * are rejected by Node itself, so they are returned untouched for Node to reject.
+ * The guard decides on, AND forwards, this ONE converted integer, so a `valueOf`
+ * that answers differently per call cannot split the decision from the signal.
+ * UNCONVERTIBLE means a non-primitive whose conversion threw: the guard refuses it rather
+ * than let Node convert it again.
+ */
+export const UNCONVERTIBLE = Symbol('chroxy.unconvertiblePid')
+
+export function coercePid(raw) {
+  const t = typeof raw
+  if (t === 'number') return raw
+  if (t === 'string' || t === 'boolean') {
+    const n = raw | 0
+    return raw == n ? n : raw // eslint-disable-line eqeqeq
+  }
+  if ((t === 'object' && raw !== null) || t === 'function') {
+    try { return raw | 0 } catch { return UNCONVERTIBLE }
+  }
+  return raw
 }
 
 /**
@@ -135,11 +166,11 @@ export function createForeignSignalPolicy({ selfPid, readTable, probeDead = () =
   /** @returns {null | string} null when allowed, otherwise the reason. */
   function decide(rawPid, signal) {
     if (signal === 0 || signal === '0') return null
-    // Node coerces a string pid (`process.kill('1', 'SIGTERM')`, ' 12 ', '0x10'),
-    // so decide on the number it will act on. Anything else is Node's to reject.
-    let pid = rawPid
-    if (typeof pid === 'string') pid = Number(pid)
-    if (typeof pid !== 'number' || !Number.isInteger(pid)) return null // process.kill throws its own TypeError
+    // Decide on the integer Node will act on (see coercePid); a value Node itself
+    // rejects is left for Node's own TypeError.
+    const pid = coercePid(rawPid)
+    if (pid === UNCONVERTIBLE) return 'the pid is an object whose conversion threw, so it cannot be attributed'
+    if (typeof pid !== 'number' || !Number.isInteger(pid)) return null
     if (pid === selfPid) return null
     const target = pid < 0 ? -pid : pid
     if (pid === 0 || pid === -1) return `pid ${pid} addresses the whole process group or every process`
@@ -214,6 +245,8 @@ export function installForeignSignalGuard({ allowEnv, target = {} } = {}) {
   const originalKill = proc.kill
 
   const guardedKill = function guardedProcessKill(pid, signal) {
+    // ONE conversion: decide on it and forward it (a valueOf must not get a second say).
+    pid = coercePid(pid)
     if (!(allowEnv && process.env[allowEnv] === '1')) {
       const reason = policy.decide(pid, signal)
       if (reason !== null) {

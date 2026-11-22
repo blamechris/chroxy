@@ -31,6 +31,8 @@ import {
   FOREIGN_SIGNAL_ERROR_CODE,
   FOREIGN_SIGNAL_MARKER,
   TRACKED_LAUNCHERS,
+  UNCONVERTIBLE,
+  coercePid,
   createForeignSignalPolicy,
   installForeignSignalGuard,
   parsePsTable,
@@ -195,6 +197,27 @@ describe('string pids are decided on the number Node acts on (R2)', { skip: skip
   })
 })
 
+describe('coercible non-number pids are decided on the integer Node acts on (R2b)', { skip: skipWin }, () => {
+  it('refuses an object with valueOf, an array and a boolean aimed at a foreign pid, before sending', () => {
+    assert.throws(() => process.kill({ valueOf() { return process.ppid } }, 'SIGCONT'), { code: FOREIGN_SIGNAL_ERROR_CODE })
+    assert.throws(() => process.kill([String(process.ppid)], 'SIGCONT'), { code: FOREIGN_SIGNAL_ERROR_CODE })
+    assert.throws(() => process.kill(true, 'SIGCONT'), { code: FOREIGN_SIGNAL_ERROR_CODE }) // true is pid 1
+  })
+  it('converts once: a valueOf that changes its answer cannot split decision from signal', () => {
+    let calls = 0
+    const sneaky = { valueOf() { calls++; return calls === 1 ? process.pid : process.ppid } }
+    process.kill(sneaky, 'SIGCONT') // the single conversion is our own pid, which is also what is forwarded
+    assert.equal(calls, 1)
+  })
+  it('leaves values Node rejects to Node (TypeError, not a refusal)', () => {
+    // `{}` is deliberately absent: Node rejects it, the guard sees pid 0 and refuses it first
+    // (stricter, still loud, nothing sent).
+    for (const bad of [null, undefined, NaN, 1.5, Symbol('x'), 1n]) {
+      assert.throws(() => process.kill(bad, 'SIGCONT'), (e) => e.code !== FOREIGN_SIGNAL_ERROR_CODE, String(typeof bad))
+    }
+  })
+})
+
 describe('promisified launchers keep .child and track it (R3)', { skip: skipWin }, () => {
   it('promisify(execFile) returns a promise with a tracked .child', async () => {
     const pr = promisify(execFile)('sleep', ['0.05'])
@@ -236,6 +259,33 @@ describe('a swallowed refusal still fails the file (#9288)', { skip: skipWin }, 
   it('exits 0 when the refusal was acknowledged', () => {
     const r = run(`${swallowed}; process.kill[Symbol.for('chroxy.testForeignSignalGuard')].acknowledge()`)
     assert.equal(r.status, 0)
+  })
+})
+
+describe('the dead-pid probe (EPERM is alive, ESRCH is dead)', { skip: skipWin }, () => {
+  function install(code) {
+    const sent = []
+    const proc = {
+      pid: 4242,
+      kill(pid, sig) {
+        sent.push([pid, sig])
+        if (sig === 0) throw Object.assign(new Error(code), { code })
+        return true
+      },
+    }
+    const r = installForeignSignalGuard({ target: { proc, cp: {}, platform: 'linux', readTable: () => null, exitHook: false } })
+    r.policy.track(777)
+    return { proc, sent }
+  }
+  it('pid 1 answering EPERM to signal 0 is an existing foreign process: refused, signal not sent', () => {
+    const { proc, sent } = install('EPERM')
+    assert.throws(() => proc.kill(1, 'SIGTERM'), { code: FOREIGN_SIGNAL_ERROR_CODE })
+    assert.deepEqual(sent, [[1, 0]])
+  })
+  it('ESRCH is dead: the signal goes through to report ESRCH itself', () => {
+    const { proc, sent } = install('ESRCH')
+    proc.kill(1, 'SIGTERM')
+    assert.deepEqual(sent, [[1, 0], [1, 'SIGTERM']])
   })
 })
 
@@ -337,6 +387,34 @@ describe('policy (fake process table)', () => {
     assert.equal(p.decide(11, 'SIGTERM'), null)
     table = [{ pid: 50, ppid: 1, pgid: 50, start: 'Z' }, { pid: 11, ppid: 1, pgid: 50, start: 'Z1' }]
     assert.match(p.decide(11, 'SIGTERM'), /not a child/)
+  })
+
+  it('coercePid mirrors Node: coercible values become the integer, the rest are untouched', () => {
+    assert.equal(coercePid(' 12 '), 12)
+    assert.equal(coercePid('0x10'), 16)
+    assert.equal(coercePid(''), 0)
+    assert.equal(coercePid(true), 1)
+    assert.equal(coercePid(false), 0)
+    assert.equal(coercePid(['7']), 7)
+    assert.equal(coercePid({ valueOf() { return 9 } }), 9)
+    assert.equal(coercePid('1.5'), '1.5')
+    assert.equal(coercePid(null), null)
+    const sym = Symbol('x')
+    assert.equal(coercePid(sym), sym)
+    assert.equal(coercePid(1n), 1n)
+    assert.equal(coercePid({ valueOf() { throw new Error('boom') } }), UNCONVERTIBLE)
+  })
+
+  it('policy: object / array / boolean / Symbol pids', () => {
+    const p = createForeignSignalPolicy({ selfPid: 1000, readTable: rows([10, 1, 1]) })
+    p.track(10)
+    assert.match(p.decide({ valueOf() { return 99 } }, 'SIGTERM'), /not a child/)
+    assert.match(p.decide(['99'], 'SIGTERM'), /not a child/)
+    assert.match(p.decide(true, 'SIGTERM'), /not a child/)
+    assert.match(p.decide(false, 'SIGTERM'), /whole process group/)
+    assert.match(p.decide({ valueOf() { throw new Error('x') } }, 'SIGTERM'), /conversion threw/)
+    assert.equal(p.decide({ valueOf() { return 10 } }, 'SIGTERM'), null)
+    assert.equal(p.decide(Symbol('x'), 'SIGTERM'), null) // Node rejects a Symbol itself
   })
 
   it('refuses string pids by their numeric value', () => {
