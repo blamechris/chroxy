@@ -1212,6 +1212,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Every new socket must obtain its own session readiness snapshot, including
     // direct reconnects whose retired socket no longer runs onclose.
     clearStreamingAndPlanStateAcrossSessions(get);
+    // Same for a folder-trust change in flight: its reply can never arrive on the
+    // retired socket, and the marker would otherwise keep Trust / Stop trusting disabled.
+    clearFolderTrustPendingAcrossSessions(set, get);
     // #6286 — re-dialing over a still-`connected` phase (the resume/network
     // liveness paths, or switching servers while connected) is a RECONNECT, not
     // a fresh connect: `connected → connecting` is an illegal FSM exit and the

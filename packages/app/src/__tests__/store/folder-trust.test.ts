@@ -325,6 +325,14 @@ describe('a request in flight does not outlive its socket', () => {
     expect(session('s2').folderTrustPendingRequestId).toBeNull();
   });
 
+  it('connect() over a live socket settles them (retireSocket nulls onclose)', async () => {
+    await openSocket();
+    seed({ s1: { folderTrustPendingRequestId: 'r1' }, s2: { folderTrustPendingRequestId: 'r2' } });
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    expect(session('s1').folderTrustPendingRequestId).toBeNull();
+    expect(session('s2').folderTrustPendingRequestId).toBeNull();
+  });
+
   it('control: without a drop the marker stays (the sweep is not clearing it unconditionally)', async () => {
     await openSocket();
     seed({ s1: {} });

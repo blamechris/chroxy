@@ -1916,7 +1916,9 @@ export function SessionScreen() {
         {/* Per-folder trust: whether the active session folder's project settings
             are loaded, with Review / Trust / Stop trusting for the owner. */}
         {activeSessionId && (
+          // key: one instance per session, so the dialog's snapshot never outlives a session switch
           <FolderTrustBanner
+            key={activeSessionId}
             entry={folderTrust}
             pending={folderTrustPending}
             error={folderTrustError}

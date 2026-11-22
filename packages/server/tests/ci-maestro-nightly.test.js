@@ -649,7 +649,7 @@ printf '%s\\n' '${output}'
       assert.equal(result.status, 1, result.stderr)
       assert.deepEqual(tracedFlows(f.trace), ['manual-connect.yaml'])
       assert.ok(result.stdout.includes('Stopping after 1 failed flows; remaining inventory not run.'))
-      // Shard 1 of 2 takes the first floor(n / 2) of the inventory, so the counts follow it
+      // Shard index 1 of 2 takes the odd inventory indices (index % 2 == 1), which is floor(n / 2) of them, so the counts follow it
       // instead of a literal that goes stale each time a flow is added.
       const selected = Math.floor(expectedInventory.length / 2)
       assert.ok(result.stdout.includes(`1 attempted of ${selected} selected; ${selected - 1} not run; ${expectedInventory.length} inventoried; shard 1/2`))
