@@ -100,7 +100,6 @@ async function rejection(promise, code) {
 }
 
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // Let the watchdog fire (turnTimeoutMs 15) and the driver enter its drain.
 async function timedOut(f, p) {
   const err = await rejection(p, 'TURN_TIMEOUT')
@@ -194,10 +193,13 @@ for (const [label, data] of [['no payload', {}], ['null synthetic', { cost: null
 }
 
 it('records nothing when no terminal event arrives before the drain gives up', async (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  t.after(() => mock.timers.reset())
   const f = fixture(t, { turnTimeoutMs: 15, drainTimeoutMs: 15 })
   const p = f.drive()
+  mock.timers.tick(15) // watchdog fires -> TURN_TIMEOUT, drain starts
   await timedOut(f, p)
-  await sleep(40)
+  mock.timers.tick(15) // drain timer fires -> mutex released, ctx gone
   f.emit('result', terminal({ cost: 99 }))
   assert.equal(f.calls.length, 0)
 })
@@ -264,10 +266,8 @@ it('driver: callers passing no onLateUsage see the unchanged drain', async (t) =
 // --- gap 2: a ledger failure must not mask the turn's own outcome -----------
 
 function breakLedger(f) {
-  const real = f.ledger.recordTurnUsage
   let thrown = 0
   f.ledger.recordTurnUsage = (...args) => { thrown += 1; throw new Error('ledger write failed') }
-  f.ledger.recordTurnUsage.real = real
   return () => thrown
 }
 
@@ -285,7 +285,8 @@ for (const [label, finish] of [
     finish(f)
     await assert.rejects(p, (err) => err === original && err instanceof TurnError && err.message !== 'ledger write failed')
     assert.equal(thrown(), 1)
-    assert.ok(f.warnings.some((w) => w.includes('usage failed: ledger write failed')))
+    assert.equal(f.warnings.filter((w) => w.includes('usage failed') && w.includes('ledger write failed')).length, 1)
+    assert.ok(f.warnings.some((w) => w.includes('at ')), 'the stack, not just the message, is logged')
   })
 }
 
@@ -297,7 +298,7 @@ it('a throwing recordUsage on the resolve path is logged and the decision still 
   f.emit('result', terminal())
   assert.equal((await p).decision.summary, 'finished')
   assert.equal(thrown(), 1)
-  assert.ok(f.warnings.some((w) => w.includes('ledger write failed')))
+  assert.equal(f.warnings.filter((w) => w.includes('ledger write failed')).length, 1)
 })
 
 it('a throwing late-usage write is logged and TURN_TIMEOUT still propagates', async (t) => {
@@ -307,5 +308,70 @@ it('a throwing late-usage write is logged and TURN_TIMEOUT still propagates', as
   await timedOut(f, p)
   f.emit('result', terminal({ interrupted: true }))
   assert.equal(thrown(), 1)
-  assert.ok(f.warnings.some((w) => w.includes('ledger write failed')))
+  assert.equal(f.warnings.filter((w) => w.includes('ledger write failed')).length, 1)
+})
+
+// --- late-slot lifetime (F1) and no-spend drain ends (F3) -------------------
+
+it('a lone stream_end slot is cleared at the frame boundary: a later result is not delivered', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('stream_end') // arms the same-frame slot; no result in this frame
+  await flush()
+  f.emit('result', terminal({ cost: 99 }))
+  assert.equal(f.calls.length, 0)
+})
+
+it('a stale slot never steals the next turn\'s spend', async (t) => {
+  const f = fixture(t)
+  const got = { a: [], b: [] }
+  const a = f.driver.driveTurn('s1', 'a', { timeoutMs: 15, onLateUsage: (r) => got.a.push(r) })
+  await rejection(a, 'TURN_TIMEOUT')
+  f.emit('stream_end')
+  await flush()
+  const b = f.driver.driveTurn('s1', 'b', { onLateUsage: (r) => got.b.push(r) })
+  await flush()
+  f.emit('stream_delta', { delta: 'ok' })
+  f.emit('result', terminal({ cost: 0.1 }))
+  await b
+  f.emit('result', terminal({ cost: 0.2 })) // trailing, after B finished
+  assert.equal(got.a.length, 0)
+  assert.equal(got.b.length, 0)
+})
+
+it('a drain ended by a no-spend error still delivers the same frame\'s spend-bearing result once', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('error', { message: 'max tool rounds', fatal: false, code: 'MAX_TOOL_ROUNDS_REACHED' })
+  assert.equal(f.calls.length, 0)
+  f.emit('result', terminal({ interrupted: true }))
+  f.emit('result', terminal({ cost: 99 }))
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].terminalEvent, 'result')
+  assert.equal(f.totals().effectiveUsd, 0.6)
+})
+
+it('a no-spend result then a spend-bearing error in one drain frame is delivered once', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('result', { cost: null, usage: null })
+  f.emit('error', { message: 'x', ...terminal() })
+  f.emit('error', { message: 'again', ...terminal({ cost: 99 }) })
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].terminalEvent, 'error')
+  assert.equal(f.totals().effectiveUsd, 0.6)
+})
+
+it('a spend-bearing error followed by a result in the same frame is delivered once', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('error', { message: 'aborted', ...terminal() })
+  f.emit('result', terminal({ cost: 99 }))
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].terminalEvent, 'error')
+  assert.equal(f.totals().effectiveUsd, 0.6)
 })

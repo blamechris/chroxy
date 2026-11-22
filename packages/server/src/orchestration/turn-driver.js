@@ -101,6 +101,13 @@ function projectTerminalUsage(data) {
   }
 }
 
+// Whether a projected terminal payload reports any spend: a finite cost (zero and
+// negative included) or any positive token count. Mirrors the ledger's own gate.
+function hasAccounting(p) {
+  if (Number.isFinite(p.cost)) return true
+  return !!p.usage && typeof p.usage === 'object' && Object.values(p.usage).some((n) => Number.isFinite(n) && n > 0)
+}
+
 export class TurnError extends Error {
   constructor(code, message, { partialText = '', result = null, terminalEvent = null } = {}) {
     super(message || code)
@@ -347,8 +354,9 @@ export class TurnDriver {
       // A settled-but-draining turn (post-timeout). Swallow its trailing output;
       // a terminal event confirms the session stopped → release the mutex.
       if (event === 'result' || event === 'error') this._reportLateUsage(ctx, event, data)
-      // `stream_end` ends the drain BEFORE the interrupted turn's `result` in the
-      // same frame: keep that frame's slot open so the spend is not dropped.
+      // `stream_end` (or a terminal event with no spend, e.g. a BYOK non-fatal
+      // `error`) ends the drain BEFORE the interrupted turn's spend-bearing `result`
+      // in the same frame: keep that frame's slot open so the spend is not dropped.
       if (event === 'stream_end') this._armLate(ctx)
       if (event === 'result' || event === 'error' || event === 'stopped' || event === 'stream_end') {
         this._endDrain(ctx)
@@ -443,10 +451,14 @@ export class TurnDriver {
 
   _reportLateUsage(ctx, event, data) {
     if (!ctx.onLateUsage) return
-    // Exactly once: the first terminal event ends the drain (ctx leaves _active) and
-    // closes the same-frame slot, so no later event can reach this ctx again.
+    const projected = projectTerminalUsage(data)
+    // A terminal event with no spend does not use up the single delivery: a
+    // spend-bearing result in the same frame is still owed to this turn.
+    if (!hasAccounting(projected)) { this._armLate(ctx); return }
+    // Exactly once: delivery closes the same-frame slot and the drain-ending event
+    // removed the ctx from _active, so no later event can reach this ctx again.
     if (this._late.get(ctx.sessionId) === ctx) this._late.delete(ctx.sessionId)
-    try { ctx.onLateUsage(projectTerminalUsage(data), event) } catch (err) {
+    try { ctx.onLateUsage(projected, event) } catch (err) {
       this._log?.warn?.(`TurnDriver: onLateUsage failed: ${err?.message || err}`)
     }
   }

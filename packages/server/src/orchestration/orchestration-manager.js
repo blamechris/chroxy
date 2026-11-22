@@ -828,7 +828,7 @@ export class OrchestrationManager extends EventEmitter {
     // propagates unchanged.
     const recordUsage = (result, terminalEvent = 'result') => {
       try { recordUsageUnsafe(result, terminalEvent) } catch (err) {
-        this._log?.warn?.(`orchestration: recording ${turnLabel} usage failed: ${err?.message || err}`)
+        this._log?.warn?.(`orchestration: recording ${turnLabel} usage failed: ${err?.stack || err?.message || err}`)
       }
     }
     // Skip null/empty synthetic stalls using the same token normalization as the
