@@ -22,6 +22,7 @@ import { OrchestrationManager } from '../src/orchestration/orchestration-manager
 import { RunLedger } from '../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
 import { assertRunTransition, assertNodeTransition, TransitionError } from '../src/orchestration/run-model.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 const MANAGER_SRC = fileURLToPath(new URL('../src/orchestration/orchestration-manager.js', import.meta.url))
 
@@ -71,6 +72,7 @@ class FakeSession extends EventEmitter {
 class FakeSM extends EventEmitter {
   constructor(decide) {
     super()
+    installTurnDrivenRegistry(this)
     this.setMaxListeners(0)
     this._decide = decide
     this._sessions = new Map()

@@ -16,6 +16,7 @@ import { OrchestrationManager } from '../src/orchestration/orchestration-manager
 import { OrchestrationPermissionGate } from '../src/orchestration/permission-gate.js'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 // --- fakes -----------------------------------------------------------------
 
@@ -107,6 +108,7 @@ class FakeSession extends EventEmitter {
 class FakeSM extends EventEmitter {
   constructor(decide, { architectModel = 'fable-hi', workerModel = 'haiku' } = {}) {
     super()
+    installTurnDrivenRegistry(this)
     this.setMaxListeners(0)
     this._decide = decide
     this._models = { architect: architectModel, worker: workerModel }

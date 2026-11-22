@@ -2,6 +2,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { TurnDriver, TurnError } from '../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 // #6691 E-1 — the driven-turn primitive, tested against a stub SessionManager
 // that mimics the real session_event / session_destroyed surface. No real
@@ -10,7 +11,7 @@ import { TurnDriver, TurnError } from '../src/orchestration/turn-driver.js'
 // A fake SessionManager: EventEmitter + getSession returning a fake session
 // whose sendMessage/interrupt we can observe. We drive events manually.
 function mkStub() {
-  const sm = new EventEmitter()
+  const sm = installTurnDrivenRegistry(new EventEmitter())
   const sessions = new Map()
   sm.getSession = (id) => sessions.get(id) || null
   const addSession = (id, { sendImpl } = {}) => {

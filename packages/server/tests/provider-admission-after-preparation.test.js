@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 /**
  * #9242 — a scheduled prompt's admission is re-asked AFTER a provider's asynchronous
@@ -99,7 +100,7 @@ describe('SDK: admission is re-asked after the project-settings verification (#9
 
   it('through the real TurnDriver: the turn rejects NOT_ADMITTED and nothing is dispatched', async () => {
     const { session, queries } = sdkSession()
-    const sm = new EventEmitter()
+    const sm = installTurnDrivenRegistry(new EventEmitter())
     sm.getSession = () => ({ session })
     for (const ev of ['result', 'error', 'stopped']) session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))
     const driver = new TurnDriver({ sessionManager: sm })

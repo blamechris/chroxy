@@ -1306,6 +1306,17 @@ export class SessionManager extends EventEmitter {
     return entry ? entry.session : null
   }
 
+  /**
+   * #9184: is the session behind this mailbox id occupied by a TurnDriver? The
+   * mailbox wake is a typed line into a live PTY; into a driven session it would
+   * interleave with the driven turn exactly as a CI wake would (#8327). False for
+   * an unknown id (the caller already reports `no-session` for that).
+   */
+  isAgentCommIdTurnDriven(agentCommId) {
+    const sessionId = typeof agentCommId === 'string' ? this._agentCommIds.get(agentCommId) : undefined
+    return sessionId ? this.isTurnDriven(sessionId) : false
+  }
+
   /** Max recent mailbox delivery events retained for the Control Room snapshot. */
   static MAILBOX_EVENT_LIMIT = 50
 

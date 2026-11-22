@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 /**
  * #8558: a Stop the user asked for ends a claude-tui turn as a quiet `stopped`
@@ -296,7 +297,7 @@ describe('claude-tui: a requested Stop is a quiet stopped, not an error (#8558)'
   })
 
   async function driveWithTurnDriver() {
-    const sm = new EventEmitter()
+    const sm = installTurnDrivenRegistry(new EventEmitter())
     sm.getSession = (id) => (id === 'sess-8558' ? { session } : null)
     for (const name of ['stream_delta', 'message', 'result', 'error', 'stopped', 'stream_end']) {
       session.on(name, (data) => sm.emit('session_event', { sessionId: 'sess-8558', event: name, data }))
