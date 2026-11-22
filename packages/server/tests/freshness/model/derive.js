@@ -324,7 +324,7 @@ function newItem(r) {
     episode: 0,
     open: false,
     state: 'none',
-    counters: { presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 },
+    counters: { presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0, round_shows: 0 },
     usedRefs: new Set(),
     openedBy: null,
     fingerprint: null,
@@ -354,6 +354,8 @@ function newItem(r) {
     asks: new Map(),
     promptLive: false,
     showDue: false,
+    // Shows still owed to a prompt round that joined with the counted shows used.
+    roundOwed: 0,
     history: [],
   }
 }
@@ -393,7 +395,7 @@ function foldSurface(state, r) {
     const a = state.attempts.get(b.attempt_id)
     if (a) a.hasOutcome = true
     // Only when an attempt does not use up its step does the outcome apply it.
-    if (!state.policy.attemptUsesOrdinal && a) applyStep(it, a.body, a.at, r.seq)
+    if (!state.policy.attemptUsesOrdinal && a) applyStep(it, a.body, a.at, r.seq, state.policy)
     return
   }
   if (b.phase === 'attempt') {
@@ -402,7 +404,7 @@ function foldSurface(state, r) {
     // confirmed.
     if (!state.policy.attemptUsesOrdinal) return
   }
-  applyStep(it, b, ms(r.ts), r.seq)
+  applyStep(it, b, ms(r.ts), r.seq, state.policy)
   if (b.step === 'updated' && b.carry && b.carry.op === 'carry') {
     const refs = state.carriedRefs.get(b.carry.attention_item) ?? new Set()
     refs.add(b.carry.opened_by)
@@ -423,9 +425,9 @@ function foldSurface(state, r) {
   }
 }
 
-function applyStep(it, b, at, seq) {
+function applyStep(it, b, at, seq, policy) {
   if ('presentation' in b) {
-    it.counters = { presentation: b.presentation, shows_counted: b.shows_counted, reminders_used: b.reminders_used, returns_used: b.returns_used }
+    it.counters = { presentation: b.presentation, shows_counted: b.shows_counted, reminders_used: b.reminders_used, returns_used: b.returns_used, round_shows: b.round_shows ?? 0 }
   }
   switch (b.step) {
     case 'queued':
@@ -457,11 +459,19 @@ function applyStep(it, b, at, seq) {
       it.carriedEver = new Set()
       it.carryRef = null
       it.showDue = false
+      it.roundOwed = 0
       it.promptLive = false
       if (b.asks) setAsks(it, b.asks)
       break
     case 'shown':
       it.showDue = false
+      if (b.round) {
+        it.roundOwed = Math.max(0, it.roundOwed - 1)
+        // A round's show leaves the item's state and clock as they were.
+        if (!policy?.roundShowTakesSlot) break
+      } else {
+        it.roundOwed = 0
+      }
       it.state = 'active'
       it.preemptedBy = null
       it.lastShowAt = at
@@ -508,9 +518,16 @@ function applyStep(it, b, at, seq) {
         if (b.ask.op === 'join') {
           it.usedRefs.add(b.ask.opened_by)
           it.showDue = Boolean(b.show_now)
+          if (b.round_owed) {
+            it.roundOwed = b.round_owed
+            it.roundSince = at
+          }
           // The show a new ask is owed is a counted one, whatever deferral came before.
           if (b.counted_next) it.afterDeferral = false
         }
+        // DESIGN-GAP: a show owed to a round is dropped when that round's
+        // prompt ask ends before it is shown: the round it was for is over.
+        if (b.ask.op === 'end' && b.ask.kind === 'prompt') it.roundOwed = 0
       }
       if (b.requeue) {
         it.state = 'queued'
