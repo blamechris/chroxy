@@ -760,7 +760,9 @@ export class CliSession extends BaseSession {
     const rl = createInterface({ input: child.stdout })
     this._rl = rl
 
-    rl.on('line', (line) => this._handleStdoutLine(line))
+    // #9267: tag every line with the child that wrote it, so a child the Stop
+    // safety timer retired cannot feed its late reply into the session.
+    rl.on('line', (line) => this._handleStdoutLine(line, child))
 
     // Log stderr for debugging
     const stderrRL = createInterface({ input: child.stderr })
@@ -1351,8 +1353,13 @@ export class CliSession extends BaseSession {
    * a real readline interface.
    *
    * @param {string} line
+   * @param {object} [child] #9267: the child that wrote the line. When given and
+   *   it is no longer the session's current child (the Stop safety timer retired
+   *   it, or a respawn replaced it) the line is dropped before it can touch the
+   *   turn state of whatever the session is doing now.
    */
-  _handleStdoutLine(line) {
+  _handleStdoutLine(line, child) {
+    if (child && this._child !== child) return
     if (!line.trim()) return
 
     let data
@@ -2742,6 +2749,33 @@ export class CliSession extends BaseSession {
     }
   }
 
+  /**
+   * #9267: the Stop safety timer fired and the child had not answered SIGINT.
+   * The turn is being reported as stopped, so the child is abandoned like a
+   * respawn abandons one, minus the respawn: its readlines are closed, it stops
+   * being `_child` (so its stdout lines and its eventual `close` are ignored --
+   * no second result, no stop marker, no "exited unexpectedly"), it is
+   * SIGTERMed with its tree and SIGKILLed after a grace, and the session is
+   * left as a Stop leaves it, revivable by the next send (`_stoppedByUser`).
+   */
+  _retireUnresponsiveChild(child) {
+    this._cleanupReadlines()
+    this._processReady = false
+    this._child = null
+    this._stoppedByUser = true
+    ;(this._log || log).warn('Retiring the claude process that ignored the Stop signal; the next message starts a fresh one')
+    this._expirePendingPermissions('Permission request expired (the session process was stopped before it could be answered)')
+    this._completeAgents()
+    let closed = false
+    const forceKillTimer = setTimeout(() => {
+      if (closed) return
+      try { forceKill(child) } catch {}
+    }, 3000)
+    if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
+    child.on('close', () => { closed = true; clearTimeout(forceKillTimer) })
+    killProcessTree(child)
+  }
+
   /** Interrupt the current message (send SIGINT to child process) */
   interrupt() {
     // #5936: a deliberate Stop cancels the owner's queued follow-ups (cancel,
@@ -2781,6 +2815,7 @@ export class CliSession extends BaseSession {
       clearTimeout(this._interruptTimer)
       this._interruptTimer = null
     }
+    const interruptedChild = this._child
     this._interruptTimer = setTimeout(() => {
       this._interruptTimer = null
       // #4602: if the child survived SIGINT (claude only aborted the turn),
@@ -2790,6 +2825,11 @@ export class CliSession extends BaseSession {
       if (this._isBusy) {
         // #4828: session-scoped.
         ;(this._log || log).warn('Interrupt safety timeout — force-clearing busy state')
+        // #9267: the child ignored SIGINT and the turn is being reported as
+        // stopped. Retire THAT child first, so nothing it says later can grow a
+        // reply onto the ended turn, and so a send from the result listener
+        // starts a fresh child instead of writing to this one.
+        if (this._child === interruptedChild) this._retireUnresponsiveChild(interruptedChild)
         this._emitInterruptedTurnResult(0, 'user_stop')
       }
     }, 5000)
