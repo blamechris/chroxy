@@ -110,3 +110,62 @@ describe('App wiring of the early-interrupt gate (#8703)', () => {
     expect(interrupts()).toHaveLength(0)
   })
 })
+
+describe('one press, one Stop (#9243)', () => {
+  const withOutput = () => seed([msg('u1', 'user_input'), msg('r1', 'response', 'hello')], 'r1')
+  const cmdDotEvent = (repeat: boolean) => {
+    const ev = new KeyboardEvent('keydown', { key: '.', metaKey: true, repeat, bubbles: true, cancelable: true })
+    act(() => { window.dispatchEvent(ev) })
+    return ev
+  }
+
+  it('one Escape on the composer sends one frame', () => {
+    withOutput()
+    render(<App />)
+    fireEvent.keyDown(composer(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('one Cmd+. sends one frame', () => {
+    withOutput()
+    render(<App />)
+    cmdDotEvent(false)
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('a held Escape sends one frame', () => {
+    withOutput()
+    render(<App />)
+    fireEvent.keyDown(composer(), { key: 'Escape' })
+    fireEvent.keyDown(composer(), { key: 'Escape', repeat: true })
+    fireEvent.keyDown(composer(), { key: 'Escape', repeat: true })
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('a held Cmd+. sends one frame', () => {
+    withOutput()
+    render(<App />)
+    cmdDotEvent(false)
+    cmdDotEvent(true)
+    cmdDotEvent(true)
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('a repeat Escape does not dismiss the confirm dialog; a fresh one does', async () => {
+    seed([msg('u1', 'user_input'), msg('thinking', 'thinking', '')])
+    render(<App />)
+    fireEvent.keyDown(composer(), { key: 'Escape' })
+    expect(screen.getByText('Stop this turn?')).toBeInTheDocument()
+    // Let the Modal's open stamp pass so the repeat is not swallowed by the in-flight guard.
+    await new Promise((r) => setTimeout(r, 20))
+    const target = (document.activeElement && document.activeElement !== document.body
+      ? document.activeElement
+      : screen.getByRole('dialog').querySelector('button')) as HTMLElement
+    fireEvent.keyDown(target, { key: 'Escape', repeat: true })
+    expect(screen.getByText('Stop this turn?')).toBeInTheDocument()
+    expect(interrupts()).toHaveLength(0)
+    fireEvent.keyDown(target, { key: 'Escape' })
+    expect(screen.queryByText('Stop this turn?')).toBeNull()
+    expect(interrupts()).toHaveLength(0)
+  })
+})
