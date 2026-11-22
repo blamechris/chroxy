@@ -745,9 +745,12 @@ function onTickClosed(mon, h, r) {
   // from this monitor's own account, until it is made, its prompt ask ends,
   // or an ordinary show serves it. At every tick's end an item still owed one
   // must be waiting behind another item that holds the slot: one that held it
-  // before this tick filled the slot, or, for a queued item, one ahead of it
-  // in the queue that took it now. Holding the slot itself, or with the slot
-  // free, it should have been shown.
+  // before this tick filled the slot, or, for a queued item, one that took it
+  // now. The order between the two is not checked here: a queued item passes
+  // whenever another item holds the slot, on the ground that the model shows
+  // or exhausts everything ahead of the taker (the ordering checks cover a
+  // model that does not). Holding the slot itself, or with the slot free, it
+  // should have been shown.
   const tickTime = Date.parse(r.ts)
   for (const it of mon.items.values()) {
     if (!it.open || it.roundOwed === 0) continue

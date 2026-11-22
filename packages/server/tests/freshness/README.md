@@ -381,7 +381,7 @@ ledger and the simulated world for inspection.
 | I1a | Counted shows never exceed the limit in force when each is made; beyond it, an owner item is shown only once for each prompt round that joined after the limit was used, as the monitor counts the rounds itself |
 | I1b | At most two reminders per episode |
 | I1c | At most one return per episode |
-| I1d | Shows never exceed counted shows plus the owner's deferrals plus the rounds' shows; and the counters every record stores (presentation, counted shows, round shows, reminders, returns) are the monitor's own counts |
+| I1d | Shows never exceed counted shows plus the owner's deferrals plus the rounds' shows; and the counters every record stores (presentation, counted shows, round shows, reminders, returns) equal the values on the episode's opening record plus the monitor's own counts since; a wrong value on the opening record itself is not seen here |
 | I2 | At most one item active; the item holding the slot in the model is the one the ledger account says holds it (a round's show takes no slot); and a round's show is made only by the item holding the slot or while it is free |
 | I2b | An acknowledged item is moved on at the next tick of its source |
 | I2c | The first show after a preemption is not the preempted item |
@@ -429,7 +429,8 @@ model's own join record, and I10 is what makes sure a live ask is never left
 off the item instead. Which shows are a prompt round's is the monitor's own
 count: a round is a prompt ask joining while its own count of counted shows
 is at the limit, and a show made while it owes such a round its show is the
-round's; it never reads the model's `round_shows` or `round` marks. It does
+round's; it never takes the model's `round_shows` or `round` marks as input,
+though I1d compares the stored `round_shows` with its own count. It does
 take each owner deferral's time from the model's own `deferred` record
 (`until`), because no other record carries the time the owner asked for. A
 model that acted on another time than it recorded would go unseen while no
