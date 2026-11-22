@@ -375,3 +375,40 @@ it('a spend-bearing error followed by a result in the same frame is delivered on
   assert.equal(f.calls[0].terminalEvent, 'error')
   assert.equal(f.totals().effectiveUsd, 0.6)
 })
+
+// --- one spend predicate shared by the driver and the ledger (G1) ----------
+
+for (const [label, usage] of [['total_tokens only', { total_tokens: 5 }], ['a fractional token count', { input_tokens: 0.4 }]]) {
+  it(`a drain-ending result whose usage is ${label} is no spend to the driver either: a same-frame spend result is still delivered`, async (t) => {
+    const f = fixture(t, { turnTimeoutMs: 15 })
+    const p = f.drive()
+    await timedOut(f, p)
+    f.emit('result', { cost: null, usage })
+    assert.equal(f.calls.length, 0)
+    f.emit('result', terminal({ interrupted: true }))
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.totals().effectiveUsd, 0.6)
+  })
+}
+
+it('a string token count the ledger coerces is spend to the driver too: delivered and recorded once', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('result', { cost: null, usage: { output_tokens: '7' } })
+  f.emit('result', terminal({ cost: 99 }))
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.totals().outputTokens, 7)
+})
+
+it('a no-spend result, a no-spend error and then a spend result in one drain frame give exactly one call', async (t) => {
+  const f = fixture(t, { turnTimeoutMs: 15 })
+  const p = f.drive()
+  await timedOut(f, p)
+  f.emit('result', { cost: null, usage: null })
+  f.emit('error', { message: 'non-fatal', fatal: false })
+  f.emit('result', terminal({ interrupted: true }))
+  f.emit('result', terminal({ cost: 99 }))
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.totals().effectiveUsd, 0.6)
+})

@@ -37,7 +37,7 @@ import {
 } from './role-prompts.js'
 import { createGitOps } from './git-ops.js'
 import { TurnError } from './turn-driver.js'
-import { normalizeUsage } from './run-record.js'
+import { hasSpend } from './run-record.js'
 import { recordToRunSummary, recordToRunDetail, gateToWire } from './to-wire.js'
 import { buildRunReport, renderReportMarkdown } from './run-report.js'
 
@@ -833,7 +833,6 @@ export class OrchestrationManager extends EventEmitter {
     }
     // Skip null/empty synthetic stalls using the same token normalization as the
     // ledger reducer.
-    const hasSpend = (result) => !!result && (Number.isFinite(result.cost) || Object.values(normalizeUsage(result.usage)).some((n) => n > 0))
     while (attempt <= this._cfg.maxParseRetries) {
       let turn
       try {

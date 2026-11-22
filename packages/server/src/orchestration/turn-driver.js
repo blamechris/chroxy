@@ -77,6 +77,8 @@
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */
 
+import { hasSpend } from './run-record.js'
+
 export const MAX_ACCUM_BYTES = 2 * 1024 * 1024
 export const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000
 // After a timeout+interrupt the mutex is held in a "draining" state until the
@@ -99,13 +101,6 @@ function projectTerminalUsage(data) {
     numTurns: Number.isFinite(data?.numTurns) ? data.numTurns : null,
     apiDurationMs: Number.isFinite(data?.apiDurationMs) ? data.apiDurationMs : null,
   }
-}
-
-// Whether a projected terminal payload reports any spend: a finite cost (zero and
-// negative included) or any positive token count. Mirrors the ledger's own gate.
-function hasAccounting(p) {
-  if (Number.isFinite(p.cost)) return true
-  return !!p.usage && typeof p.usage === 'object' && Object.values(p.usage).some((n) => Number.isFinite(n) && n > 0)
 }
 
 export class TurnError extends Error {
@@ -445,6 +440,8 @@ export class TurnDriver {
   // hand-off happens, so it can never see the next turn's events.
   _armLate(ctx) {
     if (!ctx.onLateUsage) return
+    // Already armed this frame: its one nextTick clear is queued; do not queue another.
+    if (this._late.get(ctx.sessionId) === ctx) return
     this._late.set(ctx.sessionId, ctx)
     process.nextTick(() => { if (this._late.get(ctx.sessionId) === ctx) this._late.delete(ctx.sessionId) })
   }
@@ -454,7 +451,7 @@ export class TurnDriver {
     const projected = projectTerminalUsage(data)
     // A terminal event with no spend does not use up the single delivery: a
     // spend-bearing result in the same frame is still owed to this turn.
-    if (!hasAccounting(projected)) { this._armLate(ctx); return }
+    if (!hasSpend(projected)) { this._armLate(ctx); return }
     // Exactly once: delivery closes the same-frame slot and the drain-ending event
     // removed the ctx from _active, so no later event can reach this ctx again.
     if (this._late.get(ctx.sessionId) === ctx) this._late.delete(ctx.sessionId)

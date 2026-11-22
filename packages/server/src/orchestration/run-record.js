@@ -68,6 +68,17 @@ export function normalizeUsage(usage) {
   }
 }
 
+/**
+ * Whether a projected terminal payload reports any spend: a finite cost (zero and
+ * negative included) or any token count the ledger would fold (via normalizeUsage).
+ * The ONE spend predicate: the turn driver (which decides whether a terminal event
+ * uses up the single late-usage delivery) and the manager (which decides whether to
+ * record) must agree, or spend is dropped or never delivered (#9147).
+ */
+export function hasSpend(result) {
+  return !!result && (Number.isFinite(result.cost) || Object.values(normalizeUsage(result.usage)).some((n) => n > 0))
+}
+
 // Fold one turn's numbers into a cell in place. `cost` is the provider-reported
 // signed cost (null/undefined = unknown); `pricedCostUsd` is the server-derived
 // fallback used ONLY when cost is unknown.
