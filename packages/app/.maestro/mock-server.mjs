@@ -39,6 +39,35 @@ let showWebFetchCounter = 0
 // rationale as `show-todos` — repeated invocations need a unique
 // messageId so React keys stay independent.
 let showCompactionCounter = 0
+// Per-folder trust fixture: the digest the mock's `folder_trust_state` carries
+// (`trust_folder` is honoured only when it echoes this one, like the daemon), and
+// the current status so a trust / untrust round trip is observable.
+const FOLDER_TRUST_DIGEST = 'f'.repeat(64)
+let folderTrustStatus = 'untrusted'
+function folderTrustStateFrame(sessionId) {
+  const frame = {
+    type: 'folder_trust_state',
+    sessionId,
+    status: folderTrustStatus,
+    appliesFrom: 'next_turn',
+  }
+  if (folderTrustStatus === 'trusted') return frame
+  return {
+    ...frame,
+    summary: {
+      files: [{ path: '/mock/project/.mcp.json' }],
+      mcpServers: [{ file: '/mock/project/.mcp.json', name: 'mock-mcp-server', command: 'npx', args: ['-y', 'mock-mcp'] }],
+      hooks: [{ file: '/mock/project/.claude/settings.json', event: 'PreToolUse', commands: ['./mock-check.sh'] }],
+      statusLine: [],
+      enabledPlugins: [],
+      counts: { agents: 0, skills: 0, commands: 0 },
+      warnings: [],
+      hasCommandBearingFiles: true,
+      untrustable: false,
+    },
+    digest: FOLDER_TRUST_DIGEST,
+  }
+}
 
 // #5468: connection counter — incremented once per `auth` message, used only
 // for the marker's text ("mock reconnect #N") + the [mock] Auth #N log line.
@@ -914,6 +943,18 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // Per-folder trust: trigger phrase 'show-folder-trust' resets the mock folder
+        // to untrusted and emits the `folder_trust_state` the daemon sends (a summary
+        // with one MCP server, one hook and one settings file, plus its digest) for
+        // the active session, so the banner, the review dialog and the
+        // trust / stop-trusting round trip can run end-to-end. `trust_folder` and
+        // `untrust_folder` are answered below.
+        if (text.trim() === 'show-folder-trust') {
+          folderTrustStatus = 'untrusted'
+          secureSend(ws, folderTrustStateFrame('mock-sess-1'))
+          break
+        }
+
         // #4260: trigger phrase 'show-bash-partial' emits a streaming
         // Bash `tool_use` with a `toolInputPartial` that exercises the
         // mobile ToolBubble's #4243 field-priority extraction path on
@@ -1305,6 +1346,24 @@ wss.on('connection', (ws) => {
         // `{ type: 'permission_response', requestId, decision }`.
         console.log(`[mock] permission_response: requestId="${msg.requestId || ''}" decision="${msg.decision || ''}"`)
         break
+
+      // Per-folder trust: answer like the daemon. A trust request is honoured only
+      // when it carries the digest of the state the mock sent; the reply comes first,
+      // then the new state frame.
+      case 'trust_folder':
+      case 'untrust_folder': {
+        const sessionId = msg.sessionId || 'mock-sess-1'
+        const isTrust = msg.type === 'trust_folder'
+        console.log(`[mock] ${msg.type}: session="${sessionId}" digest="${msg.digest || ''}" requestId="${msg.requestId || ''}"`)
+        if (isTrust && msg.digest !== FOLDER_TRUST_DIGEST) {
+          secureSend(ws, { type: 'folder_trust_result', sessionId, ok: false, status: folderTrustStatus, error: 'This folder changed since you reviewed it', requestId: msg.requestId })
+          break
+        }
+        folderTrustStatus = isTrust ? 'trusted' : 'untrusted'
+        secureSend(ws, { type: 'folder_trust_result', sessionId, ok: true, status: folderTrustStatus, requestId: msg.requestId })
+        secureSend(ws, folderTrustStateFrame(sessionId))
+        break
+      }
 
       case 'request_session_context':
         secureSend(ws, {

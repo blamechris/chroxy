@@ -58,7 +58,7 @@ export type {
   DiffHunkLine,
 } from '@chroxy/store-core';
 
-import type { PermissionEditedInput } from '@chroxy/store-core';
+import type { PermissionEditedInput, FolderTrustEntry } from '@chroxy/store-core';
 // Import for local use in SessionState/ConnectionState definitions below
 import type {
   AgentInfo,
@@ -311,6 +311,16 @@ export interface SessionState extends BaseSessionState {
   // = not reported yet (renders as "unknown"); `undefined` = this provider
   // makes no such report.
   effectiveThinkingLevel?: ThinkingLevel | null;
+  // Per-folder trust of this session's project settings. `folderTrust` is the
+  // daemon's last `folder_trust_state` for the session (null until one arrives;
+  // the daemon re-sends on ready, subscribe and switch). It lives on the session,
+  // so a removed session takes it along. The request marker and the failure text
+  // belong to a trust change this client sent. The marker is cleared when the
+  // socket closes, because the reply can never arrive on a dead socket; the
+  // failure text stays until the next attempt or a successful reply.
+  folderTrust: FolderTrustEntry | null;
+  folderTrustPendingRequestId: string | null;
+  folderTrustError: string | null;
 }
 
 export interface SessionNotification {
@@ -619,6 +629,12 @@ export interface MessageInputActions {
   // `append_memory_result`. Not offline-queued; returns false when disconnected.
   appendMemory: (note: string) => 'sent' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
+  // Per-folder trust of a session's project settings. `digest` is the one from the
+  // snapshot the owner reviewed. Both return false when nothing was sent: the socket
+  // is not open, a change for that session is already in flight, or the send failed.
+  // The daemon decides (primary token only) and answers with folder_trust_result.
+  trustFolder: (sessionId: string, digest: string) => boolean;
+  untrustFolder: (sessionId: string) => boolean;
   // #5938 (#5943) — cancel one queued follow-up by its clientMessageId before
   // it flushes. Returns false (refused) while disconnected; never offline-queued.
   sendCancelQueued: (clientMessageId: string, sessionId?: string) => 'sent' | false;

@@ -194,7 +194,27 @@ export const MUTANTS = {
   // A condition handed back starts its attention episode with fresh counters.
   I12: withPolicy({ inheritCountersOnHandover: false }),
   // An ask that joins an open owner item only changes its content.
-  I13: withPolicy({ newAskShows: () => false }),
+  I13: withPolicy({ newAskShows: () => false, promptRoundShows: () => false }),
+  // A prompt round after the limit only changes the content (the earlier rule).
+  'I13.round': withPolicy({ promptRoundShows: () => false }),
+  // A declared ask joining after the limit is given a round's show too.
+  'I13.declared': withPolicy({ promptRoundShows: () => true }),
+  // A prompt round earns two shows.
+  'I1a.round2': withPolicy({ showsPerRound: 2 }),
+  // A round's show restores the item's whole limit: once one is made, the
+  // item can be shown, and a new ask counted, as if no counted show were used.
+  'I1a.restore': withPolicy({
+    canShow: (item, config) => item.afterDeferral || (item.counters.round_shows ?? 0) > 0 || item.counters.shows_counted < config.surface.max_presentations,
+    newAskShows: (item, config) => (item.counters.round_shows ?? 0) > 0 || item.counters.shows_counted < config.surface.max_presentations,
+  }),
+  // A round's show takes the slot like an ordinary show.
+  'I2.round': withPolicy({ roundShowTakesSlot: true }),
+  // A round's show made without waiting for the slot.
+  'I2.slotless': withPolicy({ roundWaitsForSlot: false }),
+  // A round that had to wait past its own tick is never shown.
+  'I13.wait': withPolicy({ roundStillOwed: (item, now) => now <= item.roundSince }),
+  // A round's show is also counted against the limit.
+  'I1d.counted': withPolicy({ roundShowCounters: (c) => ({ ...c, presentation: c.presentation + 1, shows_counted: c.shows_counted + 1, round_shows: (c.round_shows ?? 0) + 1 }) }),
   // An ask that joins is shown even with the item's counted shows used.
   'I13.none': withPolicy({ newAskShows: () => true }),
   // The owner item closes when its first ask ends, though another is live.

@@ -1,0 +1,73 @@
+appId: com.blamechris.chroxy
+name: Folder trust banner, review and trust round trip
+---
+
+# Per-folder trust of project settings (mobile parity for the dashboard's
+# FolderTrustBanner). End-to-end coverage for: the "not loaded" strip, the review
+# dialog listing what would run, trusting the folder, and stopping trusting it.
+#
+# Trigger: 'show-folder-trust' user input -> mock-server.mjs resets the mock folder
+# to untrusted and emits a `folder_trust_state` for the active session (one MCP
+# server, one hook, one settings file, plus a digest). `trust_folder` /
+# `untrust_folder` are answered with `folder_trust_result` and a new state frame, so
+# the flow drives the real send path. The fixture seeding pattern is documented in
+# AGENTS.md -> "Fixture Seeding for Structured Renderers".
+#
+# Tested devices: iPhone 16 Pro (iOS 18.6), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+# Make sure Chat tab is selected
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-folder-trust"
+- tapOn:
+    id: "chat-send-button"
+
+# Untrusted: the strip appears with Review.
+- extendedWaitUntil:
+    visible:
+      id: "folder-trust-banner"
+    timeout: 10000
+- assertVisible:
+    id: "folder-trust-review"
+
+# Review opens the dialog from a snapshot of what would run.
+- tapOn:
+    id: "folder-trust-review"
+- extendedWaitUntil:
+    visible:
+      id: "folder-trust-dialog"
+    timeout: 5000
+- assertVisible:
+    id: "folder-trust-mcp-server"
+- assertVisible:
+    id: "folder-trust-warning"
+- assertVisible:
+    id: "folder-trust-confirm"
+- takeScreenshot: folder-trust-dialog
+
+# Trust: the daemon answers, the state flips to trusted and the dialog closes.
+- tapOn:
+    id: "folder-trust-confirm"
+- extendedWaitUntil:
+    visible:
+      id: "folder-trust-trusted"
+    timeout: 10000
+- assertVisible:
+    id: "folder-trust-untrust"
+- takeScreenshot: folder-trust-trusted
+
+# Stop trusting: back to the untrusted strip.
+- tapOn:
+    id: "folder-trust-untrust"
+- extendedWaitUntil:
+    visible:
+      id: "folder-trust-banner"
+    timeout: 10000

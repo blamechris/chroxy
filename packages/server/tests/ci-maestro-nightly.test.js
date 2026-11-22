@@ -27,7 +27,7 @@ const expectedInventory = [
   'ask-user-question-multi.yaml', 'ask-question-other-freeform.yaml',
   'chat-multi-question.yaml', 'key-exchange.yaml',
   'permission-disconnected-noop.yaml', 'diff-comment.yaml',
-  'compaction-marker.yaml', 'chat-composer-above-keyboard.yaml'
+  'compaction-marker.yaml', 'folder-trust.yaml', 'chat-composer-above-keyboard.yaml'
 ]
 
 function fixture() {
@@ -649,7 +649,10 @@ printf '%s\\n' '${output}'
       assert.equal(result.status, 1, result.stderr)
       assert.deepEqual(tracedFlows(f.trace), ['manual-connect.yaml'])
       assert.ok(result.stdout.includes('Stopping after 1 failed flows; remaining inventory not run.'))
-      assert.ok(result.stdout.includes(`1 attempted of 13 selected; 12 not run; ${expectedInventory.length} inventoried; shard 1/2`))
+      // Shard index 1 of 2 takes the odd inventory indices (index % 2 == 1), which is floor(n / 2) of them, so the counts follow it
+      // instead of a literal that goes stale each time a flow is added.
+      const selected = Math.floor(expectedInventory.length / 2)
+      assert.ok(result.stdout.includes(`1 attempted of ${selected} selected; ${selected - 1} not run; ${expectedInventory.length} inventoried; shard 1/2`))
     } finally { rmSync(f.dir, { recursive: true, force: true }) }
   })
 

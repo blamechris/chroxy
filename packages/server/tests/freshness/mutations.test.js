@@ -15,6 +15,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { withPolicy } from './model/policy.js'
+import { makeConfig } from './model/config.js'
+import { itemIds } from './model/keys.js'
+import { planConfig, run } from './model/reconciler.js'
 import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
 import { runSequence } from './helpers/sequence.js'
@@ -24,7 +27,7 @@ import * as W from './helpers/world.js'
 const SEEDS = {
   I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, 'I2c.front': 3681, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, 'I5.content': 76, I6: 271,
   I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6,
-  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 18,
+  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 30, 'I13.round': 18, 'I13.declared': 66, 'I1a.round2': 18, 'I1a.restore': 18, 'I2.round': 59, 'I2.slotless': 59, 'I13.wait': 63, 'I1d.counted': 18,
   ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 70, reReadOnResume: 4, raiseBesideOwnerBlock: 7, twoOwnerItems: 6,
   onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
 }
@@ -129,6 +132,76 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     }
     assert.equal(run(), null)
     assert.equal(run(MUTANTS.I2c), 'I2c')
+  })
+
+  // The same crash and late replay, with a third item owed a prompt round's
+  // show: exhausted with its limit used, its prompt's deadline far ahead, so
+  // it sorts at the head. A round's show takes no slot, so it must not hide
+  // the still-queued preemptor from the preemptor-first rule.
+  it('I2c (scenario): a round owed to an item at the head of the order does not let the preempted item be shown straight back', () => {
+    const surface = (max) => ({ max_presentations: max, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] })
+    const build = (policy) => {
+      const h = createHarness({ config: { per_source: { chroxy: 15 }, surface: surface(1) }, ...(policy ? { policy } : {}) })
+      const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+      const add = (id) => W.addSession(h.world, { source: 'chroxy', native_id: id, scope: 'r' })
+      const c = add('c')
+      const a = add('a')
+      const b = add('b')
+      const cid = itemIds.owner(h.world.sessions[c].session)
+      const at = (m) => T0 + m * MIN
+      const tick = (m) => {
+        h.tick('chroxy', at(m))
+        checkStep(mon, h)
+      }
+      W.author(h.world, c, T0, { state: 'blocked', blocked_on: 'c', owner: OWNER })
+      W.author(h.world, b, T0, { state: 'running', next: 'b' })
+      tick(15)
+      h.owner(cid, 'done', 'm1', { at: at(16) })
+      tick(30)
+      h.owner(cid, 'done', 'm2', { at: at(31) })
+      tick(45)
+      W.author(h.world, a, at(46), { state: 'blocked', blocked_on: 'a', owner: OWNER })
+      tick(60)
+      // c's round: owed while a holds the slot.
+      W.raisePrompt(h.world, c, at(61), 600 * 60)
+      tick(75)
+      // The limit raised, so a can be shown again; then b's prompt, whose
+      // deadline (+107) comes before a's first reminder (+120).
+      run(h.ctx, planConfig(h.ctx, { config: makeConfig({ owner_name: OWNER, per_source: { chroxy: 15 }, surface: surface(3) }), now: at(76) }))
+      checkStep(mon, h)
+      W.raisePrompt(h.world, b, at(77), 30 * 60)
+      return { h, mon, cid }
+    }
+    const run1 = (policy) => {
+      const slotStart = T0 + 90 * MIN
+      for (let n = 0; n < 120; n++) {
+        const { h, mon, cid } = build(policy)
+        assert.deepEqual([h.item(cid).state, h.item(cid).roundOwed], ['exhausted', 1])
+        try {
+          h.tick('chroxy', slotStart, { crashAfter: n, slotStart })
+          continue
+        } catch (e) {
+          if (!(e instanceof Crash)) throw e
+        }
+        const surf = h.records('surface')
+        const preempted = surf.some((r) => r.body.step === 'preempted')
+        const shown = surf.some((r) => r.body.step === 'shown' && r.body.phase === 'attempt' && r.session.native_id === 'b')
+        if (!preempted || shown) continue
+        try {
+          checkStep(mon, h, { complete: false })
+          h.restart()
+          h.tick('chroxy', T0 + 110 * MIN, { slotStart })
+          checkStep(mon, h)
+        } catch (e) {
+          if (e instanceof InvariantError) return e.id
+          throw e
+        }
+        return null
+      }
+      throw new Error('the crash point between the preemption and the show was not found')
+    }
+    assert.equal(run1(), null)
+    assert.equal(run1(MUTANTS.I2c), 'I2c')
   })
 
   it('I7h (fault): a planner that never writes an investigation\'s close record is caught', () => {

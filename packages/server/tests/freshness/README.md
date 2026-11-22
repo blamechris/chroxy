@@ -138,8 +138,9 @@ prompt was answered); the session is still waiting on the owner for it, so it
 must have an owner item and opens an ask of its own. Here keeping every
 pending prompt in front of the owner comes before never asking twice.
 
-Four counters are stored on every surface record: `presentation`,
-`shows_counted`, `reminders_used`, `returns_used`. The transition table:
+Five counters are stored on every surface record: `presentation`,
+`shows_counted`, `reminders_used`, `returns_used`, and `round_shows` (the
+shows prompt rounds earned after an owner item's limit was used). The transition table:
 
 | State | Event | Step | Sends | Next |
 |---|---|---|---|---|
@@ -157,8 +158,9 @@ Four counters are stored on every surface record: `presentation`,
 | any open | closing evidence | resolved | no | closed |
 | any open | dismissal, lapse, superseded or merged | withdrawn | no | closed |
 | any open | content changes (a new report or prompt within a live ask, or a carried condition added or dropped) | updated | no | same; from exhausted, queued if a counted show is left |
-| owner, open | an ask joins | updated | no | see "The owner item"; a counted show is owed |
+| owner, open | an ask joins | updated | no | see "The owner item"; a counted show, a round's show, or none is owed |
 | owner, active or acknowledged | an ask joined with a counted show left | shown | yes | active |
+| owner, open | a prompt round joined with no counted show left, the slot held by it or free | shown, once | yes | unchanged |
 | owner, open | an ask ends while another is live | updated | no | same |
 | owner, open | its last ask ends | resolved, or withdrawn for a lapse | no | closed |
 
@@ -197,20 +199,23 @@ or both.
 - **A new ask is a reason to show the item again.** An ask of the other kind
   joining an open item (a prompt joining a declared block, a declared block
   joining a prompt, or a prompt arriving again while the declared block keeps
-  the item open) is owed a counted show from the item's own limit. What that
-  means depends on the item's state:
+  the item open) is owed a show. While the item has a counted show left it
+  is a counted one from the item's own limit. Once they are used, a prompt
+  joining (a prompt round) is still owed one round's show, and a declared
+  block joining is owed none. What that means depends on the item's state:
 
-  | State when the ask joins | With a counted show left | With none left |
-  |---|---|---|
-  | active (holding the slot) | shown again at once | content only |
-  | acknowledged, awaiting its verification tick | shown again at once; the acknowledgment applied to the earlier content and is not verified | content only; verified at the tick as usual |
-  | queued behind another item, preempted, or back from expiry | keeps its place; its next show is counted | content only |
-  | deferred by the owner | queued again: the deferral was about the earlier content | content only; the deferral stands |
-  | exhausted | queued again | content only; stays exhausted and listed |
+  | State when the ask joins | With a counted show left | None left: a prompt round | None left: a declared block |
+  |---|---|---|---|
+  | active (holding the slot) | shown again at once | shown once, at once; still holding the slot | content only |
+  | acknowledged, awaiting its verification tick | shown again at once; the acknowledgment applied to the earlier content and is not verified | shown once, at once; still acknowledged, verified at its tick as usual | content only; verified at the tick as usual |
+  | queued behind another item, preempted, or back from expiry | keeps its place; its next show is counted | shown once when the slot is free, in its own place; then exhausted at the slot | content only |
+  | deferred by the owner | queued again: the deferral was about the earlier content | shown once when the slot is free; the deferral stands | content only; the deferral stands |
+  | exhausted | queued again | shown once when the slot is free; stays exhausted and listed | content only; stays exhausted and listed |
 
-  A new-ask show is an ordinary counted `shown`: reminders and the time limit
-  count from it, and the reminders already used stay used. A new ask gains
-  no right to preempt; only the deadline rule below can move it ahead.
+  A new-ask counted show is an ordinary counted `shown`: reminders and the
+  time limit count from it, and the reminders already used stay used. A
+  round's show is described next. A new ask gains no right to preempt; only
+  the deadline rule below can move it ahead.
 - **The more urgent class.** The item sorts by its live asks: in the
   deadline class if an ask has a deadline (only a prompt ask has one), by
   the earliest deadline; otherwise among owner items, with a live prompt ask
@@ -218,17 +223,44 @@ or both.
   a queued owner item preempts only with a deadline earlier than the active
   item's, and only if it can be shown.
 - **One send history per episode.** However its asks come and go, an
-  episode gets at most the show limit in counted shows, two reminders and
-  one return; owner deferrals keep their meaning (an uncounted show when the
-  deferral ends).
-- **A consequence of the limit.** A declared block that stays open through
-  many prompt rounds is shown at most the show limit in counted shows in
-  total: once they are used, a new prompt on that session updates the item
-  and sends nothing. Before, each prompt round was its own item with its own
-  shows. At the starting values, a block authored once and five prompts each
-  raised and answered over the next two and a half hours give the shows
-  1, 2 and 3 (the block, the first two prompts) and reminder 1, and nothing
-  for the last three prompts.
+  episode gets at most the show limit in counted shows, plus one show for
+  each prompt round that joined after the limit was used (below), two
+  reminders and one return; owner deferrals keep their meaning (an
+  uncounted show when the deferral ends).
+- **Each prompt round after the limit earns one show.** Once the item has
+  used its counted shows, a prompt round, that is a prompt ask joining the
+  item (the first prompt on an item a declared block opened, or a new
+  prompt after the earlier prompt ask ended), is shown once anyway. A newer
+  prompt replacing the latest within a live prompt ask is no new round. The
+  show restores nothing: it is kept in its own counter (`round_shows`), not
+  in `shows_counted`, so every rule that reads the limit is unchanged; it
+  moves neither the reminder nor the time-limit clock, so no reminder,
+  return or expiry follows from it that the item would not have had (a
+  reminder still unused falls due when it would have anyway); and it takes
+  no slot, so an item that held the slot keeps holding it and any other
+  keeps its state (the table above, third column). It is made only by the
+  item holding the slot or while the slot is free: a round owed to an item
+  that does not hold it waits, however many ticks, while another item holds
+  the slot, and is shown at the first tick that finds the slot free. Rounds
+  owed to items that are not queued are shown before the queue is ordered
+  for the slot, so they never stand in the way of the queue's own order. If
+  the round's prompt ask ends first (answered or lapsed), the owed show is
+  dropped: the round it was for is over. An ordinary show made meanwhile
+  (the owner's deferral coming due; a queued item with a counted show again
+  after the limit was raised) serves the round too. The round gains no right
+  to preempt: an item with no counted show left preempts nothing.
+- **Prompts, not declared blocks.** A declared ask joining an item whose
+  counted shows are used only changes the content, as before. A prompt is a
+  question the session cannot go on without and the owner must answer each
+  one; a declared block that comes back is the same wait the owner has
+  already been shown.
+- **What that gives over many rounds.** A session that raises and resolves
+  prompts all day while blocked on the owner is shown once per round. At the
+  starting values, a block authored once and five prompts each raised and
+  answered over the next two and a half hours give the shows 1 to 6 (the
+  block, the first two prompts on the counted shows, the last three as
+  rounds) and reminder 1, 60 minutes after the last counted show, in the
+  same tick as the fourth prompt's show.
 
 ### Attention beside the owner item
 
@@ -346,11 +378,11 @@ ledger and the simulated world for inspection.
 
 | Id | Holds |
 |---|---|
-| I1a | Counted shows never exceed the limit in force when each is made |
+| I1a | Counted shows never exceed the limit in force when each is made; beyond it, an owner item is shown only once for each prompt round that joined after the limit was used, as the monitor counts the rounds itself |
 | I1b | At most two reminders per episode |
 | I1c | At most one return per episode |
-| I1d | Shows never exceed counted shows plus the owner's deferrals |
-| I2 | At most one item active |
+| I1d | Shows never exceed counted shows plus the owner's deferrals plus the rounds' shows; and the counters every record stores (presentation, counted shows, round shows, reminders, returns) equal the values on the episode's opening record plus the monitor's own counts since; a wrong value on the opening record itself is not seen here |
+| I2 | At most one item active; the item holding the slot in the model is the one the ledger account says holds it (a round's show takes no slot); and a round's show is made only by the item holding the slot or while it is free |
 | I2b | An acknowledged item is moved on at the next tick of its source |
 | I2c | The first show after a preemption is not the preempted item |
 | I3a | The model never produces an `idempotency_conflict` |
@@ -359,7 +391,7 @@ ledger and the simulated world for inspection.
 | I4b | Every resolution and withdrawal is backed by its evidence |
 | I4c | The model's open items equal the monitor's own account of the ledger |
 | I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it |
-| I6 | An exhausted item sends nothing unless its content changed while a counted show remained |
+| I6 | An exhausted item sends nothing unless its content changed while a counted show remained, or a prompt round is owed its show |
 | I7a | At most two cycles per onset, onsets derived by the monitor itself |
 | I7b | At most one investigation per session per tick |
 | I7c | Both budgets respected |
@@ -375,7 +407,7 @@ ledger and the simulated world for inspection.
 | I10 | By the end of each tick every live ask, as the monitor sees it (the latest prompt pending at a live read; an authored owner-block report), is an ask on the session's open owner item, unless an ask that stood on that line or prompt already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
 | I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner item whose content names it; no owner item names a condition that has ended; and the list each carried-condition record states equals the changes so far |
 | I12 | One condition, across every attention episode it opens, gets at most the show limit in counted shows, two reminders and one return |
-| I13 | An ask joining an open owner item with a counted show left is shown by the end of that tick (at once if the item held the slot, else queued behind the item that holds it); with none left it is shown nothing and an exhausted item stays exhausted |
+| I13 | An ask joining an open owner item with a counted show left is shown by the end of that tick (at once if the item held the slot, else queued behind the item that holds it); with none left, a prompt round is owed one show until it is made, its prompt ask ends, or an ordinary show serves it, and at every tick's end an item still owed one is waiting behind another item that holds the slot; a declared ask is shown nothing and leaves an exhausted item exhausted |
 
 **Limits of the monitor.** It uses the model's own `isOwnerBlock` (for
 declared asks in I4b and I10) and the model-computed
@@ -394,7 +426,18 @@ episode fresh counters and left that link out would not be caught by I12.
 Which asks are live is the monitor's own account, from the reports, prompts
 and answers it reads; the moment an ask joins, which I13 then checks, is the
 model's own join record, and I10 is what makes sure a live ask is never left
-off the item instead.
+off the item instead. Which shows are a prompt round's is the monitor's own
+count: a round is a prompt ask joining while its own count of counted shows
+is at the limit, and a show made while it owes such a round its show is the
+round's; it never takes the model's `round_shows` or `round` marks as input,
+though I1d compares the stored `round_shows` with its own count. It does
+take each owner deferral's time from the model's own `deferred` record
+(`until`), because no other record carries the time the owner asked for. A
+model that acted on another time than it recorded would go unseen while no
+round is owed (the monitor does not time ordinary deferral shows); with a
+round owed, the two accounts would disagree on whether a show was the
+round's, which shows as I1d (the stored round count) on that record, or as
+I2 (the slot holder) at the end of the step.
 
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
@@ -442,7 +485,8 @@ do, not more); in one tick, asks that end are taken before asks that arrive,
 so an item whose last ask ends closes and a new ask opens a new episode;
 every owner record carries the live asks (`asks`), its ask change (`ask`),
 the ask that closed it (`closing_ask`), and on a join whether a show is owed
-at once (`show_now`) or as counted (`counted_next`). A seed is unclosable by evidence when its naming session's
+at once (`show_now`), as counted (`counted_next`), or to a prompt round
+(`round_owed`); a round's show is marked `round`. A seed is unclosable by evidence when its naming session's
 source gives no working directory; "done" then withdraws it. "Next tick" for
 verification is the item's own source's next tick. Owner actions on an item
 that is not active do nothing. The deferral time is stored on the record.
@@ -475,6 +519,13 @@ attention item's `queued`.
   owner-block line whose ask already ended has no ask carrying it, so it is
   classified, and rechecked, as any other stale line.
 - A declared block and a pending prompt are one owner item. (W)
+- A prompt round's show after the limit is kept in its own counter,
+  `round_shows`, so no rule that reads `shows_counted` changes; it takes no
+  slot and moves no clock; in each state of the item it is made as the
+  table under "The owner item" says; rounds owed to items that are not
+  queued are shown before the queue is ordered, so they cannot hide a
+  still-queued preemptor from the preemptor-first rule; and a show owed to a
+  round is dropped when the round's prompt ask ends before it is made. (W)
 - An ask is added to an owner item, opening its episode or joining it, only
   on a reference no earlier ask of that item stood on in any episode: its
   opening reference and, for a declared block, every authored owner-block

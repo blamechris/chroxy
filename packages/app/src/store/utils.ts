@@ -26,6 +26,9 @@ export function createEmptySessionState(): SessionState {
     activityState: { state: 'idle', startedAt: Date.now() },
     // #7807: matches the dashboard's default (utils.ts createEmptySessionState).
     thinkingLevel: 'default',
+    folderTrust: null,
+    folderTrustPendingRequestId: null,
+    folderTrustError: null,
   };
 }
 
