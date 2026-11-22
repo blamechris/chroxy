@@ -499,6 +499,30 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
         await pending
       })
 
+      it('an unauthorized (revoked) connection\'s restore does not cost the task its session', async () => {
+        const sm = newMgr()
+        const eng = newEngine(sm)
+        const task = addTask()
+        const s = (await fire(eng, task)).sessionId
+        await sendMsg(sm, s, restoreMsg, {
+          checkpointManager: { getCheckpoint: () => ({ id: 'cp1', cwd: '/tmp', name: 'cp', resumeSessionId: null }), restoreCheckpoint: async () => { throw new Error('revoked') } },
+          transport: { isConnectionAuthorized: () => false },
+        })
+        assert.deepEqual(codes(sm, s), ['automation_owned'], 'still owned')
+      })
+
+      it('a refused restore (session busy) does not release either', async () => {
+        const sm = newMgr()
+        const eng = newEngine(sm)
+        const task = addTask()
+        const s = (await fire(eng, task)).sessionId
+        sm.getSession(s).session.isRunning = true
+        let restored = 0
+        await sendMsg(sm, s, restoreMsg, { checkpointManager: { getCheckpoint: () => ({ id: 'cp1', cwd: '/tmp', name: 'cp', resumeSessionId: null }), restoreCheckpoint: async () => { restored += 1 } } })
+        assert.equal(restored, 0, 'premise: refused')
+        assert.deepEqual(codes(sm, s), ['automation_owned'])
+      })
+
       it('a conversation-only restore (no file rewrite) does not release', async () => {
         const sm = newMgr()
         const eng = newEngine(sm)
@@ -547,10 +571,11 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
 
     it('a busy-skipped ONE-SHOT task is not retired: it keeps its nextRun, is retried later, and then runs', async () => {
       const sm = newMgr()
-      const eng = new SchedulerEngine({ sessionManager: sm, store, config: { features: { scheduler: true } }, validateCwd: () => null, setTimer: () => 1, clearTimer: () => {}, logger: capLog, busyRetryMs: 60000 })
+      const clock = 1_700_000_000_000
+      const eng = new SchedulerEngine({ sessionManager: sm, store, config: { features: { scheduler: true } }, validateCwd: () => null, setTimer: () => 1, clearTimer: () => {}, logger: capLog, busyRetryMs: 60000, now: () => clock })
       engines.push(eng)
       eng.start()
-      const at = Date.now() + 5000
+      const at = clock + 5000
       const task = store.add({ prompt: 'once', cadence: { kind: 'once', at }, target: { provider: 'test-leave-used-9242' } })
       const s = sm.createSession({ cwd: '/tmp', provider: 'test-leave-used-9242', metadata: { scheduledTaskId: task.id } })
       eng.refresh()
@@ -560,12 +585,37 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.equal(res.status, 'skipped')
       assert.equal(store.get(task.id).lastRun ?? undefined, undefined, 'the skip was not recorded (that would retire it)')
       assert.equal(store.get(task.id).nextRun, at, 'still scheduled')
+      assert.equal(eng._retryAt.has(task.id), true, 'held back')
+      assert.equal(eng._dueTasks(clock + 1000).length, 0, 'premise: not yet due')
       assert.equal(eng._dueTasks(at + 1000).length, 0, 'not re-fired in a hot loop: held back until the retry time')
-      assert.equal(eng._dueTasks(at + 61000).length, 1, 'due again after the retry delay')
+      assert.equal(eng._dueTasks(clock + 61000).length, 1, 'due again after the retry delay')
       live.isRunning = false; live.turnActive = false
       const again = await fire(eng, store.get(task.id))
       assert.equal(again.status, 'success', again.error)
       assert.ok(store.get(task.id).lastRun, 'and it ran')
+      assert.equal(eng._retryAt.has(task.id), false, 'the hold is dropped once an outcome is recorded')
+    })
+
+    it('a one-shot task whose session stays busy is not retired as an error: the stuck session is released and the task runs in a fresh one', async () => {
+      const clock = 1_700_000_000_000
+      const sm = newMgr()
+      const eng = new SchedulerEngine({ sessionManager: sm, store, config: { features: { scheduler: true } }, validateCwd: () => null, setTimer: () => 1, clearTimer: () => {}, logger: capLog, busyRetryMs: 60000, now: () => clock })
+      engines.push(eng)
+      eng.start()
+      const task = store.add({ prompt: 'once', cadence: { kind: 'once', at: clock + 5000 }, target: { provider: 'test-leave-used-9242' } })
+      const s = sm.createSession({ cwd: '/tmp', provider: 'test-leave-used-9242', metadata: { scheduledTaskId: task.id } })
+      eng.refresh()
+      const live = sm.getSession(s).session
+      live.isRunning = true; live.turnActive = true
+      const outcomes = []
+      for (let i = 0; i < BUSY_SKIP_LIMIT; i++) outcomes.push(await fire(eng, store.get(task.id)))
+      assert.deepEqual(outcomes.map((o) => o.status), ['skipped', 'skipped', 'skipped'], 'never an error for a one-shot')
+      assert.equal(store.get(task.id).lastRun ?? undefined, undefined, 'not retired')
+      assert.deepEqual(codes(sm, s), [], 'the stuck session was released')
+      assert.equal(eng._dueTasks(clock + 6000).length, 1, 'due again immediately, no retry delay')
+      const res = await fire(eng, store.get(task.id))
+      assert.equal(res.status, 'success', res.error)
+      assert.notEqual(res.sessionId, s, 'in a fresh session')
     })
 
     it('a destroy waiting on the session lock cannot be typed into: the entry is already hidden from clients (no re-check needed)', async () => {
@@ -777,6 +827,26 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.equal(worktreeHasUnsavedWork(wt), true)
     })
 
+    it('a hand-made file inside an UNINITIALISED submodule directory is unsaved work; an empty one is not', () => {
+      const repo = makeRepo()
+      const sub = makeRepo()
+      writeFileSync(join(sub, 's.txt'), 's')
+      execFileSync(GIT, ['-C', sub, 'add', '--', 's.txt'], { stdio: 'pipe' })
+      execFileSync(GIT, ['-C', sub, 'commit', '-m', 's'], { stdio: 'pipe' })
+      execFileSync(GIT, ['-C', repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod'], { stdio: 'pipe' })
+      execFileSync(GIT, ['-C', repo, 'commit', '-m', 'sm'], { stdio: 'pipe' })
+      const sm = newMgr()
+      const eng = newEngine(sm)
+      const task = addTask()
+      const s = worktreeSession(sm, repo, eng, task.id)
+      const wt = sm.getSession(s).worktreePath
+      assert.equal(existsSync(join(wt, 'mod', '.git')), false, 'premise: not initialised')
+      assert.equal(worktreeHasUnsavedWork(wt), false, 'control: an empty uninitialised submodule dir is not work')
+      writeFileSync(join(wt, 'mod', 'work.txt'), 'hand-made')
+      assert.equal(execFileSync(GIT, ['-C', wt, 'status', '--porcelain', '--ignored'], { encoding: 'utf8' }).trim(), '', 'premise: status reads clean')
+      assert.equal(worktreeHasUnsavedWork(wt), true)
+    })
+
     it('an ignored directory is listed once, not file by file (--ignored=matching)', () => {
       const repo = makeRepo()
       writeFileSync(join(repo, '.gitignore'), 'node_modules/\n')
@@ -810,7 +880,8 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       if (r instanceof Error) throw r
       return r
     }
-    const has = (g, extra = {}) => worktreeHasUnsavedWork('/x', { git: g, exists: () => true, ...extra })
+    const enoent = () => Object.assign(new Error('gone'), { code: 'ENOENT' })
+    const has = (g, extra = {}) => worktreeHasUnsavedWork('/x', { git: g, lstat: () => ({}), readdir: () => [], ...extra })
     it('clean tree and HEAD reachable from a ref: no unsaved work', () => {
       assert.equal(has(git('', '')), false)
     })
@@ -831,18 +902,25 @@ describe('a scheduled task leaves a session a person is using alone (#9242)', ()
       assert.equal(has(git('', '', 'H a\x00h b\x00')), true)
       assert.equal(has(git('', '', 'S b\x00')), true)
     })
-    it('a populated gitlink is unsaved work; an unpopulated one is not', () => {
+    it('a gitlink whose directory has any entry is unsaved work; an empty or absent one is not', () => {
       const lsS = '160000 abc 0\tmod\x00100644 def 0\ta.txt\x00'
-      assert.equal(has(git('', '', '', lsS), { exists: (p) => p.endsWith('/mod/.git') || p === '/x' }), true)
-      assert.equal(has(git('', '', '', lsS), { exists: (p) => p === '/x' }), false)
+      assert.equal(has(git('', '', '', lsS), { readdir: () => ['work.txt'] }), true)
+      assert.equal(has(git('', '', '', lsS), { readdir: () => [] }), false)
+      assert.equal(has(git('', '', '', lsS), { readdir: () => { throw enoent() } }), false)
+      assert.equal(has(git('', '', '', lsS), { readdir: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }) } }), true, 'cannot tell: keep')
     })
     it('an unreadable ls-files is unsaved work', () => {
       assert.equal(has(git('', '', new Error('boom'))), true)
     })
-    it('a path that does not exist is no unsaved work, without asking git', () => {
+    it('a path that does not exist (ENOENT) is no unsaved work, without asking git', () => {
       let called = false
-      assert.equal(worktreeHasUnsavedWork('/gone', { git: () => { called = true; return '' }, exists: () => false }), false)
+      assert.equal(worktreeHasUnsavedWork('/gone', { git: () => { called = true; return '' }, lstat: () => { throw enoent() } }), false)
       assert.equal(called, false)
+    })
+    it('a stat error other than ENOENT (EACCES, EIO) is "cannot tell": kept', () => {
+      for (const code of ['EACCES', 'EIO', 'ENOTDIR']) {
+        assert.equal(worktreeHasUnsavedWork('/x', { git: git('', ''), lstat: () => { throw Object.assign(new Error('x'), { code }) } }), true, code)
+      }
     })
   })
 })

@@ -31,6 +31,13 @@ const { TurnDriver, TurnError } = await import('../src/orchestration/turn-driver
 const tmp = mkdtempSync(join(tmpdir(), 'adm-prep-'))
 after(() => rmSync(tmp, { recursive: true, force: true }))
 const stateFile = () => join(tmp, `state-${Math.random().toString(36).slice(2)}.json`)
+async function until(cond, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('until: condition not met before the deadline')
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r }); return { promise, resolve } }
 
 const initMsg = { type: 'system', subtype: 'init', session_id: 'sdk-1', model: 'claude-x', tools: [] }
@@ -53,9 +60,7 @@ function sdkSession() {
 describe('SDK: admission is re-asked after the project-settings verification (#9242)', () => {
   it('a takeover during the verification: no query, busy released, refusal reported, queued follow-up still runs', async () => {
     const { session, queries } = sdkSession()
-    gate.promise = deferred()
-    const g = gate.promise
-    gate.promise = g.promise
+    const g = deferred(); gate.promise = g.promise
     let owned = true
     const admissions = []
     const turn = session.sendMessage('scheduled', [], { admitAtFlush: () => owned, onInputAdmission: (a) => admissions.push(a) })
@@ -66,7 +71,7 @@ describe('SDK: admission is re-asked after the project-settings verification (#9
     g.resolve(true)
     await turn
     assert.equal(admissions.at(-1)?.reason, 'not_admitted')
-    await new Promise((r) => setTimeout(r, 30))
+    await until(() => queries.length === 1 && !session.isRunning)
     assert.equal(queries.filter((q) => JSON.stringify(q).includes('scheduled')).length, 0, 'the scheduled prompt never reached query()')
     assert.equal(queries.length, 1, 'the person\'s queued follow-up ran instead')
     session.destroy()
@@ -157,6 +162,7 @@ describe('BYOK: admission is re-asked after the MCP prompt expansion (#9242)', (
     assert.equal(streams.length, 0, 'nothing reached messages.stream')
     assert.equal(session._history.length, 0, 'no history entry')
     assert.equal(session.isRunning, false)
+    session.destroy()
   })
 
   it('control: still admitted → expanded and streamed as before', async () => {
@@ -166,6 +172,7 @@ describe('BYOK: admission is re-asked after the MCP prompt expansion (#9242)', (
     await turn
     assert.equal(streams.length, 1)
     assert.equal(streams[0].at(-1).content, 'EXPANDED')
+    session.destroy()
   })
 
   it('a caller with no predicate is unchanged', async () => {
@@ -174,5 +181,6 @@ describe('BYOK: admission is re-asked after the MCP prompt expansion (#9242)', (
     expansion.resolve('EXPANDED')
     await turn
     assert.equal(streams.length, 1)
+    session.destroy()
   })
 })

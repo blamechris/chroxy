@@ -25,7 +25,7 @@
 // is fully testable against real temp repos without poking the real home dir.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, join as joinPath, resolve as resolvePath } from 'node:path'
 import { chroxyWorktreeRepoPath } from '@chroxy/protocol/project'
 import { GIT } from './git.js'
@@ -285,14 +285,23 @@ function isClean(git, worktreePath, { strict = false } = {}) {
  * `git worktree remove` makes it unreachable), or when either question cannot be
  * answered. Fails SAFE: unknown reads as "has work".
  *
+ * Deliberately conservative, and accepted: in a SPARSE checkout every skip-worktree file
+ * carries the `S` tag, so such a session always reads as having work and is kept.
+ *
  * @param {string} worktreePath
  * @param {{ git?: (cwd: string, args: string[]) => string }} [deps]
  * @returns {boolean}
  */
 export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
-  const { git = strictGit, exists = existsSync } = deps
-  // A directory that is already gone holds nothing that removal could lose.
-  if (!exists(worktreePath)) return false
+  const { git = strictGit, lstat = lstatSync, readdir = readdirSync } = deps
+  // A directory that is already gone (ENOENT, and only ENOENT) holds nothing that
+  // removal could lose. Any other stat error (EACCES, EIO, an unmounted volume) is
+  // "cannot tell", which is "keep".
+  try {
+    lstat(worktreePath)
+  } catch (err) {
+    return err?.code === 'ENOENT' ? false : true
+  }
   if (isClean(git, worktreePath, { strict: true }) !== true) return true
   try {
     if (git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0) return true
@@ -300,14 +309,24 @@ export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
     // tag; also what `core.ignoreStat` effectively does) or skip-worktree (`S`) can be
     // edited without any status line. (2) A submodule's own status probe runs without
     // `--ignored`, so a populated submodule can hold ignored files (a `.env`) while the
-    // parent reads clean: ANY populated gitlink is kept. Both are the simple fail-safe
+    // parent reads clean. An UNINITIALISED submodule directory is not a submodule at all
+    // to git: a hand-made file in it is invisible to status. So ANY gitlink whose
+    // directory has any entry is kept, initialised or not. Both are the simple fail-safe
     // (keep) rather than recursing into each submodule.
     for (const rec of git(worktreePath, ['ls-files', '-v', '-z']).split('\0')) {
       if (/^[a-zS] /.test(rec)) return true
     }
     for (const rec of git(worktreePath, ['ls-files', '-s', '-z']).split('\0')) {
       const m = /^160000 [0-9a-f]+ \d\t(.+)$/s.exec(rec)
-      if (m && exists(joinPath(worktreePath, m[1], '.git'))) return true
+      if (!m) continue
+      let entries
+      try {
+        entries = readdir(joinPath(worktreePath, m[1]))
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue // the gitlink's directory is absent: nothing there
+        return true // cannot tell (EACCES, ENOTDIR, ...): keep
+      }
+      if (entries.length > 0) return true
     }
     return false
   } catch {

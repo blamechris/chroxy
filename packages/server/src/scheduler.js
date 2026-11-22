@@ -121,7 +121,8 @@ const log = createLogger('scheduler')
 // is declared stuck (error outcome + ownership released, so the next fire mints a fresh
 // session and the stuck one stays inspectable). Count-based on purpose: it needs no
 // notion of how long a turn legitimately runs, and 3 slots of a stuck turn is already
-// a task that has silently not run for 3 cadences.
+// a task that has silently not run for 3 cadences. It counts SLOTS, not elapsed time: a
+// task on a long cadence is declared stuck only after 3 of its own slots (accepted).
 export const BUSY_SKIP_LIMIT = 3
 // A one-shot task skipped for a busy session is NOT retired; it is retried after this.
 const DEFAULT_BUSY_RETRY_MS = 60_000
@@ -823,8 +824,9 @@ export class SchedulerEngine extends EventEmitter {
     // recording the skip would retire it. Leave it unrecorded (still due) and retry
     // after a delay so it cannot spin; the overdue grace bounds how long it keeps trying.
     if (outcome?.busy === true && status === 'skipped' && task.cadence?.kind === 'once') {
-      this._retryAt.set(task.id, this._now() + this._busyRetryMs)
-      this._log.warn(`Scheduled one-shot task ${task.id} not run: ${outcome.error} — retrying in ${this._busyRetryMs}ms`)
+      const delay = outcome.retryNow === true ? 0 : this._busyRetryMs
+      this._retryAt.set(task.id, this._now() + delay)
+      this._log.warn(`Scheduled one-shot task ${task.id} not run: ${outcome.error} — retrying in ${delay}ms`)
       this.emit('run-end', { taskId: task.id, at, status: 'skipped', ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}), error: String(outcome.error).slice(0, 500) })
       this._armNextTick()
       return
@@ -836,6 +838,7 @@ export class SchedulerEngine extends EventEmitter {
       ...(outcome?.error ? { error: String(outcome.error).slice(0, 500) } : {}),
     }
     this._recordRun(task, result)
+    this._retryAt.delete(task.id) // an outcome is recorded: any busy-retry hold is over
     this.emit('run-end', { taskId: task.id, ...result })
     if (result.status === 'success') {
       this._log.info(`Scheduled task ${task.id} completed`)
@@ -1115,6 +1118,15 @@ export class SchedulerEngine extends EventEmitter {
     if (stuck) {
       this._sm.releaseScheduledOwnership?.(stuck, task.id)
       this._sessionByTask.delete(task.id)
+    }
+    // A one-shot task has no later slot: recording an error would retire it unrun. The
+    // stuck session is released as above and the task runs in a FRESH one at the next tick.
+    if (task.cadence?.kind === 'once') {
+      return {
+        status: 'skipped', busy: true, retryNow: true,
+        ...(stuck ? { sessionId: stuck } : {}),
+        error: `session ${stuck ?? ''} has been busy for ${n} consecutive attempts — it was released (it stays open to inspect) and this one-shot task will run in a fresh session`,
+      }
     }
     return {
       status: 'error',

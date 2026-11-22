@@ -588,7 +588,7 @@ describe('TurnDriver — dispatch-time admission (#9242)', () => {
     await next
   })
 
-  for (const [label, admit] of [['throws', () => { throw new Error('boom') }], ['returns 1', () => 1], ['returns undefined', () => undefined], ['returns the string "true"', () => 'true']]) {
+  for (const [label, admit] of [['throws', () => { throw new Error('boom') }], ['returns 1', () => 1], ['returns undefined', () => undefined], ['returns the string "true"', () => 'true'], ['returns null', () => null], ['returns false', () => false], ['returns a Promise (truthy, not true)', () => Promise.resolve(true)]]) {
     it(`an \`admit\` that ${label} is a refusal (only === true admits)`, async () => {
       const { sm, addSession } = mkStub()
       const s = addSession('s1')
@@ -599,4 +599,16 @@ describe('TurnDriver — dispatch-time admission (#9242)', () => {
       assert.equal(s.sent.length, 0)
     })
   }
+
+  it('an `admit` that throws at the provider flush refuses (returns false, rejects NOT_ADMITTED)', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    let boom = false
+    const p = driver.driveTurn('s1', 'queued', { admit: () => { if (boom) throw new Error('boom'); return true } })
+    boom = true
+    assert.equal(s.sent[0].opts.admitAtFlush(), false)
+    const r = await settleOrPending(p)
+    assert.equal(r.err?.code, 'NOT_ADMITTED')
+  })
 })
