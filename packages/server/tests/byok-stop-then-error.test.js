@@ -176,6 +176,13 @@ describe('claude-byok: every abort-caused shape still ends as the quiet Stop (#9
     }
   })
 
+  it('a genuine abort that also carries a status still ends quietly, marker minted (abort beats upstream evidence)', async () => {
+    const seen = await run(byok(() => Object.assign(new APIUserAbortError(), { status: 500 })))
+    assert.deepEqual(seen.errors, [])
+    assert.equal(seen.stopped, 1)
+    assert.equal(seen.results.filter((r) => r.turnOutcome === MARK).length, 1)
+  })
+
   it('the ambiguous shape is a quiet stop but mints no marker', async () => {
     const seen = await run(byok(shapes['ambiguous: no status, no abort cause, signal aborted']))
     assert.equal(seen.results.filter((r) => r.turnOutcome === MARK).length, 0)
