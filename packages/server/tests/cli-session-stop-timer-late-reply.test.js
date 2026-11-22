@@ -71,7 +71,7 @@ if (typeof mock.module !== 'function') {
     session.on('error', () => {})
     session._scheduleRespawn = () => { session._respawnsScheduled = (session._respawnsScheduled || 0) + 1 }
     // Nothing the retirement does may enumerate or signal anything but the test's own children.
-    session._treeDeps = { ps: () => '', startTimeOf: () => null, kill: () => {} }
+    session._treeDeps = { isWindows: false, ps: () => '', startTimeOf: () => null, kill: () => {}, taskkill: () => {} }
     session.start = () => { session._spawnPersistentProcess(IGNORE); spawned.push(session._child) }
     session._spawnPersistentProcess(IGNORE)
     spawned.push(session._child)
@@ -102,7 +102,11 @@ if (typeof mock.module !== 'function') {
     t.mock.timers.tick(5000)
   }
 
-  describe('claude-cli: Stop safety timer vs a child that ignored SIGINT (#9267)', () => {
+  // Real children that ignore SIGINT/SIGTERM only exist on POSIX: on Windows kill() terminates at once
+  // (windows-test-set.mjs 'posix-signals'), so the whole suite skips there instead of being exempted.
+  const SKIP_WIN = process.platform === 'win32' ? "posix-signals: needs real SIGINT/SIGTERM-ignoring children" : false
+
+  describe('claude-cli: Stop safety timer vs a child that ignored SIGINT (#9267)', { skip: SKIP_WIN }, () => {
     it('drops the late reply and result of the retired child (through the real readline callback)', async (t) => {
       const session = await startedSession()
       const old = session._child
@@ -192,8 +196,10 @@ if (typeof mock.module !== 'function') {
     it('forgets the background shells the retired child took with it', async (t) => {
       const session = await startedSession()
       session.trackBackgroundShell({ shellId: 'brk1', command: 'tail -f log' })
+      assert.equal(session.getPendingBackgroundShells().length, 1, 'positive control: the shell is tracked')
       await stopAndExpire(t, session)
       assert.equal(session._isBusy, false)
+      assert.equal(session.getPendingBackgroundShells().length, 0, 'the retired child\'s shell is forgotten')
       assert.equal(session.isRunning, false)
     })
 
@@ -224,6 +230,81 @@ if (typeof mock.module !== 'function') {
       assert.equal(w.markers().length, 0, 'the child may still be running: this is not the Stop certified')
       old.emit('close', 0)
       assert.equal(w.markers().length, 0)
+    })
+    it('a Stop with nothing queued spawns no child: the session stays revivable, not restarted', async (t) => {
+      const session = await startedSession()
+      let starts = 0
+      const realStart = session.start
+      session.start = () => { starts++; return realStart() }
+      await stopAndExpire(t, session)
+      assert.equal(starts, 0)
+      assert.equal(session._child, null)
+      assert.equal(session._stoppedByUser, true)
+    })
+
+    it('a result listener that sends starts a NEW child; the retired child receives no stdin (retire before emit)', async (t) => {
+      const session = await startedSession()
+      const old = session._child
+      let oldWrites = 0
+      const realWrite = old.stdin.write.bind(old.stdin)
+      old.stdin.write = (...a) => { oldWrites++; return realWrite(...a) }
+      session.on('result', () => { oldWrites = 0; session.sendMessage('from-listener') }) // count from the result on
+      await stopAndExpire(t, session)
+      assert.notEqual(session._child, old, 'a fresh child was spawned')
+      await until(() => session._processReady && session._child !== old, 'the fresh child')
+      assert.equal(oldWrites, 0, 'nothing was written to the retired child')
+    })
+
+    it('mixed queues keep accepted order: the window follow-up first, then what parked behind the warming child, one turn at a time', async (t) => {
+      const session = await startedSession()
+      const old = session._child
+      const sent = []
+      const realSend = session.sendMessage.bind(session)
+      session.sendMessage = (prompt, ...rest) => { sent.push(prompt); return realSend(prompt, ...rest) }
+      await session.sendMessage('first')
+      clearRealTimers(session)
+      t.mock.timers.enable({ apis: ['setTimeout'] })
+      session.interrupt()
+      await session.sendMessage('A') // accepted in the window: outgoing queue
+      t.mock.timers.tick(5000)
+      assert.notEqual(session._child, old)
+      assert.equal(session._processReady, false, 'the fresh child is still warming up')
+      await session.sendMessage('B') // parks in the startup queue behind the warming child
+      sent.length = 0
+      await until(() => session._processReady && sent.includes('A'), 'A dispatched')
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.deepEqual(sent, ['A'], 'B waits for A\'s result')
+      assert.equal(session._pendingQueue.length, 1)
+      session._rl.emit('line', reply('answer A').trim())
+      await until(() => sent.includes('B'), 'B dispatched after A\'s result')
+      assert.deepEqual(sent, ['A', 'B'])
+    })
+
+    it('a warmup that is not the retirement restart leaves the outgoing queue alone', async () => {
+      const session = await startedSession()
+      session._isBusy = false
+      session._outgoingQueue.push({ prompt: 'held', attachments: undefined, sendOptions: {} })
+      session._drainPendingQueue()
+      assert.equal(session._outgoingQueue.length, 1, 'crash / model / permission-mode respawns drain what they always did')
+    })
+
+    it('the escalation survives the parent\'s close (production close listener attached): the descendant is SIGKILLed', async (t) => {
+      const session = await startedSession()
+      const old = session._child
+      const signals = []
+      const procs = { [old.pid]: { ppid: 1, started: 'p' }, 9001: { ppid: old.pid, started: 'a' } }
+      session._treeDeps = {
+        isWindows: false,
+        ps: () => Object.entries(procs).map(([pid, p]) => `${pid} ${p.ppid} ${p.started}`).join('\n'),
+        startTimeOf: (pid) => (pid === old.pid ? null : procs[pid]?.started ?? null),
+        kill: (pid, sig) => signals.push([pid, sig]),
+        taskkill: () => {},
+      }
+      await stopAndExpire(t, session)
+      assert.deepEqual(signals, [[9001, 'SIGTERM']])
+      old.emit('close', 0) // the parent exits; the production close listener runs and must not cancel anything
+      t.mock.timers.tick(3000)
+      assert.deepEqual(signals, [[9001, 'SIGTERM'], [9001, 'SIGKILL']])
     })
   })
 }

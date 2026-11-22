@@ -527,6 +527,7 @@ export class CliSession extends BaseSession {
     // destroy() can still reap a tree whose parent already exited. `_treeDeps`
     // is the test seam for the ps / process.kill the tree operations use.
     this._retiredChildren = new Set()
+    this._drainOutgoingFirst = false
     this._treeDeps = {}
 
     // Hook manager (shared module)
@@ -864,6 +865,19 @@ export class CliSession extends BaseSession {
   }
 
   _drainPendingQueue() {
+    // #9267: the warmup of the child the Stop timer's retirement started drains the
+    // OUTGOING queue first (a follow-up accepted during the 5 s window is older than
+    // anything parked behind the fresh child), one turn at a time: the rest, startup
+    // queue included, follows from each `result` in the order the result path keeps.
+    // Only that restart sets the flag; crash and model/permission-mode respawns drain
+    // exactly what they always did.
+    if (this._drainOutgoingFirst) {
+      this._drainOutgoingFirst = false
+      if (!this._isBusy && this._outgoingQueue.length > 0) {
+        this.dequeueNextOutgoing()
+        return
+      }
+    }
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
       if (!this._admitPendingItem(pending)) continue
@@ -872,9 +886,6 @@ export class CliSession extends BaseSession {
       ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
-    // #9267: a follow-up queued mid-turn (`_outgoingQueue`) behind a child that
-    // was retired has no `result` left to flush it; the fresh child's warmup does.
-    if (!this._isBusy && this._outgoingQueue?.length > 0) this.dequeueNextOutgoing()
   }
 
   /**
@@ -1044,6 +1055,10 @@ export class CliSession extends BaseSession {
       ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
       reportInputAdmission(options, { status: 'queued', delivery: 'queued' })
+      // #9267: the restart above can finish its warmup synchronously (an existing
+      // container, a folder needing no trust scan), i.e. BEFORE this push, leaving
+      // nothing to drain the prompt just parked. Ready and idle now means drain now.
+      if (this._processReady && !this._isBusy) this._drainPendingQueue()
       return
     }
 
@@ -2788,7 +2803,7 @@ export class CliSession extends BaseSession {
     this._retiredChildren.add(entry)
     entry.timer = setTimeout(() => {
       this._retiredChildren.delete(entry)
-      try { this._killChildTree(child, { force: true, recorded: entry.recorded }) } catch {}
+      try { this._killChildTree(child, { force: true, recorded: entry.recorded, handleOnly: true }) } catch {}
     }, 3000)
     if (typeof entry.timer.unref === 'function') entry.timer.unref()
     this._killChildTree(child, { recorded: entry.recorded })
@@ -2796,7 +2811,12 @@ export class CliSession extends BaseSession {
 
   /** #9267: snapshot the tree to reap (a seam: `_treeDeps` carries the ps stubs). */
   _recordChildTree(child) {
-    return recordProcessTree(child, this._treeDeps)
+    try {
+      return recordProcessTree(child, this._treeDeps)
+    } catch (err) {
+      ;(this._log || log).warn(`Could not record the retired child's process tree: ${err.message}`)
+      return [] // fail safe: the handle-only kill still runs
+    }
   }
 
   /**
@@ -2804,8 +2824,8 @@ export class CliSession extends BaseSession {
    * to the platform helper; tests whose mock child carries a numeric pid inject
    * `_treeDeps` (or override this) so no real process is enumerated or signalled.
    */
-  _killChildTree(child, { force = false, recorded = [] } = {}) {
-    killRecordedTree(child, recorded, { force, ...this._treeDeps })
+  _killChildTree(child, { force = false, recorded = [], handleOnly = false } = {}) {
+    killRecordedTree(child, recorded, { force, handleOnly, ...this._treeDeps })
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
@@ -2866,7 +2886,8 @@ export class CliSession extends BaseSession {
         // #9267: a follow-up accepted during the window is parked behind a child that
         // is gone; start the fresh one now (the path a new send takes) rather than
         // leaving it to wait for yet another message.
-        if (this._stoppedByUser && (this._outgoingQueue.length > 0 || this._pendingQueue.length > 0)) {
+        if (this._stoppedByUser && this._outgoingQueue.length > 0) {
+          this._drainOutgoingFirst = true // consumed by the fresh child's warmup drain
           this._restartAfterStop()
         }
       }
@@ -2885,7 +2906,7 @@ export class CliSession extends BaseSession {
     // tree here; the escalation timer is moot once the session is going away.
     for (const entry of this._retiredChildren) {
       clearTimeout(entry.timer)
-      try { this._killChildTree(entry.child, { force: true, recorded: entry.recorded }) } catch {}
+      try { this._killChildTree(entry.child, { force: true, recorded: entry.recorded, handleOnly: true }) } catch {}
     }
     this._retiredChildren.clear()
     // #5936: tear down the shared outgoing queue silently (no message_dequeued

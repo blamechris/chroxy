@@ -1,5 +1,8 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { DockerSession } from '../src/docker-session.js'
@@ -49,7 +52,7 @@ function dockerSession() {
   s.on('error', () => {})
   s._respawns = 0
   s._scheduleRespawn = () => { s._respawns++ }
-  s._treeDeps = { ps: () => '', startTimeOf: () => null, kill: () => {} }
+  s._treeDeps = { isWindows: false, ps: () => '', startTimeOf: () => null, kill: () => {}, taskkill: () => {} }
   const execs = []
   s._spawnDocker = () => { const c = fakeExec(); execs.push(c); return c }
   s.start = () => { s._spawnPersistentProcess([]) }
@@ -102,5 +105,41 @@ describe('DockerSession: a docker exec client the Stop timer retired (#9267)', (
     assert.equal(results.length, 1)
     assert.equal(s._respawns, 0)
     assert.equal(execs.length, 2)
+  })
+})
+
+describe('DockerSession: the first send after a Stop is not stranded by a synchronous restart (#9267)', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'chroxy-docker-stop-'))
+  after(() => rmSync(cwd, { recursive: true, force: true }))
+
+  it('Stop with nothing queued, then a send: the real start() is ready before the prompt is parked, and it is still dispatched', async (t) => {
+    // A folder with no trust record is decided without an async scan and an existing container means no
+    // `docker run`, so start() reaches ready and finishes its warmup drain synchronously.
+    const s = new DockerSession({ cwd })
+    open.push(s)
+    s._containerId = 'abcdef0123456789'
+    s.on('error', () => {})
+    s._treeDeps = { isWindows: false, ps: () => '', startTimeOf: () => null, kill: () => {}, taskkill: () => {} }
+    const writes = []
+    const execs = []
+    s._spawnDocker = () => {
+      const c = fakeExec()
+      c.stdin.on('data', (chunk) => writes.push(chunk.toString()))
+      execs.push(c)
+      return c
+    }
+    s.start()
+    assert.equal(s._processReady, true)
+    await s.sendMessage('first')
+    clearRealTimers(s)
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    s.interrupt()
+    t.mock.timers.tick(5000)
+    assert.equal(s._child, null)
+    await s.sendMessage('after-stop')
+    assert.equal(execs.length, 2, 'a fresh exec was started')
+    assert.equal(s._pendingQueue.length, 0, 'the prompt was not left parked')
+    assert.equal(writes.filter((w) => w.includes('after-stop')).length, 1, 'dispatched to the fresh child exactly once')
+    assert.equal(s._isBusy, true)
   })
 })
