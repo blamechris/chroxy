@@ -21,9 +21,10 @@
 #   - --config-patch merges into the scratch config (0600 kept), refuses every
 #     non-allowlisted key / invalid JSON / non-object before creating anything; and
 #     --stub-provider registers the keyless smoke-stub provider (#9189)
-#   - sweep (#8742) reaps only ABANDONED previews (launcher gone / PID reused /
-#     older than max age / dead daemon), refuses a foreign PID, never touches a
-#     symlink or a legacy record's launcher, and --dry-run changes nothing
+#   - sweep (#8742) reaps by AGE (and cleans a dead daemon); a gone/reused launcher
+#     is report-only unless --force past PREVIEW_DAEMON_FORCE_MIN_AGE; a PID now
+#     owned by another process is never signalled (its stale dir is just removed);
+#     symlinks/legacy launchers are never touched; --dry-run changes nothing
 #   - smoke-test.mjs accepts the script's preview.json (the override half of #8225)
 #
 # Run from anywhere:  bash scripts/__tests__/preview-daemon.test.sh
@@ -38,7 +39,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=140
+EXPECTED_CASES=150
 
 PASS=0
 FAIL=0
@@ -75,9 +76,14 @@ chmod +x "$WORK/hooks/pre-commit"
 printf '[core]\n\thooksPath = %s/hooks\n[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = BOGUSKEY\n' "$WORK" >"$HOME_T/.gitconfig"
 DECOY_PID=''
 LISTENER_PID=''
+SPAWNED=()
 cleanup() {
   [ -n "$DECOY_PID" ] && kill "$DECOY_PID" 2>/dev/null
   [ -n "$LISTENER_PID" ] && kill "$LISTENER_PID" 2>/dev/null
+  # Fake launchers / foreign sleeps the sweep cases spawned (reparented to init, so
+  # their command lines do not necessarily mention $WORK).
+  local sp
+  for sp in ${SPAWNED[@]+"${SPAWNED[@]}"}; do kill "$sp" 2>/dev/null; done
   # Any stub daemon a failing case left behind: only ones whose command line is
   # under WORK (never a pattern kill outside it).
   local p
@@ -493,7 +499,6 @@ SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 # written here.
 # =========================================================================
 SW_ROOT="$HOME_T/sweep-previews"; mkdir -p "$SW_ROOT"
-SPAWNED=()
 SWEEP_ENV=(PREVIEW_DAEMON_SKIP_BUILD=1)
 sweep() { env HOME="$HOME_T" PREVIEW_DAEMON_PARENT="$SW_ROOT" "${SWEEP_ENV[@]}" bash "$PD" sweep "$@"; }
 alive() { kill -0 "$1" 2>/dev/null; }
@@ -506,7 +511,7 @@ fake_daemon() {
   # shell would linger as a zombie, and stop's kill -0 poll would wait on it.
   FD_PID="$(node -e 'setInterval(()=>{},1e6)' -- start -c "$1/config/config.json" x >/dev/null 2>&1 </dev/null & echo $!)"; SPAWNED+=("$FD_PID")
 }
-fake_launcher() { FL_PID="$(sleep 300 >/dev/null 2>&1 </dev/null & echo $!)"; SPAWNED+=("$FL_PID"); }
+fake_launcher() { FL_PID="$(sleep 300 >/dev/null 2>&1 & echo $!)"; SPAWNED+=("$FL_PID"); }
 # mk_preview <name> <daemon-pid> [json-extra-object]: writes preview.json in the swept root.
 mk_preview() {
   local d="$SW_ROOT/chroxy-smoke.$1"
@@ -516,6 +521,8 @@ mk_preview() {
 }
 reap_wait() { local i=0; while alive "$1" && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; }
 kill_launcher() { kill "$1" 2>/dev/null; reap_wait "$1"; }
+# a launcher record whose start time cannot match (the caller has killed it, or it is another process)
+rec_launcher_dead() { echo "{\"launcher_pid\":$1,\"launcher_started\":\"Mon Jan 1 00:00:00 2001\",\"started_at\":$(( $(date +%s) - $2 ))}"; }
 rec_launcher() { echo "{\"launcher_pid\":$1,\"launcher_started\":\"$(norm_lstart "$1")\",\"started_at\":${2:-$(date +%s)}}"; }
 
 USAGE_TXT="$(pd 2>&1)"; case "$USAGE_TXT" in *"preview-daemon.sh sweep"*"--dry-run"*) true ;; *) false ;; esac && pass "usage documents the sweep subcommand" || fail "usage documents the sweep subcommand"
@@ -556,24 +563,51 @@ sleep 0.3
 sweep >"$WORK/sw.out" 2>&1; RC=$?
 if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ] && grep -q "chroxy-smoke.young: keep" "$WORK/sw.out"; then pass "sweep leaves a young preview with a live launcher alone (daemon alive, dir kept)"; else fail "sweep leaves a young preview with a live launcher alone (daemon alive, dir kept)" "rc=$RC $(cat "$WORK/sw.out")"; fi
 
-# --- --dry-run on an abandoned preview: reports, changes nothing -----------
+# --- launcher gone is REPORT-ONLY by default (the #8742 review blocker) -------
 kill_launcher "$LP"
-sweep --dry-run >"$WORK/sw.out" 2>&1; RC=$?
-if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ] && grep -q "chroxy-smoke.young: would stop+clean (launcher pid $LP is gone)" "$WORK/sw.out"; then pass "sweep --dry-run reports an abandoned preview but kills and removes nothing"; else fail "sweep --dry-run reports an abandoned preview but kills and removes nothing" "rc=$RC alive=$(alive "$DP" && echo y || echo n) $(cat "$WORK/sw.out")"; fi
-
-# --- launcher dead: daemon stopped, dir removed -----------------------------
 sweep >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ] && grep -q "chroxy-smoke.young: report: launcher pid $LP is gone" "$WORK/sw.out"; then pass "sweep only REPORTS a gone launcher by default (daemon alive, dir kept)"; else fail "sweep only REPORTS a gone launcher by default (daemon alive, dir kept)" "rc=$RC $(cat "$WORK/sw.out")"; fi
+# even an OLD preview with a gone launcher is kept without --force (age < max age)
+mk_preview young "$DP" "$(rec_launcher_dead "$LP" 3600)"
+sweep >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ]; then pass "sweep without --force keeps a 1 h old preview whose launcher is gone"; else fail "sweep without --force keeps a 1 h old preview whose launcher is gone" "rc=$RC $(cat "$WORK/sw.out")"; fi
+# --force below the grace: still kept
+mk_preview young "$DP" "$(rec_launcher_dead "$LP" 60)"
+sweep --force >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ] && grep -q "grace not reached" "$WORK/sw.out"; then pass "sweep --force still keeps a preview younger than PREVIEW_DAEMON_FORCE_MIN_AGE"; else fail "sweep --force still keeps a preview younger than PREVIEW_DAEMON_FORCE_MIN_AGE" "rc=$RC $(cat "$WORK/sw.out")"; fi
+# --force past the grace: dry-run changes nothing, then it acts
+mk_preview young "$DP" "$(rec_launcher_dead "$LP" 3600)"
+sweep --force --dry-run >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_YOUNG" ] && grep -q "chroxy-smoke.young: would stop+clean (launcher pid $LP is gone" "$WORK/sw.out"; then pass "sweep --force --dry-run reports an abandoned preview but kills and removes nothing"; else fail "sweep --force --dry-run reports an abandoned preview but kills and removes nothing" "rc=$RC alive=$(alive "$DP" && echo y || echo n) $(cat "$WORK/sw.out")"; fi
+sweep --force >"$WORK/sw.out" 2>&1; RC=$?
 reap_wait "$DP"
-if [ "$RC" -eq 0 ] && ! alive "$DP" && [ ! -e "$D_YOUNG" ] && grep -q "chroxy-smoke.young: stop+clean (launcher pid $LP is gone): ok" "$WORK/sw.out"; then pass "sweep stops the daemon and removes the dir when its launcher is gone"; else fail "sweep stops the daemon and removes the dir when its launcher is gone" "rc=$RC $(cat "$WORK/sw.out")"; fi
+if [ "$RC" -eq 0 ] && ! alive "$DP" && [ ! -e "$D_YOUNG" ] && grep -q "chroxy-smoke.young: stop+clean (launcher pid $LP is gone.*): ok" "$WORK/sw.out"; then pass "sweep --force stops and removes a gone-launcher preview once past the grace"; else fail "sweep --force stops and removes a gone-launcher preview once past the grace" "rc=$RC $(cat "$WORK/sw.out")"; fi
 
-# --- launcher PID reused (alive, different lstart) ---------------------------
+# --- blocker regression: start under a wrapper that exits right away ----------
+OUT="$(env HOME="$HOME_T" PREVIEW_DAEMON_PARENT="$SW_ROOT" PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_CLI="$STUB_OK" PREVIEW_DAEMON_HEALTH_TIMEOUT=20 \
+  sh -c 'bash "$1" start; exit 0' _ "$PD" 2>/dev/null)"
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+WL="$(json "$SP/preview.json" launcher_pid 2>/dev/null)"; WD="$(json "$SP/preview.json" pid 2>/dev/null)"
+if [ -n "$SP" ] && alive "$WD" && [ -n "$WL" ] && ! alive "$WL"; then pass "setup: a start under a short-lived wrapper records a launcher that is already dead"; else fail "setup: a start under a short-lived wrapper records a launcher that is already dead" "sp=$SP wl=$WL wd=$WD"; fi
+sweep >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$WD" && [ -d "$SP" ]; then pass "sweep does NOT reap a healthy young preview whose launcher shell already exited"; else fail "sweep does NOT reap a healthy young preview whose launcher shell already exited" "rc=$RC $(cat "$WORK/sw.out")"; fi
+sweep --force >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$WD" && [ -d "$SP" ]; then pass "sweep --force does NOT reap that young preview either (below the grace)"; else fail "sweep --force does NOT reap that young preview either (below the grace)" "rc=$RC $(cat "$WORK/sw.out")"; fi
+node -e 'const f=process.argv[1],r=JSON.parse(require("fs").readFileSync(f,"utf8"));r.started_at=Math.floor(Date.now()/1000)-3600;require("fs").writeFileSync(f,JSON.stringify(r))' "$SP/preview.json"
+sweep --force >"$WORK/sw.out" 2>&1; RC=$?
+reap_wait "$WD"
+if [ "$RC" -eq 0 ] && ! alive "$WD" && [ ! -e "$SP" ]; then pass "sweep --force reaps that preview once it is past the grace"; else fail "sweep --force reaps that preview once it is past the grace" "rc=$RC $(cat "$WORK/sw.out")"; fi
+
+# --- launcher PID reused (alive, different lstart): report-only, --force acts ---
 fake_launcher; LP=$FL_PID
 D_RE="$SW_ROOT/chroxy-smoke.reused"; fake_daemon "$D_RE"; DP=$FD_PID
-mk_preview reused "$DP" "{\"launcher_pid\":$LP,\"launcher_started\":\"Mon Jan 1 00:00:00 2001\",\"started_at\":$(date +%s)}"
+mk_preview reused "$DP" "{\"launcher_pid\":$LP,\"launcher_started\":\"Mon Jan 1 00:00:00 2001\",\"started_at\":$(( $(date +%s) - 3600 ))}"
 sleep 0.3
 sweep >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$DP" && [ -d "$D_RE" ] && grep -q "was reused" "$WORK/sw.out"; then pass "sweep only reports a launcher whose PID was reused (different lstart)"; else fail "sweep only reports a launcher whose PID was reused (different lstart)" "rc=$RC $(cat "$WORK/sw.out")"; fi
+sweep --force >"$WORK/sw.out" 2>&1; RC=$?
 reap_wait "$DP"
-if [ "$RC" -eq 0 ] && alive "$LP" && ! alive "$DP" && [ ! -e "$D_RE" ] && grep -q "was reused" "$WORK/sw.out"; then pass "sweep treats a launcher whose PID was reused (different lstart) as gone"; else fail "sweep treats a launcher whose PID was reused (different lstart) as gone" "rc=$RC $(cat "$WORK/sw.out")"; fi
+if [ "$RC" -eq 0 ] && alive "$LP" && ! alive "$DP" && [ ! -e "$D_RE" ]; then pass "sweep --force treats a reused launcher PID as gone once past the grace (launcher untouched)"; else fail "sweep --force treats a reused launcher PID as gone once past the grace (launcher untouched)" "rc=$RC $(cat "$WORK/sw.out")"; fi
 kill_launcher "$LP"
 
 # --- older than max age -------------------------------------------------------
@@ -590,25 +624,32 @@ reap_wait "$DP"
 if [ "$RC" -eq 0 ] && alive "$LP" && ! alive "$DP" && [ ! -e "$D_OLD" ] && grep -q "older than max age" "$WORK/sw.out"; then pass "sweep stops and removes a preview older than PREVIEW_DAEMON_MAX_AGE even with a live launcher"; else fail "sweep stops and removes a preview older than PREVIEW_DAEMON_MAX_AGE even with a live launcher" "rc=$RC $(cat "$WORK/sw.out")"; fi
 SWEEP_ENV=(PREVIEW_DAEMON_SKIP_BUILD=1)
 kill_launcher "$LP"
+env HOME="$HOME_T" PREVIEW_DAEMON_PARENT="$SW_ROOT" PREVIEW_DAEMON_FORCE_MIN_AGE=x bash "$PD" sweep >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 2 ] && pass "sweep rejects a non-numeric PREVIEW_DAEMON_FORCE_MIN_AGE (exit 2)" || fail "sweep rejects a non-numeric PREVIEW_DAEMON_FORCE_MIN_AGE (exit 2)" "rc=$RC"
 
 # --- recorded daemon PID dead: clean only, nothing killed ----------------------
 fake_launcher; LP=$FL_PID
-DEADP="$(sleep 0.01 >/dev/null 2>&1 </dev/null & echo $!)"; reap_wait "$DEADP"
+DEADP="$(sleep 0.01 >/dev/null 2>&1 & echo $!)"; reap_wait "$DEADP"
 D_DEAD="$SW_ROOT/chroxy-smoke.deaddaemon"
 mk_preview deaddaemon "$DEADP" "$(rec_launcher "$LP")"
 sweep >"$WORK/sw.out" 2>&1; RC=$?
 if [ "$RC" -eq 0 ] && [ ! -e "$D_DEAD" ] && alive "$LP" && grep -q "chroxy-smoke.deaddaemon: clean (daemon pid $DEADP is not running): ok" "$WORK/sw.out"; then pass "sweep just cleans a preview whose recorded daemon PID is dead (launcher untouched)"; else fail "sweep just cleans a preview whose recorded daemon PID is dead (launcher untouched)" "rc=$RC $(cat "$WORK/sw.out")"; fi
 kill_launcher "$LP"
 
-# --- foreign process on the recorded PID: refused ------------------------------
-FOREIGN="$(sleep 300 >/dev/null 2>&1 </dev/null & echo $!)"; SPAWNED+=("$FOREIGN")
+# --- foreign process on the recorded PID: the preview is dead; never signalled --
+FOREIGN="$(sleep 300 >/dev/null 2>&1 & echo $!)"; SPAWNED+=("$FOREIGN")
 D_FOR="$SW_ROOT/chroxy-smoke.foreign"
 mk_preview foreign "$FOREIGN" "{\"launcher_pid\":999999,\"launcher_started\":\"Mon Jan 1 00:00:00 2001\",\"started_at\":$(date +%s)}"
-sweep --dry-run >"$WORK/sw.out" 2>&1; RC=$?
-grep -q "chroxy-smoke.foreign: would REFUSE" "$WORK/sw.out" && alive "$FOREIGN" && [ "$RC" -eq 0 ] && pass "sweep --dry-run flags a foreign PID as would-REFUSE" || fail "sweep --dry-run flags a foreign PID as would-REFUSE" "rc=$RC $(cat "$WORK/sw.out")"
 sweep >"$WORK/sw.out" 2>&1; RC=$?
-if [ "$RC" -eq 4 ] && alive "$FOREIGN" && [ -d "$D_FOR" ] && grep -q "chroxy-smoke.foreign: .*FAILED rc=4" "$WORK/sw.out"; then pass "sweep REFUSES a foreign process on the recorded PID (exit 4, process untouched, dir kept, preview named)"; else fail "sweep REFUSES a foreign process on the recorded PID (exit 4, process untouched, dir kept, preview named)" "rc=$RC alive=$(alive "$FOREIGN" && echo y || echo n) $(cat "$WORK/sw.out")"; fi
-kill "$FOREIGN" 2>/dev/null; reap_wait "$FOREIGN"; rm -rf "$D_FOR"
+if [ "$RC" -eq 0 ] && alive "$FOREIGN" && [ -d "$D_FOR" ] && grep -q "chroxy-smoke.foreign: report: daemon pid $FOREIGN now belongs to another process" "$WORK/sw.out"; then pass "sweep reports a young preview whose PID now belongs to another process; dir kept, process untouched"; else fail "sweep reports a young preview whose PID now belongs to another process; dir kept, process untouched" "rc=$RC $(cat "$WORK/sw.out")"; fi
+mk_preview foreign "$FOREIGN" "{\"started_at\":$(( $(date +%s) - 3600 ))}"
+SWEEP_ENV=(PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_MAX_AGE=60)
+sweep --dry-run >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$FOREIGN" && [ -d "$D_FOR" ] && grep -q "chroxy-smoke.foreign: would remove (daemon pid $FOREIGN now belongs to another process" "$WORK/sw.out"; then pass "sweep --dry-run says it would remove a stale dead preview without touching the foreign process"; else fail "sweep --dry-run says it would remove a stale dead preview without touching the foreign process" "rc=$RC $(cat "$WORK/sw.out")"; fi
+sweep >"$WORK/sw.out" 2>&1; RC=$?
+if [ "$RC" -eq 0 ] && alive "$FOREIGN" && [ ! -e "$D_FOR" ] && grep -q "chroxy-smoke.foreign: remove (.*): ok" "$WORK/sw.out"; then pass "sweep removes a stale preview whose PID was reused, WITHOUT signalling the foreign process"; else fail "sweep removes a stale preview whose PID was reused, WITHOUT signalling the foreign process" "rc=$RC alive=$(alive "$FOREIGN" && echo y || echo n) $(cat "$WORK/sw.out")"; fi
+SWEEP_ENV=(PREVIEW_DAEMON_SKIP_BUILD=1)
+kill "$FOREIGN" 2>/dev/null; reap_wait "$FOREIGN"
 
 # --- symlink / not directly under the root: never touched ------------------------
 OUTSIDE="$WORK/outside-previews"; rm -rf "$OUTSIDE"; mkdir -p "$OUTSIDE/chroxy-smoke.elsewhere/config"
