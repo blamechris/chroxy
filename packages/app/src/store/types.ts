@@ -315,8 +315,9 @@ export interface SessionState extends BaseSessionState {
   // daemon's last `folder_trust_state` for the session (null until one arrives;
   // the daemon re-sends on ready, subscribe and switch). It lives on the session,
   // so a removed session takes it along. The request marker and the failure text
-  // belong to a trust change this client sent: both are cleared when the socket
-  // closes, because the reply can never arrive on a dead socket.
+  // belong to a trust change this client sent. The marker is cleared when the
+  // socket closes, because the reply can never arrive on a dead socket; the
+  // failure text stays until the next attempt or a successful reply.
   folderTrust: FolderTrustEntry | null;
   folderTrustPendingRequestId: string | null;
   folderTrustError: string | null;
