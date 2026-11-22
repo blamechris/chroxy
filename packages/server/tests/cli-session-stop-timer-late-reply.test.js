@@ -109,7 +109,6 @@ if (typeof mock.module !== 'function') {
   describe('claude-cli: Stop safety timer vs a child that ignored SIGINT (#9267)', { skip: SKIP_WIN }, () => {
     it('drops the late reply and result of the retired child (through the real readline callback)', async (t) => {
       const session = await startedSession()
-      const old = session._child
       const rl = session._rl
       const w = watch(session)
       await stopAndExpire(t, session)
@@ -118,7 +117,7 @@ if (typeof mock.module !== 'function') {
       rl.emit('line', reply('I kept running after SIGINT.').trim())
       assert.equal(w.messages.length, 0, 'no message on the ended turn')
       assert.equal(w.results.length, 1, 'no second result')
-      assert.notEqual(session._child, old)
+      assert.equal(session._child, null, 'the retired child is no longer current')
     })
 
     it('SIGTERMs the child tree that ignored SIGINT, SIGKILLing after a grace', async (t) => {
@@ -296,7 +295,6 @@ if (typeof mock.module !== 'function') {
       session._treeDeps = {
         isWindows: false,
         ps: () => Object.entries(procs).map(([pid, p]) => `${pid} ${p.ppid} ${p.started}`).join('\n'),
-        startTimeOf: (pid) => (pid === old.pid ? null : procs[pid]?.started ?? null),
         kill: (pid, sig) => signals.push([pid, sig]),
         taskkill: () => {},
       }
@@ -305,6 +303,72 @@ if (typeof mock.module !== 'function') {
       old.emit('close', 0) // the parent exits; the production close listener runs and must not cancel anything
       t.mock.timers.tick(3000)
       assert.deepEqual(signals, [[9001, 'SIGTERM'], [9001, 'SIGKILL']])
+    })
+    it('a listener that sends B during the timer\'s emit still gets A (queued in the window) first, then B after A\'s result', async (t) => {
+      const session = await startedSession()
+      const old = session._child
+      const sent = []
+      const realSend = session.sendMessage.bind(session)
+      session.sendMessage = (prompt, ...rest) => { sent.push(prompt); return realSend(prompt, ...rest) }
+      await session.sendMessage('first')
+      clearRealTimers(session)
+      t.mock.timers.enable({ apis: ['setTimeout'] })
+      session.interrupt()
+      await session.sendMessage('A') // accepted in the window: outgoing queue
+      let sentB = false
+      session.on('result', () => { if (!sentB) { sentB = true; session.sendMessage('B') } }) // restarts the child itself
+      sent.length = 0
+      t.mock.timers.tick(5000)
+      assert.notEqual(session._child, old)
+      await until(() => session._processReady && sent.includes('A'), 'A dispatched')
+      await new Promise((resolve) => setImmediate(resolve))
+      // `sent` counts calls: B once (the listener's own send, which parks it), A once (the dequeue).
+      assert.equal(sent.filter((p) => p === 'B').length, 1, 'B has not been dispatched ahead of A')
+      assert.equal(session._pendingQueue.length, 1, 'B is still parked')
+      session._rl.emit('line', reply('answer A').trim())
+      await until(() => sent.filter((p) => p === 'B').length >= 2, 'B dispatched after A\'s result')
+    })
+
+    it('a restart that did not start leaves no stale drain-first flag (respawning, destroying, refused, throwing)', async () => {
+      const session = await startedSession()
+      session._child = null
+      for (const arm of [
+        () => { session._respawning = true },
+        () => { session._destroying = true },
+        () => { session.start = () => { session._spawnRefusal = { code: 'refused' } } },
+        () => { session.start = () => { throw new Error('boom') } },
+      ]) {
+        session._respawning = false
+        session._destroying = false
+        session._spawnRefusal = null
+        session._stoppedByUser = true
+        session._drainOutgoingFirst = true
+        arm()
+        session._restartAfterStop()
+        assert.equal(session._drainOutgoingFirst, false)
+      }
+      session._destroying = true // keep afterEach teardown inert
+    })
+
+    it('after a no-op restart, a later respawn warmup drains what it always did (outgoing queue untouched)', async () => {
+      const session = await startedSession()
+      session._child = null
+      session._respawning = true
+      session._stoppedByUser = true
+      session._drainOutgoingFirst = true
+      session._restartAfterStop() // no-op: another respawn owns the child
+      session._respawning = false
+      session._isBusy = false
+      session._outgoingQueue.push({ prompt: 'held', attachments: undefined, sendOptions: {} })
+      session._drainPendingQueue() // the warmup of that other respawn
+      assert.equal(session._outgoingQueue.length, 1)
+    })
+
+    it('destroy() clears the drain-first flag', async () => {
+      const session = await startedSession()
+      session._drainOutgoingFirst = true
+      session.destroy()
+      assert.equal(session._drainOutgoingFirst, false)
     })
   })
 }

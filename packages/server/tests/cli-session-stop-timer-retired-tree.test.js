@@ -27,7 +27,7 @@ function world(procs) {
     // real taskkill (or ps / process.kill): every table, start time and signal is injected.
     isWindows: false,
     ps: () => { w.psCalls++; return Object.entries(w.procs).map(([pid, p]) => `${pid} ${p.ppid} ${p.started ?? ''}`).join('\n') },
-    startTimeOf: (pid) => w.procs[pid]?.started ?? null,
+    startTimeOf: () => { throw new Error('per-pid ps -p lookup: the snapshot is the only source') },
     kill: (pid, sig) => { w.signals.push([pid, sig]) },
     taskkill: (pid) => { w.taskkills.push(pid) },
   }
@@ -92,6 +92,24 @@ describe('platform: recordProcessTree / killRecordedTree (#9267)', () => {
     const w = world({ 7001: { ppid: PARENT, started: 'a' } })
     assert.deepEqual(recordProcessTree({ pid: PARENT }, w.deps), [])
     assert.deepEqual(recordProcessTree({ pid: PARENT }, { isWindows: false, ps: () => { throw new Error('no ps') } }), [])
+  })
+
+  it('takes ONE process-table snapshot per kill however many descendants were recorded', () => {
+    const w = world({
+      7001: { ppid: PARENT, started: 'a' }, 7002: { ppid: PARENT, started: 'b' }, 7003: { ppid: 7001, started: 'c' },
+    })
+    const rec = [{ pid: 7001, started: 'a' }, { pid: 7002, started: 'b' }, { pid: 7003, started: 'c' }]
+    killRecordedTree({ kill() {} }, rec, { force: true, ...w.deps })
+    assert.equal(w.psCalls, 1)
+    assert.equal(w.signals.length, 3)
+  })
+
+  it('a failed snapshot signals no descendant, and the handle kill still runs', () => {
+    const w = world({ 7001: { ppid: PARENT, started: 'a' } })
+    const kills = []
+    killRecordedTree({ kill: (s) => kills.push(s) }, [{ pid: 7001, started: 'a' }], { force: true, ...w.deps, ps: () => { throw new Error('no ps') } })
+    assert.deepEqual(w.signals, [])
+    assert.deepEqual(kills, ['SIGKILL'])
   })
 
   it('a record without a start time is never signalled', () => {

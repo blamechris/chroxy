@@ -2734,9 +2734,12 @@ export class CliSession extends BaseSession {
    */
   _restartAfterStop() {
     if (!this._stoppedByUser && !this._spawnRefusal) return
-    if (this._destroying) return
-    if (this._respawning) return
-    if (this._respawnScheduled) return
+    // #9267: no restart of OURS is coming in these three, so a pending drain-first flag
+    // must not be left for another respawn's warmup to consume.
+    if (this._destroying || this._respawning || this._respawnScheduled) {
+      this._drainOutgoingFirst = false
+      return
+    }
     // A child already exists — whoever spawned it owns the warmup drain.
     if (this._child) return
 
@@ -2757,7 +2760,9 @@ export class CliSession extends BaseSession {
     this._spawnRefusal = null
     try {
       this.start()
+      if (this._spawnRefusal) this._drainOutgoingFirst = false // the gate refused: no child is coming
     } catch (err) {
+      this._drainOutgoingFirst = false
       // Re-arm the latch: start() threw synchronously (spawn/arg failure) BEFORE
       // any child or container launch, so nothing was started. Without this the
       // latch stays consumed and the next sendMessage would only enqueue — never
@@ -2881,14 +2886,18 @@ export class CliSession extends BaseSession {
         // stopped. Retire THAT child first, so nothing it says later can grow a
         // reply onto the ended turn, and so a send from the result listener
         // starts a fresh child instead of writing to this one.
-        if (this._child === interruptedChild) this._retireUnresponsiveChild(interruptedChild)
+        const retired = this._child === interruptedChild
+        if (retired) this._retireUnresponsiveChild(interruptedChild)
+        // The follow-ups accepted in the window must go first whichever restart happens, the
+        // timer's or a synchronous `result` listener's send, so decide BEFORE the emit.
+        if (retired && this._outgoingQueue.length > 0) this._drainOutgoingFirst = true
         this._emitInterruptedTurnResult(0, 'user_stop')
         // #9267: a follow-up accepted during the window is parked behind a child that
         // is gone; start the fresh one now (the path a new send takes) rather than
         // leaving it to wait for yet another message.
-        if (this._stoppedByUser && this._outgoingQueue.length > 0) {
-          this._drainOutgoingFirst = true // consumed by the fresh child's warmup drain
-          this._restartAfterStop()
+        if (this._stoppedByUser) {
+          if (this._outgoingQueue.length > 0) this._restartAfterStop()
+          else this._drainOutgoingFirst = false // nothing left to put first, and no restart is coming
         }
       }
     }, 5000)
@@ -2902,6 +2911,7 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
+    this._drainOutgoingFirst = false
     // #9267: a child the Stop timer retired is no longer `_child`, so reach its
     // tree here; the escalation timer is moot once the session is going away.
     for (const entry of this._retiredChildren) {

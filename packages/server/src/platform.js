@@ -729,10 +729,13 @@ export function killRecordedTree(child, recorded = [], { force = false, handleOn
   }
   const signal = force ? 'SIGKILL' : 'SIGTERM'
   const kill = deps.kill || process.kill
-  for (let i = recorded.length - 1; i >= 0; i--) {
+  // ONE bounded snapshot decides every descendant (not one `ps -p` per pid), which also
+  // narrows the check-to-kill window. No snapshot: signal no descendant, the handle still runs.
+  const table = recorded.length > 0 ? processTableSnapshot(deps) : null
+  for (let i = recorded.length - 1; table && i >= 0; i--) {
     const { pid, started } = recorded[i]
     if (!started) continue // no identity, never signalled
-    if (processStartTime(pid, deps) !== started) continue // gone, or a recycled pid
+    if (table.get(pid)?.started !== started) continue // gone, or a recycled pid
     try { kill(pid, signal) } catch { /* already gone */ }
   }
   try { child.kill(signal) } catch { /* already gone */ }
