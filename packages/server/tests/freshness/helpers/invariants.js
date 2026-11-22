@@ -166,7 +166,7 @@ function advanceRuns(mon, sk, b, own) {
 function spec(mon, id, origin) {
   let it = mon.items.get(id)
   if (!it) {
-    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false }
+    it = { id, origin, open: false, episode: 0, usedRefs: new Set(), state: 'none', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, fp: null, contentRef: null, reportId: null, exhausted: false, openedBy: null, sk: null, source: null, asks: new Map(), endedRefs: new Set(), stood: new Set(), owed: false, noShow: false, roundOwed: 0, roundTick: null, roundJoins: 0, roundShown: 0 }
     mon.items.set(id, it)
   }
   return it
@@ -440,7 +440,7 @@ function onRecord(mon, h, r) {
         if (it.open) fail('I5', `a second episode opened while one is open (${b.origin})`)
         if (it.usedRefs.has(b.opened_by)) fail('I5', `an episode opened on an opening reference already used (${b.origin})`)
         if (b.episode !== it.episode + 1) fail('I5', `episode ${b.episode} after ${it.episode}`)
-        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map() })
+        Object.assign(it, { open: true, episode: b.episode, state: 'queued', shows: 0, counted: 0, reminders: 0, returns: 0, deferrals: 0, maxSeen: mon.config.surface.max_presentations, fp: b.fingerprint, contentRef: b.content_ref, reportId: b.report_id, exhausted: false, openedBy: b.opened_by, sk, source: b.source, seed: b.seed ?? null, carried: [], own: new Map(), roundOwed: 0, roundTick: null, roundJoins: 0, roundShown: 0 })
         it.usedRefs.add(b.opened_by)
         if (b.ask) {
           // I5: an ask opens only on a reference no earlier ask of the item stood on.
@@ -460,7 +460,15 @@ function onRecord(mon, h, r) {
       const max = mon.config.surface.max_presentations
       it.maxSeen = Math.max(it.maxSeen ?? max, max)
       const sending = b.phase === 'attempt'
-      if (sending && it.exhausted) {
+      // A prompt round's show, as this monitor counts them: a show made while
+      // a round that joined with the counted shows used is still owed one,
+      // unless it is an ordinary show that serves the round as well: a queued
+      // item with a counted show left (the limit was raised since), or the
+      // owner's deferral coming due.
+      const deferralDue = it.state === 'deferred' && it.deferUntil != null && Date.parse(r.ts) >= it.deferUntil
+      const ordinary = (it.state === 'queued' && it.counted < max) || deferralDue
+      const roundShow = sending && b.step === 'shown' && it.roundOwed > 0 && !ordinary
+      if (sending && it.exhausted && !roundShow) {
         // I6: an exhausted item sends nothing unless its content changed while a counted show remained.
         fail('I6', `an exhausted item sent '${b.step}' without a content change while a counted show remained`)
       }
@@ -473,6 +481,15 @@ function onRecord(mon, h, r) {
           if (mon.lastPreempted && mon.lastPreempted === it.id && sending) fail('I2c', 'the first show after a preemption was the preempted item')
           if (sending) mon.lastPreempted = null
           it.shows += 1
+          if (roundShow) {
+            // It takes nothing: the item keeps the state it had.
+            it.roundOwed -= 1
+            it.roundShown += 1
+            mon.stats.shows += 1
+            mon.stats.roundShows = (mon.stats.roundShows ?? 0) + 1
+            break
+          }
+          if (sending) it.roundOwed = 0
           const counted = it.state !== 'deferred'
           if (counted) it.counted += 1
           else it.deferredShows = (it.deferredShows ?? 0) + 1
@@ -481,8 +498,10 @@ function onRecord(mon, h, r) {
           // I13: a new ask found no counted show left, so nothing is shown for it.
           if (sending && counted && it.noShow) fail('I13', 'an owner item with no counted show left was shown for a new ask')
           if (sending && counted) it.owed = false
-          // I1a: a counted show stays within the limit in force when it is made.
-          if (sending && counted && it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max})`)
+          // I1a: a counted show stays within the limit in force when it is
+          // made; beyond it, only the one show each prompt round earned
+          // (counted above, from this monitor's own count of rounds).
+          if (sending && counted && it.counted > max) fail('I1a', `${it.counted} counted shows in one episode (max ${max}), with ${it.roundJoins} rounds after the limit and none owed`)
           if (sending && counted && b.shows_counted > max) fail('I1a', `stored shows_counted ${b.shows_counted} above max ${max}`)
           // I12: one condition, however many episodes, within the show limit.
           if (sending && counted && it.root && ++account(mon, it).counted > max) fail('I12', `one condition was shown ${account(mon, it).counted} counted times across its episodes (max ${max})`)
@@ -506,6 +525,7 @@ function onRecord(mon, h, r) {
           mon.lastPreempted = it.id
           break
         case 'deferred':
+          it.deferUntil = b.until ?? null
           if (it.root) account(mon, it).deferrals += 1
           it.deferrals += 1
           it.state = 'deferred'
@@ -530,13 +550,19 @@ function onRecord(mon, h, r) {
               // I13: a new ask with a counted show left is owed one; with none
               // left it may change only the content.
               if (it.counted < max) it.owed = mon.lastTickOf.get(b.source) ?? true
-              else it.noShow = true
+              else if (kind === 'prompt') {
+                // A prompt round after the limit is owed exactly one show.
+                it.roundOwed = 1
+                it.roundJoins += 1
+                it.roundTick = mon.lastTickOf.get(b.source) ?? true
+              } else it.noShow = true
               mon.stats.joins = (mon.stats.joins ?? 0) + 1
             } else if (b.ask.op === 'end') {
               const mine = it.asks.get(kind)
               if (!mine) fail('I10', `an owner item ended a ${kind} ask it does not carry`)
               if (!askEnded(mon, sk, kind, mine, b.ask.how)) fail('I4b', `a ${kind} ask was ended (${b.ask.how}) without its evidence`)
               it.asks.delete(kind)
+              if (kind === 'prompt') it.roundOwed = 0
               for (const ref of mine.stood) it.endedRefs.add(ref)
               changed = false
             } else {
@@ -619,14 +645,14 @@ function onRecord(mon, h, r) {
       // I1: per-episode bounds, from this monitor's own count...
       if (it.reminders > 2) fail('I1b', `${it.reminders} reminders in one episode`)
       if (it.returns > 1) fail('I1c', `${it.returns} returns in one episode`)
-      if (it.shows > it.maxSeen + it.deferrals) fail('I1d', `${it.shows} shows exceed max ${it.maxSeen} plus ${it.deferrals} deferrals`)
+      if (it.shows > it.maxSeen + it.deferrals + it.roundShown) fail('I1d', `${it.shows} shows exceed max ${it.maxSeen} plus ${it.deferrals} deferrals and ${it.roundShown} round shows`)
       // ...and from the model's stored counters.
       if (b.reminders_used > 2) fail('I1b', `stored reminders_used ${b.reminders_used}`)
       if (b.returns_used > 1) fail('I1c', `stored returns_used ${b.returns_used}`)
       // A condition's episodes continue one presentation count, so its stored
       // count is bounded by the deferrals of all of them.
       const deferrals = it.root ? account(mon, it).deferrals : it.deferrals
-      if (b.presentation > b.shows_counted + deferrals) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${deferrals} deferrals`)
+      if (b.presentation > b.shows_counted + deferrals + it.roundShown) fail('I1d', `presentation ${b.presentation} above ${b.shows_counted} counted plus ${deferrals} deferrals and ${it.roundShown} round shows`)
       break
     }
     case 'owner_ack': {
@@ -681,6 +707,17 @@ function onTickClosed(mon, h, r) {
     if (!it.open || it.counted >= cfg.surface.max_presentations) continue
     if (it.state === 'queued' && holder && holder !== it) continue
     fail('I13', `an owner item owed a show for a new ask is ${it.state === 'queued' ? 'queued with the slot free' : it.state} at the end of the tick, not shown`)
+  }
+  // I13, for prompt rounds after the limit: the round's one show is made by
+  // the end of its tick, at once if the item held the slot, else as the tick
+  // fills the slot; still owed at the end, the item must be waiting behind
+  // another that holds the slot.
+  for (const it of mon.items.values()) {
+    if (it.roundTick !== tick) continue
+    it.roundTick = null
+    if (!it.open || it.roundOwed === 0) continue
+    if (holder && holder !== it) continue
+    fail('I13', `a prompt round that joined with the counted shows used was not shown (item ${it.state}${holder ? ', holding the slot' : ', the slot free'})`)
   }
   for (const it of mon.items.values()) it.noShow = false
   const budget = cfg.investigation_budget_per_tick
@@ -782,6 +819,13 @@ export function checkStep(mon, h, { complete = true } = {}) {
   // I2: at most one item active at any moment.
   const active = [...mon.items.values()].filter((it) => it.open && it.state === 'active')
   if (active.length > 1) fail('I2', `${active.length} items active at once (${active.map((a) => a.origin).join(', ')})`)
+  // ...and the item that holds the slot in the model is the one that holds it
+  // in this monitor's account (a round's show takes no slot).
+  const holds = (st) => st === 'active' || st === 'acknowledged'
+  for (const it of mon.items.values()) {
+    const m = h.ctx.state.items.get(it.id)
+    if (it.open && m?.open && holds(it.state) !== holds(m.state)) fail('I2', `an item holds the slot in the model (${m.state}) but not in the ledger account (${it.state}), or the reverse`)
+  }
   // I4c: the model's derived open set equals this monitor's account of the
   // same records. Both are folds of one ledger, so this catches a fold that
   // drops or keeps an item wrongly; it cannot see an item never raised

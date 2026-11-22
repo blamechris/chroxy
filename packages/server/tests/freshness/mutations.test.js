@@ -24,7 +24,7 @@ import * as W from './helpers/world.js'
 const SEEDS = {
   I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, 'I2c.front': 3681, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, 'I5.content': 76, I6: 271,
   I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6,
-  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 18,
+  I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 30, 'I13.round': 18, 'I13.declared': 66, 'I1a.round2': 18, 'I1a.restore': 18, 'I2.round': 59,
   ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 70, reReadOnResume: 4, raiseBesideOwnerBlock: 7, twoOwnerItems: 6,
   onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
 }

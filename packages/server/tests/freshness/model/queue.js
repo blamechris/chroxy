@@ -18,7 +18,7 @@ import { put } from './checks.js'
 import { H } from './hash.js'
 import { SENDING_STEPS, itemIds, ownerAckKey, sessionKey, surfaceKey, systemKey } from './keys.js'
 
-const ZERO = Object.freeze({ presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0 })
+const ZERO = Object.freeze({ presentation: 0, shows_counted: 0, reminders_used: 0, returns_used: 0, round_shows: 0 })
 const DISMISSABLE = new Set(['seed', 'issue', 'attention', 'gone'])
 const OWNER_BLOCK_ORIGINS = new Set(['owner'])
 
@@ -40,6 +40,7 @@ function body(item, step, phase, n, c, extra) {
     shows_counted: c.shows_counted,
     reminders_used: c.reminders_used,
     returns_used: c.returns_used,
+    round_shows: c.round_shows ?? 0,
     fingerprint: item.fingerprint ?? null,
     opened_by: item.openedBy ?? null,
     reason: null,
@@ -404,14 +405,40 @@ function* addAsk(ctx, session, ask, now) {
     return
   }
   const show = P.newAskShows(it, cfg)
+  // With the counted shows used, a prompt round still earns its own show.
+  const round = !show && P.promptRoundShows(it, ask, cfg)
   const holder = P.slotHolderStates.has(it.state)
   yield* askChange(ctx, it, {
     now,
     op: 'join',
     ask,
     asks: [...it.asks.values(), ask],
-    extra: { show_now: show && holder, counted_next: show, requeue: show && (it.state === 'exhausted' || it.state === 'deferred') },
+    extra: {
+      show_now: (show || round) && holder,
+      counted_next: show,
+      requeue: show && (it.state === 'exhausted' || it.state === 'deferred'),
+      ...(round ? { round_owed: P.showsPerRound } : {}),
+    },
   })
+}
+
+/**
+ * The show a prompt round earns once the counted shows are used.
+ *
+ * DESIGN-GAP: a round's show, in each state of the item. Holding the slot
+ * (active, or acknowledged and waiting for its verification tick): shown at
+ * once, and the item keeps holding the slot as it did before. Queued (behind
+ * another item, preempted, back from expiry), deferred or exhausted: shown
+ * when the slot is free, in the item's own place in the order; the item
+ * then keeps its state, so a queued item with no counted show left is
+ * exhausted at the slot as usual, and a deferred one stays deferred. The
+ * show moves neither the reminder nor the time-limit clock, so it brings no
+ * reminder, return or expiry the item would not otherwise have had; a
+ * reminder still unused falls due when it would have anyway.
+ */
+function* roundShow(ctx, it, now) {
+  const c = ctx.policy.roundShowCounters(it.counters)
+  yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted: false, round: true } })
 }
 
 /** An ask ending: removed from the content (nothing sent), or, as the last ask, the item's closing step. */
@@ -507,9 +534,12 @@ function* showNewAsks(ctx, now) {
   const cfg = st.config
   for (const it of openItems(st)) {
     if (!it.showDue || !P.slotHolderStates.has(it.state)) continue
-    if (!P.newAskShows(it, cfg)) continue
-    const c = { ...it.counters, presentation: it.counters.presentation + 1, shows_counted: it.counters.shows_counted + 1 }
-    yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted: true, new_ask: true } })
+    if (P.newAskShows(it, cfg)) {
+      const c = { ...it.counters, presentation: it.counters.presentation + 1, shows_counted: it.counters.shows_counted + 1 }
+      yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted: true, new_ask: true } })
+    } else if (it.roundOwed > 0) {
+      yield* roundShow(ctx, it, now)
+    }
   }
 }
 
@@ -683,18 +713,23 @@ function* fillSlot(ctx, now) {
   const P = ctx.policy
   const cfg = st.config
   if (openItems(st).some((it) => P.slotHolderStates.has(effectiveState(it, now)))) return
+  // The queue, and any item a prompt round owes a show, each in its own place.
   const queue = openItems(st)
-    .filter((it) => effectiveState(it, now) === 'queued')
+    .filter((it) => effectiveState(it, now) === 'queued' || it.roundOwed > 0)
     .sort((a, b) => compareKeys(P.orderKey(a, now), P.orderKey(b, now)))
   P.preemptorFirst(queue)
   for (const it of queue) {
-    if (P.canShow(it, cfg)) {
+    if (effectiveState(it, now) === 'queued' && P.canShow(it, cfg)) {
       const counted = P.showIsCounted(it)
       const c = { ...it.counters, presentation: it.counters.presentation + 1, shows_counted: it.counters.shows_counted + (counted ? 1 : 0) }
       yield* sendStep(ctx, it, 'shown', { c, now, extra: { counted } })
       return
     }
-    yield* step(ctx, it, 'exhausted', { now })
+    if (it.roundOwed > 0) {
+      yield* roundShow(ctx, it, now)
+      if (P.slotHolderStates.has(it.state)) return
+    }
+    if (effectiveState(it, now) === 'queued') yield* step(ctx, it, 'exhausted', { now })
   }
 }
 

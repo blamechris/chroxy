@@ -9,6 +9,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { itemIds } from './model/keys.js'
 import { compareKeys } from './model/policy.js'
+import { makeConfig } from './model/config.js'
+import { planConfig, run } from './model/reconciler.js'
 import { Crash, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
 import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
 import { LITERAL, MUTANTS } from './helpers/variants.js'
@@ -318,7 +320,7 @@ describe('the class of a two-ask item', () => {
 })
 
 describe('a new ask in each state of the item', () => {
-  it('exhausted with a counted show left: queued again and shown; with none left: the content changes, nothing is sent, it stays exhausted', () => {
+  it('exhausted with a counted show left: queued again and shown; with none left: a prompt round is shown once and the item stays exhausted', () => {
     for (const max of [3, 1]) {
       const { h, sk, id, tick, owner } = setup({ surface: { max_presentations: max, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] } })
       W.author(h.world, sk, T0, ownerBlock())
@@ -336,8 +338,10 @@ describe('a new ask in each state of the item', () => {
         assert.deepEqual(sent(h, id), [...before, 'shown2'])
         assert.equal(joins(h, id)[0].body.requeue, true)
       } else {
-        assert.deepEqual(sent(h, id), before)
-        assert.equal(h.item(id).state, 'exhausted')
+        assert.deepEqual(sent(h, id), [...before, 'shown2'], 'the round\'s one show')
+        assert.equal(h.item(id).counters.shows_counted, 1, 'not taken from the limit')
+        assert.equal(h.item(id).counters.round_shows, 1)
+        assert.equal(h.item(id).state, 'exhausted', 'exhausted and listed, not holding the slot')
       }
     }
   })
@@ -404,7 +408,7 @@ describe('a new ask in each state of the item', () => {
 })
 
 describe('one send history: a standing declared block through five prompt rounds', () => {
-  it('after the show limit, later prompts send nothing: shows 1 to 3 and reminder 1, then only updates', () => {
+  it('after the show limit, each later prompt round is shown once: shows 1 to 6 and reminder 1, nothing more', () => {
     const { h, sk, id, tick } = setup()
     W.author(h.world, sk, T0, ownerBlock())
     tick(15)
@@ -415,13 +419,239 @@ describe('one send history: a standing declared block through five prompt rounds
       W.answerPrompt(h.world, sk, ref, at(m + 1))
       tick((m += 15))
     }
-    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'shown3', 'reminded1'])
+    // The block at +15; rounds 1 and 2 (+30, +60) use the counted shows;
+    // rounds 3 to 5 (+90, +120, +150) each earn one. Reminder 1 falls 60
+    // minutes after the latest counted show (+60): round shows move no clock.
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'shown3', 'shown4', 'shown5', 'reminded1', 'shown6'])
+    const at1 = (n) => (Date.parse(h.surface(id).find((r) => r.body.step === 'reminded' && r.body.n === n && r.body.phase === 'attempt').ts) - T0) / MIN
+    assert.equal(at1(1), 120)
     assert.equal(joins(h, id).length, 5, 'five prompts joined')
-    assert.deepEqual(joins(h, id).map((r) => Boolean(r.body.show_now)), [true, true, false, false, false])
-    assert.equal(h.item(id).counters.shows_counted, 3)
+    assert.deepEqual(joins(h, id).map((r) => r.body.round_owed ?? 0), [0, 0, 1, 1, 1])
+    assert.deepEqual([h.item(id).counters.shows_counted, h.item(id).counters.round_shows], [3, 3])
     assert.equal(h.item(id).episode, 1)
     assert.deepEqual(asks(h, id), ['declared'])
     assert.equal(h.conflicts().length, 0)
+  })
+})
+
+describe('prompt rounds after the show limit', () => {
+  const ONE = { surface: { max_presentations: 1, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] } }
+  const shows = (h, id) => h.sendsFor(id).filter((x) => x.step === 'shown').length
+
+  it('a declared block joining with the limit used only changes the content: no show', () => {
+    const { h, sk, id, tick } = setup(ONE)
+    W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+    W.raisePrompt(h.world, sk, at(1), 7200)
+    tick(15)
+    assert.deepEqual(sent(h, id), ['shown1'])
+    W.author(h.world, sk, at(16), ownerBlock())
+    tick(30)
+    assert.deepEqual(asks(h, id), ['declared', 'prompt'])
+    assert.deepEqual(sent(h, id), ['shown1'])
+    assert.equal(joins(h, id)[0].body.round_owed, undefined)
+  })
+
+  it('active: shown at once, and it keeps holding the slot; the clock does not move', () => {
+    const { h, sk, id, tick } = setup(ONE)
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    W.raisePrompt(h.world, sk, at(16), 7200)
+    tick(30)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2'])
+    assert.equal(h.item(id).state, 'active')
+    assert.equal(h.item(id).lastShowAt, at(15), 'the reminder and time-limit clock still counts from the counted show')
+    tick(45)
+    tick(60)
+    tick(75)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'reminded1'], 'reminder 1 at +75, as it would have been anyway')
+  })
+
+  it('acknowledged and holding the slot: shown at once; the verification goes ahead at the next tick as usual', () => {
+    const { h, sk, id, tick, owner } = setup(ONE)
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    owner('done', 'm1', 16)
+    W.raisePrompt(h.world, sk, at(17), 7200)
+    tick(30)
+    // The round's show at once, then the verification this tick owed the
+    // "done" anyway: no confirming report, so the one return.
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'returned1'])
+    const order = steps(h, id).filter((r) => r.body.phase === 'attempt').map((r) => r.body.step)
+    assert.deepEqual(order, ['shown', 'shown', 'returned'])
+    assert.equal(h.item(id).state, 'active', 'the return, not the round, put it back in the slot')
+  })
+
+  it('queued behind another item: waits while the slot is held, is shown once the slot is free, then exhausted at the slot', () => {
+    const { h, sk, id, tick } = setup({ surface: { max_presentations: 1, item_time_limit_hours: 1, reminder_after_minutes: [20, 40] } })
+    const o = W.addSession(h.world, { source: 'chroxy', native_id: 'o', scope: 'repo' })
+    const other = itemIds.owner(h.world.sessions[o].session)
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    W.author(h.world, o, at(20), ownerBlock('another'))
+    for (const m of [30, 45, 60, 75]) tick(m)
+    // Ours expired at +75 with no counted show left; the other went ahead.
+    assert.equal(h.item(id).state, 'queued')
+    assert.equal(h.item(other).state, 'active')
+    const before = shows(h, id)
+    W.raisePrompt(h.world, sk, at(76), 7200)
+    tick(90)
+    assert.equal(shows(h, id), before, 'the slot is held: the round waits in its place')
+    assert.equal(h.item(id).roundOwed, 1)
+    W.author(h.world, o, at(91), { state: 'running', next: 'go' })
+    tick(105)
+    assert.equal(shows(h, id), before + 1, 'one show for the round')
+    assert.equal(h.item(id).state, 'exhausted', 'exhausted and listed, not holding the slot')
+  })
+
+  it('deferred by the owner: shown once while the slot is free; the deferral stands', () => {
+    const { h, sk, id, tick, owner } = setup(ONE)
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    owner('defer', 'd1', 16, 16 + 8 * 60)
+    W.raisePrompt(h.world, sk, at(17), 7200)
+    tick(30)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2'])
+    assert.equal(h.item(id).state, 'deferred')
+    assert.equal(h.item(id).deferUntil, at(16 + 8 * 60))
+  })
+
+  it('two rounds in consecutive ticks: one show each', () => {
+    const { h, sk, id, tick } = setup(ONE)
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    const p1 = W.raisePrompt(h.world, sk, at(16), 7200)
+    tick(30)
+    W.answerPrompt(h.world, sk, p1, at(31))
+    W.raisePrompt(h.world, sk, at(32), 7200)
+    tick(45)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'shown3'])
+    assert.equal(h.item(id).counters.round_shows, 2)
+  })
+
+  it('a round whose prompt ends before the item reaches the slot: its owed show is dropped', () => {
+    const { h, sk, id, tick } = setup(ONE)
+    const o = W.addSession(h.world, { source: 'chroxy', native_id: 'o', scope: 'repo' })
+    W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+    W.raisePrompt(h.world, sk, at(1), 7200)
+    W.author(h.world, o, T0 + 1000, ownerBlock('another'))
+    tick(15)
+    // Ours (a live prompt) is shown first; the owner defers it, the other takes the slot.
+    const other = itemIds.owner(h.world.sessions[o].session)
+    assert.deepEqual(sent(h, id), ['shown1'])
+    h.owner(id, 'defer', 'd1', { at: at(16), until: at(16 + 8 * 60) })
+    tick(30)
+    assert.equal(h.item(other).state, 'active')
+    W.author(h.world, sk, at(31), ownerBlock())
+    tick(45)
+    assert.deepEqual(asks(h, id), ['declared', 'prompt'], 'a declared join: no round')
+    const p2ref = h.item(id).asks.get('prompt').opened_by
+    W.answerPrompt(h.world, sk, p2ref, at(46))
+    const p3 = W.raisePrompt(h.world, sk, at(47), 7200)
+    tick(60)
+    assert.equal(h.item(id).roundOwed, 1, 'a new round, owed its show while the other holds the slot')
+    W.answerPrompt(h.world, sk, p3, at(61))
+    tick(75)
+    assert.equal(h.item(id).roundOwed, 0, 'its prompt ended: the owed show is dropped')
+    W.author(h.world, o, at(76), { state: 'running', next: 'go' })
+    tick(90)
+    assert.deepEqual(sent(h, id), ['shown1'], 'never shown for the ended round')
+  })
+
+  it('a lowered show limit mid-episode: rounds after it are shown once each, from the lowered limit', () => {
+    const { h, sk, id, tick } = setup()
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    const p1 = W.raisePrompt(h.world, sk, at(16), 7200)
+    tick(30)
+    assert.equal(h.item(id).counters.shows_counted, 2)
+    run(h.ctx, planConfig(h.ctx, { config: makeConfig({ owner_name: OWNER, ...FAST, surface: { max_presentations: 1 } }), now: at(31) }))
+    W.answerPrompt(h.world, sk, p1, at(32))
+    W.raisePrompt(h.world, sk, at(33), 7200)
+    tick(45)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2', 'shown3'])
+    assert.deepEqual([h.item(id).counters.shows_counted, h.item(id).counters.round_shows], [2, 1])
+  })
+
+  it('a round owed to an exhausted item while the slot is held, and the limit raised meanwhile: still the round\'s one show; the item stays exhausted', () => {
+    const { h, sk, id, tick, owner } = setup(ONE)
+    const o = W.addSession(h.world, { source: 'chroxy', native_id: 'o', scope: 'repo' })
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    owner('done', 'm1', 16)
+    tick(30)
+    owner('done', 'm2', 31)
+    W.author(h.world, o, at(32), ownerBlock('another'))
+    tick(45)
+    assert.equal(h.item(id).state, 'exhausted')
+    W.raisePrompt(h.world, sk, at(46), 7200)
+    tick(60)
+    assert.equal(h.item(id).roundOwed, 1, 'owed, the other holds the slot')
+    run(h.ctx, planConfig(h.ctx, { config: makeConfig({ owner_name: OWNER, ...FAST, surface: { max_presentations: 3 } }), now: at(61) }))
+    W.author(h.world, o, at(62), { state: 'running', next: 'go' })
+    tick(75)
+    assert.deepEqual(sent(h, id), ['shown1', 'returned1', 'shown2'])
+    assert.deepEqual([h.item(id).counters.shows_counted, h.item(id).counters.round_shows], [1, 1])
+    assert.equal(h.item(id).state, 'exhausted')
+  })
+
+  it('a carried attention condition on an item that gets round shows: carried throughout, nothing handed back early', () => {
+    const { h, sk, id, tick } = setup(ONE)
+    const y = W.addSession(h.world, { source: 'chroxy', native_id: 'y', scope: 'repo' })
+    W.author(h.world, y, T0, { state: 'idle' })
+    W.author(h.world, sk, T0, ownerBlock())
+    tick(15)
+    const err = { outcome: 'error', error_code: 'timeout' }
+    const only = (a) => ({ ...a, read: (s, n) => (s.native_id === 'c' ? err : a.read(s, n)), reread: (s, n) => (s.native_id === 'c' ? err : a.reread(s, n)) })
+    for (const m of [30, 45, 60]) tick(m, { reads: only })
+    assert.deepEqual(h.item(id).carried.map((c) => c.trigger), ['repeated_error'])
+    let m = 60
+    for (let k = 0; k < 3; k++) {
+      const ref = W.raisePrompt(h.world, sk, at(m + 1), 7200)
+      tick((m += 15))
+      W.answerPrompt(h.world, sk, ref, at(m + 1))
+      tick((m += 15))
+    }
+    assert.equal(h.item(id).counters.round_shows, 3)
+    assert.deepEqual(h.item(id).carried.map((c) => c.trigger), ['repeated_error'])
+    assert.equal(h.openItems().filter((i) => i.origin === 'attention').length, 0)
+  })
+
+  it('mutation: a round given no show (the earlier rule) turns I13 red; a round given two shows turns I1a red; a round taking the slot turns I2 red', () => {
+    for (const [name, expect] of [['I13.round', 'I13'], ['I2.round', 'I2']]) {
+      const { h, mon, sk, id } = setup(ONE, MUTANTS[name])
+      const step = (mm) => {
+        h.tick('chroxy', at(mm))
+        checkStep(mon, h)
+      }
+      const owner = (intent, ref, mm) => {
+        h.owner(id, intent, ref, { at: at(mm) })
+        checkStep(mon, h)
+      }
+      const go = () => {
+        // Exhausted with its one counted show used, then a prompt round.
+        W.author(h.world, sk, T0, ownerBlock())
+        step(15)
+        owner('done', 'm1', 16)
+        step(30)
+        owner('done', 'm2', 31)
+        step(45)
+        W.raisePrompt(h.world, sk, at(46), 7200)
+        for (const mm of [60, 75, 90]) step(mm)
+      }
+      assert.throws(go, (e) => e instanceof InvariantError && e.id === expect, name)
+    }
+    // Two shows for one round: the first at once while the item holds the
+    // slot, the second when the item, expired, next reaches the slot.
+    const { h, mon, sk } = setup({ surface: { max_presentations: 1, item_time_limit_hours: 1, reminder_after_minutes: [20, 40] } }, MUTANTS['I1a.round2'])
+    const go = () => {
+      W.author(h.world, sk, T0, ownerBlock())
+      for (const mm of [15, 30, 45, 60, 75, 90]) {
+        if (mm === 30) W.raisePrompt(h.world, sk, at(16), 7200)
+        h.tick('chroxy', at(mm))
+        checkStep(mon, h)
+      }
+    }
+    assert.throws(go, (e) => e instanceof InvariantError && e.id === 'I1a', 'I1a.round2')
   })
 })
 
@@ -469,6 +699,53 @@ describe('crash and replay in a tick in which an ask joins', () => {
         const showAttempts = steps(h, id).filter((r) => r.body.step === 'shown' && r.body.phase === 'attempt')
         assert.equal(showAttempts.length, 2, `two shows recorded: op ${op}`)
         assert.deepEqual(asks(h, id), ['declared', 'prompt'])
+        if (!crashed) break
+        points += 1
+      }
+      assert.ok(points > 5, `${points} crash points exercised`)
+    })
+  }
+})
+
+describe('crash and replay in a tick with a round show after the limit', () => {
+  const ONE = { surface: { max_presentations: 1, item_time_limit_hours: 8, reminder_after_minutes: [60, 180] } }
+  for (const [name, before] of [
+    ['holding the slot (shown at once)', () => {}],
+    [
+      'exhausted (shown as the tick fills the slot)',
+      (h, id) => {
+        h.owner(id, 'done', 'm1', { at: at(16) })
+        h.tick('chroxy', at(20))
+        h.owner(id, 'done', 'm2', { at: at(21) })
+      },
+    ],
+  ]) {
+    it(`${name}: killed at every operation and replayed, exactly one round show; no conflict, no second send`, () => {
+      let points = 0
+      for (let op = 0; ; op++) {
+        const { h, mon, sk, id } = setup(ONE)
+        W.author(h.world, sk, T0, ownerBlock())
+        h.tick('chroxy', at(15))
+        before(h, id)
+        checkStep(mon, h)
+        W.raisePrompt(h.world, sk, at(22), 7200)
+        const rounds = () => h.surface(id).filter((r) => r.body.step === 'shown' && r.body.phase === 'attempt' && r.body.round).length
+        let crashed = false
+        try {
+          h.tick('chroxy', at(30), { crashAfter: op })
+        } catch (e) {
+          if (!(e instanceof Crash)) throw e
+          crashed = true
+          checkStep(mon, h, { complete: false })
+          h.restart()
+          h.tick('chroxy', at(33), { slotStart: h.slotFor('chroxy', at(30)) })
+        }
+        checkStep(mon, h)
+        assert.equal(h.conflicts().length, 0, `crash at op ${op}`)
+        const ids = h.sends.map((x) => x.attempt_id)
+        assert.equal(new Set(ids).size, ids.length, `no second send: op ${op}`)
+        assert.equal(rounds(), 1, `exactly one round show: op ${op}`)
+        assert.equal(h.item(id).roundOwed, 0)
         if (!crashed) break
         points += 1
       }

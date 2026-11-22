@@ -280,6 +280,26 @@ export const DEFAULT_POLICY = Object.freeze({
   newAskShows(item, config) {
     return item.counters.shows_counted < config.surface.max_presentations
   },
+  // ── prompt rounds ──
+  // Once an owner item has used its counted shows, each new prompt round on
+  // the session (a prompt ask joining the item) earns one fresh show anyway.
+  // A declared ask joining earns none.
+  promptRoundShows(_item, ask, _config) {
+    return ask.kind === 'prompt'
+  },
+  // How many shows one round earns.
+  showsPerRound: 1,
+  // DESIGN-GAP: where a round's show is counted. The model keeps it out of
+  // `shows_counted`, in a fifth counter `round_shows`, so every rule that
+  // reads `shows_counted` against the limit (a new ask's counted show, the
+  // re-queue from exhausted, the slot, preemption) is unchanged by rounds.
+  roundShowCounters(c) {
+    return { ...c, presentation: c.presentation + 1, round_shows: (c.round_shows ?? 0) + 1 }
+  },
+  // A round's show takes nothing: the item keeps the state it had (an item
+  // that held the slot keeps holding it, any other does not take it), and
+  // the reminder and time-limit clock does not move. Read by the fold.
+  roundShowTakesSlot: false,
   // The item closes only when its last ask ends.
   closesOnAskEnd(item, kind) {
     return [...item.asks.keys()].every((k) => k === kind)

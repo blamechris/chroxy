@@ -32,9 +32,9 @@ const STEPS = ['queued', 'shown', 'reminded', 'returned', 'updated', 'deferred',
 // condition handed back more than once (its counters continue).
 const MERGES = ['carry:signal', 'carry:open_attention', 'clear', 'withdrawn:merged', 'raised:handover', 'raised:handover:repeated']
 // The owner item's asks: a prompt joining a declared block, a declared block
-// joining a prompt, a new ask shown at once, and an ask ending while the
-// other stays.
-const ASKS = ['join:prompt', 'join:declared', 'shown:new_ask', 'end:declared', 'end:prompt']
+// joining a prompt, a new ask shown at once, an ask ending while the other
+// stays, and a prompt round shown once after the counted shows were used.
+const ASKS = ['join:prompt', 'join:declared', 'shown:new_ask', 'end:declared', 'end:prompt', 'shown:round']
 
 function runPlan({ seeds, steps, from }) {
   const seen = { cls: new Set(), trig: new Set(), steps: new Set(), merges: new Set(), asks: new Set(), crashes: 0, records: 0, events: 0, sends: 0 }
@@ -60,6 +60,7 @@ function runPlan({ seeds, steps, from }) {
         if (b.step === 'updated' && b.carry) seen.merges.add(b.carry.op === 'carry' ? `carry:${b.carry.path}` : 'clear')
         if (b.step === 'updated' && (b.ask?.op === 'join' || b.ask?.op === 'end')) seen.asks.add(`${b.ask.op}:${b.ask.kind}`)
         if (b.step === 'shown' && b.phase === 'attempt' && b.new_ask) seen.asks.add('shown:new_ask')
+        if (b.step === 'shown' && b.phase === 'attempt' && b.round) seen.asks.add('shown:round')
         if (b.step === 'withdrawn' && b.reason === 'merged') seen.merges.add('withdrawn:merged')
         if (b.step === 'queued' && b.handover_of) {
           seen.merges.add('raised:handover')

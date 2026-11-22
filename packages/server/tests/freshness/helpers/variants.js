@@ -194,7 +194,21 @@ export const MUTANTS = {
   // A condition handed back starts its attention episode with fresh counters.
   I12: withPolicy({ inheritCountersOnHandover: false }),
   // An ask that joins an open owner item only changes its content.
-  I13: withPolicy({ newAskShows: () => false }),
+  I13: withPolicy({ newAskShows: () => false, promptRoundShows: () => false }),
+  // A prompt round after the limit only changes the content (the earlier rule).
+  'I13.round': withPolicy({ promptRoundShows: () => false }),
+  // A declared ask joining after the limit is given a round's show too.
+  'I13.declared': withPolicy({ promptRoundShows: () => true }),
+  // A prompt round earns two shows.
+  'I1a.round2': withPolicy({ showsPerRound: 2 }),
+  // A round's show restores the item's whole limit: once one is made, the
+  // item can be shown, and a new ask counted, as if no counted show were used.
+  'I1a.restore': withPolicy({
+    canShow: (item, config) => item.afterDeferral || (item.counters.round_shows ?? 0) > 0 || item.counters.shows_counted < config.surface.max_presentations,
+    newAskShows: (item, config) => (item.counters.round_shows ?? 0) > 0 || item.counters.shows_counted < config.surface.max_presentations,
+  }),
+  // A round's show takes the slot like an ordinary show.
+  'I2.round': withPolicy({ roundShowTakesSlot: true }),
   // An ask that joins is shown even with the item's counted shows used.
   'I13.none': withPolicy({ newAskShows: () => true }),
   // The owner item closes when its first ask ends, though another is live.
