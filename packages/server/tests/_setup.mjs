@@ -89,6 +89,7 @@ import { installFsWriteSandbox, tmpDaemonBaseRoots } from '../../../scripts/lib/
 import { installSpawnHomeSandbox } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
 import { installPtyHomeSandbox } from '../../../scripts/lib/test-pty-home-sandbox.mjs'
 import { installRealBinaryTripwire } from '../../../scripts/lib/test-real-binary-tripwire.mjs'
+import { installForeignSignalGuard } from '../../../scripts/lib/test-foreign-signal-guard.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
 import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
@@ -307,6 +308,20 @@ export const {
   installed: REAL_BINARY_TRIPWIRE_INSTALLED,
   skipped: REAL_BINARY_TRIPWIRE_SKIPPED,
 } = installRealBinaryTripwire()
+
+// --- Refuse to signal a process this test run did not spawn (#9288) ----------
+// `killProcessTree` enumerates the REAL descendants of `child.pid` with `ps` and
+// `process.kill`s each; a mock child with `pid: 12345` made that run against a
+// pid the test does not own. The fs sandbox guards writes, nothing guarded
+// signals. This patches `process.kill` (the choke point `killProcessTree` and
+// its `deps.kill` default both reach) and tracks the pids `child_process`
+// launches, so a foreign signal throws CHROXY_TEST_FOREIGN_SIGNAL with the call
+// site BEFORE anything is sent. Signal 0 (liveness probe) is allowed for any
+// pid. See scripts/lib/test-foreign-signal-guard.mjs for the full rule.
+export const {
+  installed: FOREIGN_SIGNAL_GUARD_INSTALLED,
+  skipped: FOREIGN_SIGNAL_GUARD_SKIPPED,
+} = installForeignSignalGuard({ allowEnv: 'CHROXY_TEST_ALLOW_FOREIGN_SIGNALS' })
 
 // --- Default the credential-store to "no keychain" ----------------------------
 // #5154: the credential store encrypts credentials.json with an OS-keychain
