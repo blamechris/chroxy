@@ -280,6 +280,19 @@ function foldInvestigation(state, r) {
     }
     state.investigations.set(b.investigation_id, inv)
   }
+  // An abandoned investigation (its tick was never replayed) decided
+  // nothing: it closes, but counts as no cycle and is no session's latest.
+  if (b.phase === 'close' && b.classification === 'abandoned' && !state.policy.abandonedIsCycle) {
+    if (!inv.closed) {
+      inv.closed = true
+      inv.abandoned = true
+      inv.classification = b.classification
+      inv.closeSeq = r.seq
+      const o = inv.trigger === 'recheck' ? null : state.onsets.get(onsetKey(inv))
+      if (o) o.open = null
+    }
+    return
+  }
   if (b.trigger === 'recheck') return foldInvestigationPhase(state, inv, b, r)
   const ok = onsetKey(inv)
   let o = state.onsets.get(ok)
@@ -356,6 +369,9 @@ function newItem(r) {
     showDue: false,
     // Shows still owed to a prompt round that joined with the counted shows used.
     roundOwed: 0,
+    // The prompt ask of this item that ended last, in any episode: its
+    // opening reference and its ending evidence (policy `promptAskRef`).
+    lastPromptEnd: null,
     history: [],
   }
 }
@@ -527,7 +543,10 @@ function applyStep(it, b, at, seq, policy) {
         }
         // DESIGN-GAP: a show owed to a round is dropped when that round's
         // prompt ask ends before it is shown: the round it was for is over.
-        if (b.ask.op === 'end' && b.ask.kind === 'prompt') it.roundOwed = 0
+        if (b.ask.op === 'end' && b.ask.kind === 'prompt') {
+          it.roundOwed = 0
+          it.lastPromptEnd = { opened_by: b.ask.opened_by, evidence: b.ask.evidence ?? null }
+        }
       }
       if (b.requeue) {
         it.state = 'queued'
@@ -536,6 +555,9 @@ function applyStep(it, b, at, seq, policy) {
       break
     case 'resolved':
     case 'withdrawn':
+      if (b.closing_ask === 'prompt' && it.asks.has('prompt')) {
+        it.lastPromptEnd = { opened_by: it.asks.get('prompt').opened_by, evidence: b.resolution_evidence ?? null }
+      }
       it.open = false
       it.state = 'closed'
       break
@@ -564,6 +586,9 @@ function foldTick(state, r) {
   }
   if (b.phase === 'close') {
     t.closed = true
+    // An earlier tick of the source that never closed (a crash, never
+    // replayed) is superseded: nothing more is taken from it.
+    for (const o of state.ticks.values()) if (o.source === b.source && !o.closed && o.id !== b.tick_id) o.superseded = true
     state.lastClosedTick.set(b.source, { slot: b.slot_start, id: b.tick_id })
     state.sourceTrigger.set(b.source, { held: Boolean(b.source_all_failed), onset: b.source_onset ?? null })
     // A handover belongs to the tick that closed the item: by this record it

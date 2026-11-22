@@ -101,6 +101,14 @@ export const MUTANTS = {
   I2: withPolicy({ slotHolderStates: new Set() }),
   // The preempted item is not held behind a still-queued preemptor.
   I2c: withPolicy({ preemptorFirst: () => {} }),
+  // A challenger with no counted show left may preempt: it is exhausted as
+  // soon as it reaches the slot, and the preempted item is shown straight
+  // back.
+  'I2c.showable': withPolicy({
+    preempts(challenger, active, now, config) {
+      return DEFAULT_POLICY.preempts({ ...challenger, afterDeferral: true }, active, now, config)
+    },
+  }),
   // "Front of its class" applied to deadline items as well; that alone is
   // rescued by the preemptor-first rule, so both are broken.
   'I2c.front': withPolicy({
@@ -217,6 +225,16 @@ export const MUTANTS = {
   'I1d.counted': withPolicy({ roundShowCounters: (c) => ({ ...c, presentation: c.presentation + 1, shows_counted: c.shows_counted + 1, round_shows: (c.round_shows ?? 0) + 1 }) }),
   // An ask that joins is shown even with the item's counted shows used.
   'I13.none': withPolicy({ newAskShows: () => true }),
+  // An investigation left open by a tick never replayed stays open.
+  'I7h.abandoned': withPolicy({ closeAbandonedInvestigations: false }),
+  // An abandoned investigation counted as a cycle of its onset (and a second
+  // cycle allowed after it): the next one opens as cycle 2.
+  'I7a.abandoned': withPolicy({ abandonedIsCycle: true, secondCycleAfter: new Set(['inconclusive', 'running_claim_unverified', 'abandoned']) }),
+  // A surfacing decision of a tick never replayed is never applied.
+  'I11.abandoned': withPolicy({ recoverAbandonedSignals: false }),
   // The owner item closes when its first ask ends, though another is live.
   'I10.close': withPolicy({ closesOnAskEnd: () => true }),
+  // The earlier rule: a prompt ask is added only on the prompt's own id, so
+  // the prompt an ended ask opened on, still pending, is refused as used.
+  'I10.prompt': withPolicy({ promptAskRef: (_item, prompt) => prompt.ref }),
 }

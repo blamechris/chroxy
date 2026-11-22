@@ -37,7 +37,7 @@ const MERGES = ['carry:signal', 'carry:open_attention', 'clear', 'withdrawn:merg
 const ASKS = ['join:prompt', 'join:declared', 'shown:new_ask', 'end:declared', 'end:prompt', 'shown:round']
 
 function runPlan({ seeds, steps, from }) {
-  const seen = { cls: new Set(), trig: new Set(), steps: new Set(), merges: new Set(), asks: new Set(), crashes: 0, records: 0, events: 0, sends: 0 }
+  const seen = { cls: new Set(), trig: new Set(), steps: new Set(), merges: new Set(), asks: new Set(), crashes: 0, laterSlot: 0, promptAgain: 0, records: 0, events: 0, sends: 0 }
   const handovers = new Map()
   for (let seed = from; seed < from + seeds; seed++) {
     const r = runSequence(seed, { steps })
@@ -46,6 +46,8 @@ function runPlan({ seeds, steps, from }) {
       assert.fail(`seed ${seed}: ${p.error.message}\nshortest failing prefix: ${p.steps} of ${steps} steps\n${describeEvents(p.events)}`)
     }
     seen.crashes += r.stats.crashes
+    seen.laterSlot += r.stats.laterSlot ?? 0
+    seen.promptAgain += r.stats.promptAgain ?? 0
     seen.records += r.records
     seen.events += r.events.length
     seen.sends += r.stats.sends
@@ -86,8 +88,14 @@ describe('generated sequences', () => {
       for (const m of MERGES) assert.ok(seen.merges.has(m), `no sequence reached the merged path ${m}`)
       for (const a of ASKS) assert.ok(seen.asks.has(a), `no sequence reached the owner-item path ${a}`)
       assert.ok(seen.crashes >= plan.seeds / 2, `only ${seen.crashes} crashes were exercised`)
+      // Restarts that come back in a later slot, an investigation they left
+      // open closed as abandoned, and a pending prompt an ended ask opened on
+      // added again.
+      assert.ok(seen.laterSlot > 0, 'no restart came back in a later slot')
+      assert.ok(seen.cls.has('abandoned'), 'no investigation was closed as abandoned')
+      assert.ok(seen.promptAgain > 0, 'no prompt ask was added again for the prompt an ended ask opened on')
       assert.ok(seen.sends > 0)
-      console.log(`# freshness generated: ${plan.seeds} seeds x ${plan.steps} steps, ${seen.events} events, ${seen.records} records, ${seen.crashes} crashes, ${seen.sends} sends`)
+      console.log(`# freshness generated: ${plan.seeds} seeds x ${plan.steps} steps, ${seen.events} events, ${seen.records} records, ${seen.crashes} crashes (${seen.laterSlot} back in a later slot), ${seen.promptAgain} prompt asks added again, ${seen.sends} sends`)
     })
   }
 })

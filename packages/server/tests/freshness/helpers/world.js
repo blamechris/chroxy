@@ -204,7 +204,9 @@ function readOne(world, session, now, { tickRead }) {
   const d = declaration(w)
   const nat = chroxy ? native(world, w) : null
   const sourceNow = src.clockOffsetMs !== 0 && now != null ? now + src.clockOffsetMs : null
-  if (!d) return { outcome: 'no_report', native: nat }
+  // A source that supplies its own time supplies it on every read it
+  // answers, a read that finds no status line included.
+  if (!d) return { outcome: 'no_report', source_now: sourceNow, native: nat }
   return {
     outcome: 'ok',
     source_now: sourceNow,

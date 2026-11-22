@@ -175,9 +175,11 @@ export function* planRead(ctx, opts) {
     body.report_age_s = g.ageS
     body.error_code = g.errorCode
     body.not_read_reason = g.notReadReason
-    if (g.errorCode === 'clock_skew' && body.outcome === 'ok') {
-      // A skewed clock makes the read's outcome `error: clock_skew`, and a
-      // line whose time cannot be trusted writes no report record.
+    if (g.errorCode === 'clock_skew') {
+      // A skewed clock makes the read's outcome `error: clock_skew`, whatever
+      // the read found (a status line or none), so it counts as an errored
+      // check; a line whose time cannot be trusted writes no report record,
+      // and no native state is taken from the read.
       body.outcome = 'error'
       body.report_id = null
       reportDraft = null

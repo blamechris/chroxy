@@ -204,6 +204,137 @@ describe('references an ask stood on', () => {
   })
 })
 
+describe('a prompt the ask opened on, still pending when the ask ends', () => {
+  // P1 pending opens the prompt ask; P2 raised moves its content to P2; P2
+  // answered while P1 is still pending ends the ask. P1 must be an ask again.
+  function movedPast(policy, { declared = false } = {}) {
+    const sc = setup({}, policy)
+    const { h, sk } = sc
+    W.author(h.world, sk, T0, declared ? ownerBlock() : { state: 'running', next: 'a' })
+    sc.p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+    sc.tick(15)
+    sc.p2 = W.raisePrompt(h.world, sk, at(16), 7200)
+    sc.tick(30)
+    W.answerPrompt(h.world, sk, sc.p2, at(31))
+    sc.tick(45)
+    return sc
+  }
+  const promptAsk = (h, id) => h.item(id)?.asks.get('prompt')
+
+  it('with no other ask: the item closes on the answer and the same tick opens a new episode with a prompt ask for P1, shown', () => {
+    const { h, id, p1, p2, tick } = movedPast()
+    const closing = steps(h, id).find((r) => r.body.step === 'resolved')
+    assert.deepEqual([closing.body.closing_ask, closing.body.resolution_evidence, closing.body.episode], ['prompt', p2, 1])
+    const it = h.item(id)
+    assert.ok(it.open, 'the session waits on the owner for P1: it has an owner item')
+    assert.equal(it.episode, 2)
+    assert.equal(promptAsk(h, id).content_ref, p1)
+    assert.notEqual(promptAsk(h, id).opened_by, p1, 'P1 was the first ask\'s opening reference; the new ask opens on a new one')
+    assert.deepEqual(sent(h, id), ['shown1', 'shown1'], 'one show per episode')
+    // A tick that brings no owner answer adds nothing: no loop.
+    const before = h.surface(id).length
+    tick(60)
+    assert.equal(h.surface(id).length, before)
+  })
+
+  it('a second time (P3 raised and answered while P1 is still pending): yet another reference; then P1 answered closes it for good', () => {
+    const { h, sk, id, p1, tick } = movedPast()
+    const first = promptAsk(h, id).opened_by
+    const p3 = W.raisePrompt(h.world, sk, at(61), 7200)
+    tick(75)
+    assert.equal(promptAsk(h, id).content_ref, p3)
+    W.answerPrompt(h.world, sk, p3, at(76))
+    tick(90)
+    assert.equal(h.item(id).episode, 3)
+    assert.equal(promptAsk(h, id).content_ref, p1)
+    assert.notEqual(promptAsk(h, id).opened_by, first)
+    assert.notEqual(promptAsk(h, id).opened_by, p1)
+    W.answerPrompt(h.world, sk, p1, at(91))
+    tick(105)
+    tick(120)
+    assert.equal(h.item(id).open, false)
+    assert.equal(h.item(id).episode, 3, 'an answered prompt is never added again')
+    assert.equal(h.conflicts().length, 0)
+  })
+
+  it('with the declared block keeping the item open: the prompt ask ends and P1 joins again in the same tick, shown as a new ask', () => {
+    const { h, id, p1 } = movedPast(undefined, { declared: true })
+    const changes = steps(h, id).filter((r) => r.body.ask?.kind === 'prompt').map((r) => r.body.ask.op)
+    assert.deepEqual(changes, ['join', 'content', 'end', 'join'])
+    assert.ok(h.item(id).open)
+    assert.equal(h.item(id).episode, 1)
+    assert.deepEqual(asks(h, id), ['declared', 'prompt'])
+    assert.equal(promptAsk(h, id).content_ref, p1)
+    assert.deepEqual(sent(h, id), ['shown1', 'shown2'], 'the block and the first prompt (one show: they arrived in one tick), then P1 again: a counted show')
+    assert.equal(steps(h, id).at(-1).body.new_ask, true)
+  })
+
+  it('killed at every operation of the tick that adds P1 again and replayed: one new ask on one reference, no conflict, no second send', () => {
+    let points = 0
+    for (let op = 0; ; op++) {
+      const { h, mon, sk, id, tick } = setup()
+      W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+      const p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+      tick(15)
+      const p2 = W.raisePrompt(h.world, sk, at(16), 7200)
+      tick(30)
+      W.answerPrompt(h.world, sk, p2, at(31))
+      let crashed = false
+      try {
+        h.tick('chroxy', at(45), { crashAfter: op })
+      } catch (e) {
+        if (!(e instanceof Crash)) throw e
+        crashed = true
+        checkStep(mon, h, { complete: false })
+        h.restart()
+        h.tick('chroxy', at(48), { slotStart: h.slotFor('chroxy', at(45)) })
+      }
+      checkStep(mon, h)
+      assert.equal(h.conflicts().length, 0, `crash at op ${op}`)
+      const ids = h.sends.map((x) => x.attempt_id)
+      assert.equal(new Set(ids).size, ids.length, `no second send: op ${op}`)
+      const opens = steps(h, id).filter((r) => r.body.step === 'queued')
+      assert.equal(opens.length, 2, `two episodes: op ${op}`)
+      assert.equal(opens[1].body.ask.content_ref, p1)
+      if (!crashed) break
+      points += 1
+    }
+    assert.ok(points > 5, `${points} crash points exercised`)
+  })
+
+  it('a pending prompt no earlier ask opened on is added on its own id, even after a prompt ask ended', () => {
+    // P1 and P2 pending when the ask opens: it opens on P2 and P1 is never
+    // used. P2 answered: P1 opens the next episode under its own id.
+    const { h, sk, id, tick } = setup()
+    W.author(h.world, sk, T0, { state: 'running', next: 'a' })
+    const p1 = W.raisePrompt(h.world, sk, at(1), 7200)
+    const p2 = W.raisePrompt(h.world, sk, at(2), 7200)
+    tick(15)
+    assert.equal(promptAsk(h, id).opened_by, p2)
+    W.answerPrompt(h.world, sk, p2, at(16))
+    tick(30)
+    assert.equal(h.item(id).episode, 2)
+    assert.deepEqual([promptAsk(h, id).opened_by, promptAsk(h, id).content_ref], [p1, p1])
+  })
+
+  it('fault: a prompt ask added again for a prompt that is no longer pending is caught by I5', () => {
+    const { h, mon, sk, p1, tick } = movedPast()
+    W.answerPrompt(h.world, sk, p1, at(46))
+    tick(60)
+    const p4 = W.raisePrompt(h.world, sk, at(61), 7200)
+    // The new ask on P4 recorded as if it were for P1, which an earlier ask
+    // stood on and which is answered.
+    const forge = (a) => (a.kind === 'prompt' && a.content_ref === p4 ? { ...a, content_ref: p1 } : a)
+    h.rewriteAppend = (d) => (d.kind === 'surface' && d.body.step === 'queued' && d.body.ask ? { ...d, body: { ...d.body, ask: forge(d.body.ask), asks: d.body.asks.map(forge) } } : d)
+    h.tick('chroxy', at(75))
+    assert.throws(() => checkStep(mon, h), (e) => e instanceof InvariantError && e.id === 'I5' && /not pending/.test(e.message))
+  })
+
+  it('mutation: the earlier rule (P1 refused as a used reference) leaves the pending prompt with no item, and I10 goes red', () => {
+    assert.throws(() => movedPast(MUTANTS['I10.prompt']), (e) => e instanceof InvariantError && e.id === 'I10')
+  })
+})
+
 describe('reports a declared ask covered without a content change', () => {
   // The fingerprint leaves out the next step, so on a source that stamps a
   // declaration only when it changes, the same block with another next step

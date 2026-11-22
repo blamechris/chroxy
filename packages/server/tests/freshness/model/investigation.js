@@ -11,6 +11,7 @@
 import { sourceCaps } from './config.js'
 import { onsetOf, sessionsOf } from './derive.js'
 import { put, planRead } from './checks.js'
+import { H } from './hash.js'
 import {
   READ_NO,
   checkInvestigationKey,
@@ -159,11 +160,14 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
   const report = reportId ? st.reports.get(reportId)?.body : null
   const invId = cand.resume
     ? cand.resume.id
-    : cand.sourceLevel
-      ? sourceInvestigationId({ source: cand.source, onset: cand.onset, cycle: cand.cycle })
-      : cand.kind === 'recheck'
-        ? recheckInvestigationId({ session, reportId, tickId })
-        : investigationId({ session, reportId, trigger: cand.trigger, onset: cand.onset, cycle: cand.cycle })
+    : afterAbandoned(
+        st,
+        cand.sourceLevel
+          ? sourceInvestigationId({ source: cand.source, onset: cand.onset, cycle: cand.cycle })
+          : cand.kind === 'recheck'
+            ? recheckInvestigationId({ session, reportId, tickId })
+            : investigationId({ session, reportId, trigger: cand.trigger, onset: cand.onset, cycle: cand.cycle }),
+      )
 
   const closeKey = investigationKey(invId, 'close')
   const recordedClose = P.reuseRecorded(st.index, closeKey, 'investigation')
@@ -208,10 +212,13 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     rungs.push({ rung: 're_read', outcome: reRead.body.outcome })
     let failed = reRead.body.outcome === 'error'
     let rungBlocked = reRead.body.outcome === 'blocked'
+    // The latest read of the cycle: the retry when the re-read failed.
+    let latest = reRead
     if (failed) {
       const retry = yield* investigationRead(ctx, { invId, readNo: READ_NO.RETRY, session, readFn: () => world.reread(session, now), now, tickId })
       rungs.push({ rung: 're_read', outcome: retry.body.outcome, retry: true })
       failed = retry.body.outcome === 'error'
+      latest = retry
     }
     let confirmListed = null
     if (cand.trigger === 'dropped_from_list' && !cand.sourceLevel) {
@@ -222,7 +229,10 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
     let native = null
     if (!cand.sourceLevel && cand.trigger !== 'dropped_from_list') {
       if (caps.native_in_read) {
-        native = nativeEvidence(s, reRead.native)
+        // From the latest successful read of the cycle (the retry, if the
+        // re-read failed and it succeeded); from the tick's own read only
+        // when neither succeeded. A failed read carries no native state.
+        native = nativeEvidence(s, latest.native)
         rungs.push({ rung: 'activity_read', outcome: native ? 'read' : 'none' })
       } else if (caps.activity_read) {
         const a = yield* investigationRead(ctx, { invId, readNo: READ_NO.ACTIVITY, session, readFn: () => world.activity(session, now), now, tickId, readKind: 'activity' })
@@ -281,6 +291,46 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
   return signalFrom(closeBody, s, cand)
 }
 
+/**
+ * DESIGN-GAP: a tick killed by a crash is replayed only within its own slot.
+ * When the process comes back after the slot has passed, the crashed tick is
+ * never replayed, and an investigation it opened would stay open for good;
+ * the next one for the same onset and cycle would have the same id, and its
+ * open record (naming another tick) would conflict with the first. The
+ * source's next tick closes such an investigation as `abandoned`: it decided
+ * nothing, surfaces nothing and counts as no cycle. Its reads are not
+ * reused. The investigation then run for that onset and cycle takes the id
+ * H(id, 'after_abandoned') instead, once for each abandoned one before it,
+ * so every id is still derived from the ledger alone. An investigation the
+ * crashed tick did close keeps its decision: its signal (attention, gone,
+ * outage) is applied by the source's next tick, as a replay in the same slot
+ * would have applied it, unless the item's closing evidence has arrived
+ * since; once a later tick of the source closes, the crashed tick is
+ * superseded and nothing more is taken from it. A crashed tick replayed
+ * after a later tick abandoned its investigation would count the abandoned
+ * one in its spent budget and its signal loop; the model cannot reach that,
+ * because a tick is replayed only within its own slot.
+ */
+function afterAbandoned(st, id) {
+  let next = id
+  while (st.investigations.get(next)?.abandoned) next = H(next, 'after_abandoned')
+  return next
+}
+
+/** Close the investigations of this source left open by a tick that was never replayed. */
+function* closeAbandoned(ctx, { source, tickId, now }) {
+  const st = ctx.state
+  if (!ctx.policy.closeAbandonedInvestigations) return
+  for (const inv of [...st.investigations.values()]) {
+    if (inv.closed || inv.source !== source || inv.tickId === tickId) continue
+    if (st.ticks.get(inv.tickId)?.closed) continue
+    const open = st.index.get(investigationKey(inv.id, 'open'))
+    if (!open) continue
+    const body = { ...open.body, phase: 'close', rungs: [], classification: 'abandoned', classified_at: null, report_age_ms: null, surface: null, owner_wait_basis: null, basis_onset: null, abandoned_by: tickId }
+    yield put({ kind: 'investigation', id: investigationKey(inv.id, 'close'), session: open.session, refs: { tick: tickId }, body }, now)
+  }
+}
+
 function declaredAskLive(st, P, session) {
   const it = st.items.get(P.ownerItemOf(session, 'declared'))
   return Boolean(it?.open && it.asks.has('declared'))
@@ -317,6 +367,7 @@ export function* planInvestigations(ctx, { source, tickId, now, world }) {
   const st = ctx.state
   const P = ctx.policy
   const cfg = st.config
+  yield* closeAbandoned(ctx, { source, tickId, now })
   const srcHeld = sourceAllFailed(st, source, tickId)
   const cands = []
   const srcCand = srcHeld ? sourceCandidate(ctx, source, tickId) : null
@@ -349,6 +400,34 @@ export function* planInvestigations(ctx, { source, tickId, now, world }) {
     const sig = rec && s ? signalFrom(rec.body, s, { trigger: inv.trigger }) : null
     if (sig && !signals.some((x) => x.investigationId === sig.investigationId)) signals.push(sig)
   }
+  // Signals from investigations closed by an earlier tick of this source
+  // that was never replayed (see `closeAbandoned`), unless their closing
+  // evidence has arrived since. (The `abandoned` filter is belt and braces:
+  // an abandoned close surfaces nothing, so it yields no signal anyway.)
+  for (const inv of P.recoverAbandonedSignals ? st.investigations.values() : []) {
+    if (!inv.closed || inv.abandoned || inv.tickId === tickId || inv.source !== source) continue
+    const t = st.ticks.get(inv.tickId)
+    if (!t || t.closed || t.superseded) continue
+    const rec = st.index.get(investigationKey(inv.id, 'close'))
+    const s = inv.sk ? st.sessions.get(inv.sk) : sessionsOf(st, inv.source)[0]
+    const sig = rec && s ? signalFrom(rec.body, s, { trigger: inv.trigger }) : null
+    if (!sig || signals.some((x) => x.investigationId === sig.investigationId) || evidenceSince(st, sig, source, tickId)) continue
+    signals.push(sig)
+  }
   return { signals, srcHeld, srcOnset: srcHeld ? sourceOnset(st, source, tickId) : null }
+}
+
+/**
+ * Whether the item a recovered signal would raise already has its closing
+ * evidence at this tick. (The `tickId` tests always hold here: every session
+ * of the source has its check of this tick before investigations run.)
+ */
+function evidenceSince(st, sig, source, tickId) {
+  if (sig.type === 'outage') return sessionsOf(st, source).some((s) => s.cur && s.cur.tickId === tickId && (s.cur.outcome === 'ok' || s.cur.outcome === 'no_report'))
+  const s = st.sessions.get(sig.sk)
+  if (sig.type === 'gone') return Boolean(s?.cur && s.cur.tickId === tickId && s.cur.listed)
+  const latest = s?.latestAuthored ? st.reports.get(s.latestAuthored)?.body : null
+  const opening = sig.reportId ? st.reports.get(sig.reportId)?.body : null
+  return Boolean(latest && (!opening || latest.last_report_at > opening.last_report_at))
 }
 

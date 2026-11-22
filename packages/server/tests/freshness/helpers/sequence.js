@@ -1,7 +1,8 @@
 /**
  * Generated event sequences over a handful of sessions and three sources,
  * with the invariant monitor checked after every step, crash/replay at random
- * points, and a closability probe at the end.
+ * points (some restarts coming back only in a later slot), and a closability
+ * probe at the end.
  *
  * `runSequence(seed, opts)` is deterministic: the same seed and step count
  * give the same events, crashes and result. `shortestFailingPrefix()` finds
@@ -31,6 +32,8 @@ export const GEN_CONFIG = Object.freeze({
 const WORDINGS = ['approve the merge', 'approve the merge (1h)', 'approve the merge (2h)', 'review the plan']
 const NEXTS = ['continue', 'run the suite', 'write the fix']
 const MAX_SESSIONS = 7
+// The share of crashed ticks whose restart comes back in a later slot.
+const LATER_SLOT = 0.35
 
 function lineKind(rng, w, now) {
   const kind = rng.weighted([
@@ -191,6 +194,15 @@ function runStep(g, h, mon, ev) {
         mon.stats.crashes += 1
         checkStep(mon, h, { complete: false })
         h.restart()
+        // Some restarts come back only after the slot has passed: the crashed
+        // tick is never replayed, and the source's next tick, in a later
+        // slot, is the next to run. Chosen from a separate stream, so a
+        // seed's events are unchanged up to its first such restart.
+        if (g.restarts.chance(LATER_SLOT)) {
+          g.pending.add(ev.source)
+          mon.stats.laterSlot = (mon.stats.laterSlot ?? 0) + 1
+          return
+        }
         at = g.now + ev.replayDelay
         if (ev.crash2 != null) {
           try {
@@ -206,13 +218,14 @@ function runStep(g, h, mon, ev) {
     }
     attempt(Infinity, at)
     g.now = at
+    g.pending.delete(ev.source)
     return
   }
   if (ev.kind === 'quiet') {
     for (let k = 0; k < ev.ticks; k++) {
       const src = Object.keys(g.nextSlot).sort((a, b) => g.nextSlot[a] - g.nextSlot[b])[0]
       runStep(g, h, mon, { kind: 'tick', source: src, at: Math.max(g.now, g.nextSlot[src]), crash: null })
-      checkStep(mon, h)
+      checkStep(mon, h, { complete: g.pending.size === 0 })
     }
     return
   }
@@ -222,7 +235,7 @@ function runStep(g, h, mon, ev) {
       for (const answer of [false, true]) {
         if (answer) Wd.answerPrompt(h.world, ev.sk, ref, g.now)
         runStep(g, h, mon, { kind: 'tick', source: 'chroxy', at: Math.max(g.now, g.nextSlot.chroxy), crash: null })
-        checkStep(mon, h)
+        checkStep(mon, h, { complete: g.pending.size === 0 })
       }
     }
     return
@@ -362,7 +375,10 @@ export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe 
   const rng = mulberry32(seed)
   const { config, perSessionIds } = seedSetup(rng, baseConfig)
   const h = createHarness({ config, policy, world: initialWorld({ perSessionIds }) })
-  const g = { now: T0, nextSlot: { chroxy: T0, codex: T0, 'claude-desktop': T0 }, ack: 0, spawned: 0 }
+  // `pending`: sources whose crashed tick was not replayed and whose next
+  // tick has not yet run; until it has, the tick's work is unfinished, so
+  // only the checks that hold mid-tick are made.
+  const g = { now: T0, nextSlot: { chroxy: T0, codex: T0, 'claude-desktop': T0 }, ack: 0, spawned: 0, restarts: mulberry32(seed ^ 0x5bd1e995), pending: new Set() }
   const perSource = 4
   // Bounds for the worst case, a cycle budget of one; a larger budget only
   // makes the real wait shorter.
@@ -381,8 +397,12 @@ export function runSequence(seed, { steps = 150, policy = DEFAULT_POLICY, probe 
       events.push(ev)
       runStep(g, h, mon, ev)
       fault?.afterStep?.(h, i)
-      checkStep(mon, h)
+      checkStep(mon, h, { complete: g.pending.size === 0 })
     }
+    // A source still waiting for the tick after a crash that was not
+    // replayed gets it now, so the run ends with every check made.
+    for (const src of [...g.pending].sort()) runStep(g, h, mon, { kind: 'tick', source: src, at: Math.max(g.now, g.nextSlot[src]), crash: null })
+    checkStep(mon, h)
     if (probe) probeClosable(h, policy)
   } catch (e) {
     if (!(e instanceof InvariantError)) {

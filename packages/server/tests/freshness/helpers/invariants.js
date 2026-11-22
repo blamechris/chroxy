@@ -87,6 +87,8 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
     tickChecks: new Map(),
     lastTickOf: new Map(),
     tickOpenSeq: new Map(),
+    tickSource: new Map(),
+    closedTicks: new Set(),
     scopes: new Map(),
     configs: new Map(),
     checkAct: new Map(),
@@ -116,11 +118,16 @@ export function createMonitor({ config, firstCycleBound, surfaceBound }) {
  * the check is not a trusted, authored, listed read.
  */
 function ownBand(mon, b) {
-  if (b.listed === false || b.last_report_at == null) return null
+  if (b.listed === false) return null
   const cfg = mon.configs.get(b.config_ref)
   if (!cfg) return null
   const skew = cfg.max_source_skew_seconds * 1000
-  if (b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
+  // A source clock off by more than the limit is `error` whatever the read
+  // found, a read with no status line included. A read the adapter itself
+  // failed (with its own error code) or was refused is graded by that.
+  const adapterFailed = b.outcome === 'blocked' || (b.outcome === 'error' && b.error_code !== 'clock_skew')
+  if (!adapterFailed && b.source_now != null && Math.abs(b.source_now - b.checked_at) > skew) return 'error'
+  if (b.last_report_at == null) return null
   const rep = b.report_id ? mon.reports.get(b.report_id) : null
   // A relayed declaration is never graded by its time, so it is `unknown`
   // even when that time is beyond the skew limit (the same order as the
@@ -213,6 +220,25 @@ function askEnded(mon, sk, kind, ask, how) {
  */
 function newAsk(_mon, _sk, a) {
   return { opened_by: a.opened_by, content_ref: a.content_ref ?? null, fp: a.fingerprint ?? null, stood: new Set([a.opened_by]) }
+}
+
+/**
+ * I5, for a prompt ask added for a prompt an earlier ask of the item stood
+ * on (its opening reference): it is added under a reference of its own (the
+ * used-reference checks above see to that), only while that prompt is
+ * pending at the session's latest live read, and at most once after each
+ * prompt ask of the item ends, with no other prompt ask added in between. So
+ * it never comes back for a prompt that is not pending, nor tick after tick.
+ */
+function checkPromptAdd(mon, it, sk, a) {
+  if (a.kind !== 'prompt') return
+  const again = a.content_ref != null && it.stood.has(a.content_ref)
+  if (again) {
+    if (!mon.livePending.get(sk)?.has(a.content_ref)) fail('I5', 'a prompt ask was added again for a prompt that is not pending at the latest live read')
+    if (!it.promptEnded) fail('I5', 'a prompt ask was added again with no prompt ask of the item ended since the last one was added')
+    mon.stats.promptAgain = (mon.stats.promptAgain ?? 0) + 1
+  }
+  it.promptEnded = false
 }
 
 /** At a tick's end: a live declared ask covers the session's latest authored owner-block report, whatever its fingerprint. */
@@ -316,6 +342,7 @@ function endClosingAsk(it, b) {
   if (it.origin !== 'owner') return
   const ask = it.asks.get(b.closing_ask)
   if (ask) for (const ref of ask.stood) it.endedRefs.add(ref)
+  if (ask && b.closing_ask === 'prompt') it.promptEnded = true
   it.asks = new Map()
 }
 
@@ -336,7 +363,9 @@ function onRecord(mon, h, r) {
       if (b.evidence_class === 'E2' && !mon.firstAuthored.has(sk)) mon.firstAuthored.set(sk, { at: b.last_report_at, scope: mon.scopes.get(sk) ?? null })
       break
     case 'tick':
+      if (b.phase === 'close') mon.closedTicks.add(b.tick_id)
       if (b.phase === 'open') {
+        mon.tickSource.set(b.tick_id, b.source)
         mon.lastTickOf.set(b.source, b.tick_id)
         mon.tickOpenSeq.set(b.tick_id, r.seq)
         mon.currentTick = b.tick_id
@@ -358,6 +387,11 @@ function onRecord(mon, h, r) {
       if (own != null && b.read_kind !== 'activity') {
         const model = b.freshness
         if (own !== model) fail('I8b', `freshness graded ${model} where the report's age gives ${own}`)
+        // A read this monitor grades as skewed is an errored read: outcome
+        // `error`, no report and no native state taken from it.
+        if (own === 'error' && (b.outcome !== 'error' || b.report_id != null || b.native_available)) {
+          fail('I8b', `a read graded clock_skew has outcome ${b.outcome}${b.report_id != null ? ', a report' : ''}${b.native_available ? ', native state' : ''}`)
+        }
       }
       if (b.trigger === 'tick') {
         mon.latestTick.set(sk, { ...b, sk, tickId: r.refs?.tick, own })
@@ -392,7 +426,7 @@ function onRecord(mon, h, r) {
       const tick = r.refs?.tick
       if (b.phase === 'open') {
         mon.stats.investigations += 1
-        mon.openInv.set(b.investigation_id, true)
+        mon.openInv.set(b.investigation_id, { tick, source: b.source, sk, trigger: b.trigger, run: null })
         if (b.onset) mon.onsetTrigger.set(b.onset, b.trigger)
         const who = b.source_level ? `src:${b.source}` : sk
         const ts = `${tick}|${who}`
@@ -428,10 +462,25 @@ function onRecord(mon, h, r) {
             const run = mon.runs.get(sk)?.[b.trigger]
             if (!run) fail('I7i', `an investigation was opened for ${b.trigger}, which the monitor does not see holding`)
             run.cycles += 1
+            mon.openInv.get(b.investigation_id).run = run
+            // The cycle number is this monitor's own count of the run's
+            // cycles, an abandoned investigation not counted.
+            if (b.cycle !== run.cycles) fail('I7a', `cycle ${b.cycle} opened as the run's cycle ${run.cycles}`)
             if (run.cycles > 2) fail('I7a', `${run.cycles} cycles of ${b.trigger} in one unbroken run of the trigger`)
           }
         }
       } else if (b.phase === 'close') {
+        const opened = mon.openInv.get(b.investigation_id)
+        if (b.classification === 'abandoned') {
+          // I7h: an investigation is closed as abandoned only when the tick
+          // that opened it never closed, and only by a later tick of its own
+          // source. It decided nothing, so it is no cycle of its onset (I7a).
+          if (!opened) fail('I7h', 'an investigation that is not open was closed as abandoned')
+          if (mon.closedTicks.has(opened.tick) || tick === opened.tick || mon.tickSource.get(tick) !== opened.source) fail('I7h', 'an investigation was closed as abandoned though its own tick closed, or by a tick of another source')
+          if (b.surface != null) fail('I7h', 'an abandoned investigation surfaced something')
+          if (opened.run) opened.run.cycles -= 1
+          mon.stats.abandoned = (mon.stats.abandoned ?? 0) + 1
+        }
         mon.openInv.delete(b.investigation_id)
         if (b.trigger === 'recheck' && b.classification === 'no_longer_observed' && sk) {
           const run = mon.runs.get(sk)?.stale_report
@@ -468,6 +517,7 @@ function onRecord(mon, h, r) {
         if (b.ask) {
           // I5: an ask opens only on a reference no earlier ask of the item stood on.
           if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${b.ask.kind} ask opened an owner item on a reference an earlier ask stood on`)
+          checkPromptAdd(mon, it, sk, b.ask)
           it.asks = new Map([[b.ask.kind, newAsk(mon, sk, b.ask)]])
           it.stood.add(b.ask.opened_by)
           checkAsks(it, b)
@@ -577,6 +627,7 @@ function onRecord(mon, h, r) {
               if (it.usedRefs.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference already used`)
               if (it.stood.has(b.ask.opened_by)) fail('I5', `a ${kind} ask joined an owner item on a reference an earlier ask stood on`)
               if (it.asks.has(kind)) fail('I10', `a second ${kind} ask joined one owner item`)
+              checkPromptAdd(mon, it, sk, b.ask)
               it.usedRefs.add(b.ask.opened_by)
               it.asks.set(kind, newAsk(mon, sk, b.ask))
               it.stood.add(b.ask.opened_by)
@@ -594,7 +645,10 @@ function onRecord(mon, h, r) {
               if (!mine) fail('I10', `an owner item ended a ${kind} ask it does not carry`)
               if (!askEnded(mon, sk, kind, mine, b.ask.how)) fail('I4b', `a ${kind} ask was ended (${b.ask.how}) without its evidence`)
               it.asks.delete(kind)
-              if (kind === 'prompt') it.roundOwed = 0
+              if (kind === 'prompt') {
+                it.roundOwed = 0
+                it.promptEnded = true
+              }
               for (const ref of mine.stood) it.endedRefs.add(ref)
               changed = false
             } else {
@@ -801,10 +855,12 @@ function onTickClosed(mon, h, r) {
     if (g > 1) fail('I7g', `a session was rechecked ${g} ticks running while nothing was working or waiting`)
     // I10: every live ask is on the session's open owner item, by the end of
     // the tick, as this monitor sees the asks: the latest prompt pending at a
-    // live read, and an authored report that is an owner block. The only
-    // exception is a line or prompt that an ask already stood on and that ask
-    // has ended (a session rewound to it), which never brings it back. And no owner item
-    // still carries a declared ask that a newer, non-owner-block report ended.
+    // live read, and an authored report that is an owner block. A pending
+    // prompt has no exception: whatever ask stood on it before, while it is
+    // pending the session waits on the owner for it. A declared line has one:
+    // a line that a declared ask already stood on and that ask has ended (a
+    // session rewound to it) never brings it back. And no owner item still
+    // carries a declared ask that a newer, non-owner-block report ended.
     const owners = [...mon.items.values()].filter((x) => x.sk === sk && OWNER_BLOCK_ORIGINS.has(x.origin))
     const carrying = (kind) => owners.some((x) => x.open && x.asks.has(kind))
     const askGone = (ref) => owners.some((x) => x.endedRefs.has(ref))
@@ -823,7 +879,7 @@ function onTickClosed(mon, h, r) {
       const d = x.asks.get('declared')
       if (d && ob) follow(x, d, la)
     }
-    if (latest && !carrying('prompt') && !askGone(latest.ref)) fail('I10', 'a prompt pending at a live read is not an ask on an open owner item')
+    if (latest && !carrying('prompt')) fail('I10', `a prompt pending at a live read is not an ask on an open owner item${askGone(latest.ref) ? ' (an earlier ask stood on it)' : ''}`)
     if (ob && !carrying('declared') && !askGone(la)) fail('I10', 'an authored owner-block report is not an ask on an open owner item')
     for (const x of owners) {
       const d = x.open ? x.asks.get('declared') : null

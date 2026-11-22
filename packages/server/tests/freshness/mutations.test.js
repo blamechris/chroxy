@@ -25,8 +25,8 @@ import { LITERAL, MUTANTS } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const SEEDS = {
-  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, 'I2c.front': 3681, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, 'I5.content': 76, I6: 271,
-  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6,
+  I1a: 5, I1b: 1, I1c: 2, I1d: 1, I2: 1, I2b: 2, 'I2c.front': 3681, 'I2c.showable': 110, I3a: 4, I3b: 12, I4a: 1, I4b: 1, 'I4b.lapsed': 4, I5: 10, 'I5.ask': 6, 'I5.content': 76, I6: 271,
+  I7a: 1, 'I7a.onset': 1, I7i: 1, I7b: 3, I7c: 2, I7d: 2, I7f: 40, 'I7f.window': 3611, I7g: 9, I8: 1, I8b: 1, I9: 10, I10: 4, 'I10.close': 6, 'I10.prompt': 4, 'I7h.abandoned': 5, 'I7a.abandoned': 9, 'I11.abandoned': 161,
   I11: 7, 'I11.handover': 65, I12: 119, I13: 6, 'I13.none': 30, 'I13.round': 18, 'I13.declared': 66, 'I1a.round2': 18, 'I1a.restore': 18, 'I2.round': 59, 'I2.slotless': 59, 'I13.wait': 63, 'I1d.counted': 18,
   ackFreesSlot: 1, anyNewReportIsContent: 271, contentMayMoveBack: 70, reReadOnResume: 4, raiseBesideOwnerBlock: 7, twoOwnerItems: 6,
   onlyOwnPromptAnswer: 82, noRecheckAfterOwnerWait: 129,
@@ -269,6 +269,90 @@ describe('mutation proofs: each invariant goes red when its rule is broken', () 
     assert.ok(f)
     assert.match(f.r.error.message, /ask was ended/)
     assert.ok(runSequence(f.seed).ok)
+  })
+
+  it('I8b (fault): a read with no status line graded clock_skew but recorded as no_report is caught', () => {
+    const rewriteAppend = (d) => (d.kind === 'check' && d.body.error_code === 'clock_skew' && d.body.last_report_at == null ? { ...d, body: { ...d.body, outcome: 'no_report' } } : d)
+    const f = firstFailure('I8b', 1, { fault: { rewriteAppend } })
+    assert.ok(f)
+    assert.match(f.r.error.message, /graded clock_skew has outcome no_report/)
+    assert.ok(runSequence(f.seed).ok)
+  })
+
+  // The monitor's checks of an `abandoned` close (I7h) and of a skewed read (I8b).
+  const abandonedClose = (d) => d.kind === 'investigation' && d.body.phase === 'close' && d.body.classification === 'abandoned'
+  for (const [name, expect, re, rewriteAppend] of [
+    ['a live investigation closed as abandoned by its own tick', 'I7h', /though its own tick closed/, (d) => (d.kind === 'investigation' && d.body.phase === 'close' && d.body.classification !== 'abandoned' ? { ...d, body: { ...d.body, classification: 'abandoned', surface: null } } : d)],
+    ['an abandoned investigation that surfaces something', 'I7h', /abandoned investigation surfaced/, (d) => (abandonedClose(d) ? { ...d, body: { ...d.body, surface: 'attention' } } : d)],
+    ['an investigation never opened, closed as abandoned', 'I7h', /not open was closed as abandoned/, (d) => (abandonedClose(d) ? { ...d, body: { ...d.body, investigation_id: `never-opened-${d.body.investigation_id}` } } : d)],
+    ['a skewed read with no status line recorded with a report', 'I8b', /graded clock_skew has outcome error, a report/, (d) => (d.kind === 'check' && d.body.error_code === 'clock_skew' && d.body.last_report_at == null ? { ...d, body: { ...d.body, report_id: 'forged' } } : d)],
+    ['a skewed read with no status line recorded with native state', 'I8b', /graded clock_skew has outcome error, native state/, (d) => (d.kind === 'check' && d.body.error_code === 'clock_skew' && d.body.last_report_at == null ? { ...d, body: { ...d.body, native_available: true } } : d)],
+  ]) {
+    it(`${expect} (fault): ${name} is caught`, () => {
+      const f = firstFailure(expect, 1, { fault: { rewriteAppend } })
+      assert.ok(f, `${name}: not caught in ${SEARCH} seeds`)
+      assert.match(f.r.error.message, re)
+      assert.ok(runSequence(f.seed).ok)
+    })
+  }
+
+  // An abandoned investigation is no cycle: abandoned, then cycles 1 and 2 of
+  // one onset, is within I7a. Without the monitor's own discount it would
+  // count three.
+  it('I7a: abandoned, then two cycles of one onset, passes; the same counted as three is what the discount prevents', () => {
+    const build = () => {
+      const h = createHarness({ config: { per_source: { 'claude-desktop': 15 } } })
+      const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+      const d = W.addSession(h.world, { source: 'claude-desktop', native_id: 'd', scope: null })
+      W.author(h.world, d, T0, { state: 'running', next: 'a' })
+      const tick = (m) => {
+        h.tick('claude-desktop', T0 + m * MIN)
+        checkStep(mon, h)
+      }
+      for (const m of [15, 30, 45]) tick(m)
+      return { h, mon, tick }
+    }
+    // Stale at +60: killed just after its investigation opened, never replayed.
+    let sc = null
+    for (let op = 0; op < 40 && !sc; op++) {
+      const b = build()
+      const n = b.h.records().length
+      try {
+        b.h.tick('claude-desktop', T0 + 60 * MIN, { crashAfter: op })
+        break
+      } catch (e) {
+        if (!(e instanceof Crash)) throw e
+      }
+      const recs = b.h.records().slice(n).filter((r) => r.kind === 'investigation')
+      if (recs.some((r) => r.body.phase === 'open') && !recs.some((r) => r.body.phase === 'close')) sc = b
+    }
+    assert.ok(sc, 'a crash point inside the investigation')
+    checkStep(sc.mon, sc.h, { complete: false })
+    sc.h.restart()
+    for (const m of [75, 90]) sc.tick(m)
+    const opens = sc.h.records('investigation').filter((r) => r.body.phase === 'open').map((r) => r.body.cycle)
+    const closes = sc.h.records('investigation').filter((r) => r.body.phase === 'close').map((r) => `${r.body.cycle}:${r.body.classification}`)
+    assert.deepEqual(opens, [1, 1, 2])
+    assert.deepEqual(closes, ['1:abandoned', '1:running_claim_unverified', '2:running_claim_unverified'])
+  })
+
+  // The adapter's own failure is graded by that failure, even when the read
+  // carries a skewed source clock: a refused read is `blocked`, not skew.
+  it('I8b: a refused or failed read carrying a skewed source clock is graded by the adapter, and passes', () => {
+    const h = createHarness({ config: { per_source: { codex: 15 } } })
+    const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+    const x = W.addSession(h.world, { source: 'codex', native_id: 'x', scope: 'r' })
+    W.author(h.world, x, T0, { state: 'idle' })
+    const reads = [
+      { outcome: 'blocked', not_read_reason: 'credential_required' },
+      { outcome: 'error', error_code: 'timeout' },
+    ]
+    reads.forEach((r, i) => {
+      h.tick('codex', T0 + (15 + 15 * i) * MIN, { reads: (a) => ({ ...a, read: (_s, now) => ({ ...r, source_now: now + 15 * MIN }) }) })
+      checkStep(mon, h)
+    })
+    const cs = h.records('check').map((r) => [r.body.outcome, r.body.freshness])
+    assert.deepEqual(cs, [['blocked', 'blocked'], ['error', 'error']])
   })
 
   it('I4c (fault): a derived state that drops an open item is caught', () => {

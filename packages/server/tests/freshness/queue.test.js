@@ -7,7 +7,8 @@ import { deriveState } from './model/derive.js'
 import { append, createLedger } from './model/ledger.js'
 import { DEFAULT_POLICY, nextReminderAt, withPolicy } from './model/policy.js'
 import { Crash, HOUR, MIN, OWNER, T0, createHarness } from './helpers/harness.js'
-import { literalPreempts } from './helpers/variants.js'
+import { InvariantError, checkStep, createMonitor } from './helpers/invariants.js'
+import { MUTANTS, literalPreempts } from './helpers/variants.js'
 import * as W from './helpers/world.js'
 
 const FAST = { per_source: { chroxy: 15, codex: 15, 'claude-desktop': 15 } }
@@ -322,6 +323,130 @@ describe('crashes around sends', () => {
     assert.ok(sendsBefore <= 1)
     assert.equal(h.conflicts().length, 0)
   })
+
+  // An item is acknowledged; the verification tick is killed at every
+  // operation; after the restart the next tick runs in a LATER slot (the
+  // crashed tick is never replayed). The verification is recorded once and
+  // never rewritten with another result.
+  describe('killed in the tick that verifies an acknowledgment, the next tick in a later slot', () => {
+    function verifyCrash(op, { evidenceBefore, evidenceAfter, policy }) {
+      const h = setup({}, policy)
+      const mon = createMonitor({ config: h.ctx.state.config, firstCycleBound: 20, surfaceBound: 100 })
+      const x = session(h, 'chroxy', 'x')
+      const id = itemIds.owner(x.s)
+      W.author(h.world, x.sk, T0, ownerBlock())
+      h.tick('chroxy', T0 + 15 * MIN)
+      checkStep(mon, h)
+      h.owner(id, 'done', 'm1', { at: T0 + 16 * MIN })
+      checkStep(mon, h)
+      if (evidenceBefore) W.author(h.world, x.sk, T0 + 17 * MIN, { state: 'running', next: 'go' })
+      let crashed = false
+      // What the killed tick had written: its verification, its return
+      // attempt, its resolution.
+      let atCrash = null
+      try {
+        h.tick('chroxy', T0 + 30 * MIN, { crashAfter: op })
+      } catch (e) {
+        if (!(e instanceof Crash)) throw e
+        crashed = true
+        const v = h.records('owner_ack').find((r) => r.body.phase === 'verify')
+        const tail = steps(h, id)
+        atCrash = { verified: v ? v.body.verified : null, returned: tail.includes('returned'), resolved: tail.includes('resolved'), sent: sent(h, id) }
+        checkStep(mon, h, { complete: false })
+        h.restart()
+      }
+      evidenceAfter?.(h, x.sk)
+      h.tick('chroxy', T0 + 50 * MIN)
+      checkStep(mon, h)
+      const verifies = h.records('owner_ack').filter((r) => r.body.phase === 'verify')
+      return { h, id, crashed, verifies, atCrash }
+    }
+    // The exact end of a run: the one verification, every step, what was sent, the state.
+    const outcome = (r) => ({ verified: r.verifies.map((v) => v.body.verified), steps: steps(r.h, r.id), sent: sent(r.h, r.id), state: r.h.item(r.id).state, episode: r.h.item(r.id).episode })
+    const returnSent = (r) => (r.atCrash && !r.atCrash.sent.includes('returned1') ? [] : ['returned1'])
+    const each = (opts, check) => {
+      let points = 0
+      for (let op = 0; ; op++) {
+        const r = verifyCrash(op, opts)
+        assert.equal(r.h.conflicts().length, 0, `no conflict: crash at op ${op}`)
+        const ids = r.h.sends.map((s) => s.attempt_id)
+        assert.equal(new Set(ids).size, ids.length, `no second send: crash at op ${op}`)
+        assert.ok(r.verifies.length <= 1, `one verification record: crash at op ${op}`)
+        check(r, op)
+        if (!r.crashed) break
+        points += 1
+      }
+      assert.ok(points > 3, `${points} crash points exercised`)
+    }
+
+    it('closing evidence arrives after the restart: the item is resolved, by the ordinary row; a verification already recorded stands', () => {
+      const seen = new Set()
+      each({ evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, { state: 'running', next: 'go' }) }, (r, op) => {
+        const c = r.atCrash
+        const kind = !c ? 'no crash' : c.verified == null ? 'killed before the verification' : c.returned ? 'killed after the return attempt' : 'killed after the verification'
+        seen.add(kind)
+        const expected = {
+          // The later tick finds the evidence and is the first to verify.
+          'killed before the verification': { verified: [true], steps: ['queued', 'shown', 'resolved'], sent: ['shown1'], state: 'closed', episode: 1 },
+          // "Not verified" stands; the evidence resolves the item; the return it called for is not sent.
+          'killed after the verification': { verified: [false], steps: ['queued', 'shown', 'resolved'], sent: ['shown1'], state: 'closed', episode: 1 },
+          // The return attempt was recorded (sent only if the kill came after the send).
+          'killed after the return attempt': { verified: [false], steps: ['queued', 'shown', 'returned', 'resolved'], sent: ['shown1', ...returnSent(r)], state: 'closed', episode: 1 },
+          'no crash': { verified: [false], steps: ['queued', 'shown', 'returned', 'resolved'], sent: ['shown1', 'returned1'], state: 'closed', episode: 1 },
+        }[kind]
+        assert.deepEqual(outcome(r), expected, `${kind}: crash at op ${op}`)
+      })
+      assert.equal(seen.size, 4, `every case reached: ${[...seen]}`)
+    })
+
+    it('no evidence at all: the step the verification called for is made once (returned), then the item is active', () => {
+      each({}, (r, op) => {
+        // An attempt killed before its send is never re-sent (delivery unknown).
+        const returns = r.h.surface(r.id).filter((x) => x.body.step === 'returned' && x.body.phase === 'attempt')
+        assert.equal(returns.length, 1, `one return attempt: crash at op ${op}`)
+        assert.ok(r.h.sendsFor(r.id).filter((s) => s.step === 'returned').length <= 1)
+        assert.equal(r.h.item(r.id).state, 'active')
+      })
+    })
+
+    // The killed tick found the evidence and recorded "verified"; before the
+    // next tick the session authored a new owner block. The verification is
+    // not rewritten, and the next tick follows the evidence it finds: no
+    // closing evidence, so the "not yet confirmed" return. In that one case
+    // the ledger holds a verified record followed by a return (README).
+    it('closing evidence found by the crashed tick, then gone (a new owner block) after the restart: a recorded "verified" stands and the later tick returns the item', () => {
+      const seen = new Set()
+      each({ evidenceBefore: true, evidenceAfter: (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, ownerBlock('approve the other merge')) }, (r, op) => {
+        const c = r.atCrash
+        const kind = !c || c.resolved ? 'resolved before the kill' : c.verified == null ? 'killed before the verification' : 'killed after "verified"'
+        seen.add(kind)
+        const expected = {
+          // The later tick is the first to verify, and finds no evidence.
+          'killed before the verification': { verified: [false], steps: ['queued', 'shown', 'updated', 'returned'], sent: ['shown1', 'returned1'], state: 'active', episode: 1 },
+          'killed after "verified"': { verified: [true], steps: ['queued', 'shown', 'updated', 'returned'], sent: ['shown1', 'returned1'], state: 'active', episode: 1 },
+          // Resolved by the first tick; the new block is a new episode.
+          'resolved before the kill': { verified: [true], steps: ['queued', 'shown', 'resolved', 'queued', 'shown'], sent: ['shown1', 'shown1'], state: 'active', episode: 2 },
+        }[kind]
+        assert.deepEqual(outcome(r), expected, `${kind}: crash at op ${op}`)
+      })
+      assert.equal(seen.size, 3, `every case reached: ${[...seen]}`)
+    })
+
+    it('mutation: a verification written again without looking it up conflicts with itself, and I3a goes red', () => {
+      const rewrite = withPolicy({ reuseRecorded: () => null })
+      const later = (h, sk) => W.author(h.world, sk, T0 + 35 * MIN, { state: 'running', next: 'go' })
+      let red = 0
+      for (let op = 0; op < 40; op++) {
+        try {
+          if (!verifyCrash(op, { evidenceAfter: later, policy: rewrite }).crashed) break
+        } catch (e) {
+          if (!(e instanceof InvariantError) || e.id !== 'I3a') throw e
+          red += 1
+        }
+      }
+      assert.ok(red > 0)
+    })
+  })
 })
 
 describe('origins and their closing evidence', () => {
@@ -460,7 +585,7 @@ describe('origins and their closing evidence', () => {
     }
   })
 
-  it('a stale line surfaced as attention, then a prompt on the same session: a separate owner item that notifies', () => {
+  it('a stale line on one session surfaced as attention, then a prompt on another session: the prompt\'s owner item is a separate item', () => {
     const h = setup()
     const d = session(h, 'claude-desktop', 'd', null)
     const c = session(h, 'chroxy', 'c')
@@ -588,6 +713,39 @@ describe('preemption', () => {
     assert.ok(h.item(ia).counters.shows_counted >= 2, 'the preempted item spent its shows')
     assert.ok(seq.indexOf('b:shown') === -1 || seq.indexOf('b:shown') > 4, 'the earlier deadline waited behind the item it preempted')
     void ib
+  })
+
+  // b, shown once with a limit of one and back in the queue from expiry, gets
+  // a prompt whose deadline comes before a's next reminder: no counted show
+  // is left to it, so it does not preempt a.
+  function noShowLeft(policy) {
+    const h = setup({ surface: { reminder_after_minutes: [30, 45], item_time_limit_hours: 1, max_presentations: 1 } }, policy)
+    const a = session(h, 'chroxy', 'a')
+    const b = session(h, 'chroxy', 'b')
+    W.author(h.world, b.sk, T0, ownerBlock('review the plan'))
+    h.tick('chroxy', T0 + 15 * MIN)
+    W.author(h.world, a.sk, T0 + 16 * MIN, ownerBlock())
+    ticks(h, 'chroxy', T0 + 15 * MIN, 4)
+    const ia = itemIds.owner(a.s)
+    const ib = itemIds.owner(b.s)
+    assert.deepEqual([h.item(ia).state, h.item(ib).state, h.item(ib).counters.shows_counted], ['active', 'queued', 1], 'a took the slot when b expired')
+    // A deadline at +96, before a's first reminder at +105.
+    W.raisePrompt(h.world, b.sk, T0 + 76 * MIN, 20 * 60)
+    h.tick('chroxy', T0 + 90 * MIN)
+    return { h, ia, ib }
+  }
+
+  it('a challenger with no counted show left does not preempt, though its deadline comes first', () => {
+    const { h, ia, ib } = noShowLeft()
+    assert.equal(h.item(ib).deadline, T0 + 96 * MIN)
+    assert.equal(h.records('surface').filter((r) => r.body.step === 'preempted').length, 0)
+    assert.equal(h.item(ia).state, 'active')
+  })
+
+  it('mutation: without that check the active item is preempted for nothing: the challenger is exhausted at the slot, and so is the preempted item, its one show spent', () => {
+    const { h, ia, ib } = noShowLeft(MUTANTS['I2c.showable'])
+    assert.deepEqual(steps(h, ia).slice(-2), ['preempted', 'exhausted'])
+    assert.equal(steps(h, ib).at(-1), 'exhausted')
   })
 
   it('gap witness: read literally, two deadline items preempt each other on alternate ticks', () => {

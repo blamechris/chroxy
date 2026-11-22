@@ -55,7 +55,11 @@ caller.
   `relayed_declaration`.
 - A report stamped later than the check by more than the skew limit, or a
   source clock off by more than the limit, makes the read `error: clock_skew`;
-  exactly the limit is not skew. A line whose time cannot be trusted writes no report record.
+  exactly the limit is not skew. Its outcome is `error` whatever the read
+  found, a status line or none, so it counts toward `repeated_error` and a
+  source-level outage like any errored check; it writes no report record and
+  no native state is taken from it. A line whose time cannot be trusted
+  writes no report record.
 - On a source that stamps a declaration only when it changes, an identical
   repeat is not a new report, and that source's decisions are carried forward
   (`possibly_inherited`).
@@ -75,7 +79,7 @@ payload is ignored; with a different payload it appends one
 | check inside an investigation | H(investigation id, read number): 1 the re-read, 2 its retry, 3 the gone confirmation, 4 a separate activity read |
 | activity seen at a read | H(check id, basis, ref) |
 | activity event | H(session, 'event', host event id), else H(session, basis, time) |
-| investigation | H(investigation id, phase); id = H(session, report, trigger, onset, cycle), or per tick for a recheck |
+| investigation | H(investigation id, phase); id = H(session, report, trigger, onset, cycle), or per tick for a recheck; H(that id, 'after_abandoned') once for each earlier investigation of that id closed as abandoned |
 | surface | H(item, episode, step, ordinal, phase) |
 | owner_ack | H(item, episode, message id, phase) |
 | config | H(previous config record, config hash) |
@@ -89,12 +93,18 @@ carried-condition change once the item has carried one; k (1 or 2) for
 H('ask', change, kind, the ask's opening reference, and for new content the
 changing report or prompt id) for a change to an owner item's asks, or
 H('carried', change, attention item, opening reference) for a carried
-condition.
+condition. An ask's opening reference is its report or prompt id, except for
+a prompt ask added again for the prompt an earlier prompt ask opened on,
+which opens on H('prompt_again', prompt id, the opening reference of the
+prompt ask that last ended, its ending evidence) (see "Items and the single
+slot").
 
 A send is an **attempt** record, then the send, then an **outcome** record. An
 attempt uses up its step whether or not the send is confirmed; an attempt with
 no outcome is recorded `delivery_unknown` and never re-sent. A step re-run
-after a crash reuses any read already recorded.
+after a crash reuses any read already recorded. The verification of an
+acknowledgment (`owner_ack`, phase `verify`) is written once, by whichever
+step comes first, and is never rewritten with another result.
 
 ### Items and the single slot
 
@@ -132,11 +142,25 @@ joining one, on a used reference, so a session rewound to a line a declared
 ask already covered never brings that ask back.
 
 The two kinds differ on purpose. For a prompt ask only its opening reference
-is used, not the prompts its content moved through. A prompt the ask moved
-away from can still be pending, unanswered, when the ask ends (its newer
-prompt was answered); the session is still waiting on the owner for it, so it
-must have an owner item and opens an ask of its own. Here keeping every
-pending prompt in front of the owner comes before never asking twice.
+is used, not the prompts its content moved through. Whenever a read that
+carried native state shows a prompt pending and the owner item has no live
+prompt ask, a prompt ask is added for the latest pending prompt, opening a
+new episode if the item is closed or joining it if a declared ask kept it
+open. A prompt the ended ask's content moved away from is added on its own
+id. The prompt the ended ask opened on is a used reference, yet it too can
+still be pending, unanswered, when the ask ends (its content moved to a newer
+prompt and that one was answered); it is added under a reference derived from
+the prompt and from the prompt ask that last ended:
+H('prompt_again', prompt, that ask's opening reference, its ending evidence).
+That reference is new (each ask ends once) and the same on a replay, and a
+second such addition (the prompt still pending after a third prompt was
+raised and answered) gets another. A prompt ask is added only for a prompt
+pending at a live read and only while no prompt ask of the item is live, and
+the added ask stays until an owner answer ends it, so a prompt is added again
+at most once per ending of a prompt ask, never tick after tick. Here keeping
+every pending prompt in front of the owner comes before never asking twice.
+Declared asks have no such rule: a declared ask never comes back on a line it
+covered.
 
 Five counters are stored on every surface record: `presentation`,
 `shows_counted`, `reminders_used`, `returns_used`, and `round_shows` (the
@@ -163,6 +187,22 @@ shows prompt rounds earned after an owner item's limit was used). The transition
 | owner, open | a prompt round joined with no counted show left, the slot held by it or free | shown, once | yes | unchanged |
 | owner, open | an ask ends while another is live | updated | no | same |
 | owner, open | its last ask ends | resolved, or withdrawn for a lapse | no | closed |
+
+A crash after the verification is written and before its step leaves the
+item acknowledged. If the next tick runs in a later slot, the recorded
+verification stands and is not written again, and the item follows the
+evidence that tick finds: closing evidence resolves it by the "any open,
+closing evidence" row; none completes the failed-verification step
+(`returned` or `exhausted`), sent at most once as any send. Until then it
+holds the slot as acknowledged. A recorded verification is the answer the
+first tick found and is not rewritten; a later tick may find the other
+answer. So in one case the ledger holds a "verified" record followed by a
+return: the tick that found closing evidence wrote "verified" and was killed
+before `resolved`, the session then authored a new owner block, and the next
+tick, finding no closing evidence, returned the item "not yet confirmed",
+as it would have with no crash had the block cleared and come back between
+two ticks. The alternative not chosen is to resolve the item from the
+recorded verification and let the new block open a new episode.
 
 Edges at exact equality: a reminder or the time limit is due at the very
 moment its interval has passed since the latest show or return. A deadline
@@ -229,8 +269,9 @@ or both.
   uncounted show when the deferral ends).
 - **Each prompt round after the limit earns one show.** Once the item has
   used its counted shows, a prompt round, that is a prompt ask joining the
-  item (the first prompt on an item a declared block opened, or a new
-  prompt after the earlier prompt ask ended), is shown once anyway. A newer
+  item (the first prompt on an item a declared block opened, or a prompt
+  pending after the earlier prompt ask ended, including the prompt that
+  ask opened on), is shown once anyway. A newer
   prompt replacing the latest within a live prompt ask is no new round. The
   show restores nothing: it is kept in its own counter (`round_shows`), not
   in `shows_counted`, so every rule that reads the limit is unchanged; it
@@ -341,8 +382,10 @@ needs its own read draws on a separate budget.
 An investigation runs **rungs**, recorded by name in its close record:
 `re_read` (the same adapter read once more, and one retry if it failed),
 `confirm_gone` (a read confirming a dropped session is really gone),
-`activity_read` (native activity: from the tick's own read where the source
-carries it, else a separate read) and `classify`. A recheck runs only
+`activity_read` (native activity: where the source's read carries it, from
+the latest successful read of the cycle, the re-read or, if the re-read
+failed, its retry, and from the tick's own read only when neither
+succeeded; else a separate read) and `classify`. A recheck runs only
 `activity_read` and `classify`.
 
 Classifications and their effect: `working_unreported` and
@@ -362,7 +405,15 @@ node --import ./tests/_setup.mjs --test 'tests/freshness/*.test.js'
 FRESHNESS_SOAK=1 node --import ./tests/_setup.mjs --test tests/freshness/generated.test.js
 ```
 
-The default run uses fixed seeds and takes a few seconds. The soak runs
+The default run uses fixed seeds and takes a few seconds. A crashed tick is
+replayed in its own slot, or, for some crashes (chosen from a separate
+random stream, so a seed's events are unchanged up to its first such
+restart), the process comes back only after the slot has passed and the
+source's next tick, in a later slot, runs instead; until it has, only the
+checks that hold mid-tick are made, and a run that ends with such a source
+waiting ticks it once more and then makes every check. So a breach of the
+checks made only at a complete step (I2, I4c, I7h, I9, I11) that appears and
+heals entirely inside such a waiting window is not seen. The soak runs
 4,000 sequences of the default length and 600 of 600 steps, and takes a few
 minutes.
 
@@ -390,21 +441,21 @@ ledger and the simulated world for inspection.
 | I4a | Every open item closes when its origin's evidence is supplied |
 | I4b | Every resolution and withdrawal is backed by its evidence |
 | I4c | The model's open items equal the monitor's own account of the ledger |
-| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it |
+| I5 | Never two open episodes of one item; never an episode opened, or an ask added, on a used reference, including any owner-block report a declared ask covered, as the monitor itself follows it; and a prompt ask added for a prompt an earlier ask of the item opened on is added only while that prompt is pending at the session's latest live read, and at most once after each ending of a prompt ask of the item, with no prompt ask added in between |
 | I6 | An exhausted item sends nothing unless its content changed while a counted show remained, or a prompt round is owed its show |
-| I7a | At most two cycles per onset, onsets derived by the monitor itself |
+| I7a | At most two cycles per onset, onsets derived by the monitor itself; an investigation closed as abandoned is no cycle, and each per-session cycle opens under the number the monitor's own count of its onset's cycles gives |
 | I7b | At most one investigation per session per tick |
 | I7c | Both budgets respected |
 | I7d | Rechecks never take a cycle that a stale session needs |
 | I7e | A held trigger gets its first cycle within a bound |
 | I7f | A stale, unexplained report is surfaced within a bound |
 | I7g | No session is rechecked as working while nothing is there |
-| I7h | Every investigation that opens closes in the same tick |
+| I7h | Every investigation that opens closes in the same tick, or, when that tick was killed and never replayed, is closed as abandoned by a later tick of its source, deciding nothing; an investigation is closed as abandoned only then |
 | I7i | An investigation is opened only for a trigger the monitor also sees holding |
 | I8 | Freshness never improves for one report under one configuration |
-| I8b | Graded freshness equals the monitor's own computation |
+| I8b | Graded freshness equals the monitor's own computation, a source clock off by more than the limit giving `error` on any read the adapter answered (a read with no status line included); and a read so graded has outcome `error`, no report and no native state |
 | I9 | A session never has two open owner items, and never an open attention item beside its open owner item, whatever its trigger |
-| I10 | By the end of each tick every live ask, as the monitor sees it (the latest prompt pending at a live read; an authored owner-block report), is an ask on the session's open owner item, unless an ask that stood on that line or prompt already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
+| I10 | By the end of each tick every live ask, as the monitor sees it, is an ask on the session's open owner item: the latest prompt pending at a live read always, whatever ask stood on it before; an authored owner-block report unless a declared ask that stood on that line already ended; an owner item closes only with its last ask, carries no declared ask that a newer report ended, and lists the asks its own changes add up to |
 | I11 | A surfaced condition is never lost: until its attention item's closing evidence (or a dismissal), its session has that attention item open or an open owner item whose content names it; no owner item names a condition that has ended; and the list each carried-condition record states equals the changes so far |
 | I12 | One condition, across every attention episode it opens, gets at most the show limit in counted shows, two reminders and one return |
 | I13 | An ask joining an open owner item with a counted show left is shown by the end of that tick (at once if the item held the slot, else queued behind the item that holds it); with none left, a prompt round is owed one show until it is made, its prompt ask ends, or an ordinary show serves it, and at every tick's end an item still owed one is waiting behind another item that holds the slot; a declared ask is shown nothing and leaves an exhausted item exhausted |
@@ -439,6 +490,13 @@ round owed, the two accounts would disagree on whether a show was the
 round's, which shows as I1d (the stored round count) on that record, or as
 I2 (the slot holder) at the end of the step.
 
+An investigation's `abandoned` close is the model's own label: the monitor
+checks that the tick that opened it never closed, that a later tick of the
+same source closed it and that it surfaced nothing, and then counts it as no
+cycle; it does not check that the model closes every such investigation at
+the first chance, only that none is left open at the end of a step that
+leaves no crashed tick waiting for its source's next tick.
+
 `mutations.test.js` proves each one can fail: it swaps one rule in the policy
 object (or, for checks no rule reaches, injects a test-only fault) and asserts
 that the named invariant goes red.
@@ -470,7 +528,14 @@ of the current run); investigation re-reads do not count toward
 
 **reconciler.js.** Configuration records store the full values.
 
-**investigation.js.** The source-level investigation uses the cycle budget.
+**investigation.js.** A tick killed by a crash is replayed only in its own
+slot. When the process comes back after the slot has passed, the source's
+next tick closes each investigation the crashed tick left open as
+`abandoned` (no rungs, no decision, no cycle), and the next investigation
+of that onset and cycle takes a derived id, so no open record repeats a key;
+the signals of the investigations the crashed tick did close are applied by
+that next tick, unless the item's closing evidence has arrived since, until
+a later tick of the source closes. The source-level investigation uses the cycle budget.
 An attention item raised by a recheck opens on the onset of the cycle that
 led to it, so a dismissal holds. The investigation's undefined `remainder`
 field is replaced by the decision it led to.
@@ -488,7 +553,11 @@ the ask that closed it (`closing_ask`), and on a join whether a show is owed
 at once (`show_now`), as counted (`counted_next`), or to a prompt round
 (`round_owed`); a round's show is marked `round`. A seed is unclosable by evidence when its naming session's
 source gives no working directory; "done" then withdraws it. "Next tick" for
-verification is the item's own source's next tick. Owner actions on an item
+verification is the item's own source's next tick. A verification is written
+once and looked up before it is written, so a crash between it and its step,
+followed by a tick in a later slot that finds the other answer, does not
+rewrite it; that tick follows the evidence it finds (resolved, or the
+failed-verification step) without a second verification record. Owner actions on an item
 that is not active do nothing. The deferral time is stored on the record.
 A carried condition whose closing evidence arrives while its owner item is
 open is dropped from the content by another `updated` step, not kept. An
@@ -533,6 +602,11 @@ attention item's `queued`.
   reports are derived in the fold from the tick checks already in the
   ledger, so no record is written for them. A prompt the content moved away
   from stays free, because it may still be pending when the ask ends.
+- The prompt an ended prompt ask opened on, still pending, is added again
+  under a reference derived from it and from the prompt ask that last ended
+  (its opening reference and ending evidence), so it is never left without
+  an item, no key repeats, and it is added again at most once per ending of
+  a prompt ask.
 - A two-ask item's natural order is the earliest of its live asks.
 - The reverse order (an attention item already open when its session gets
   an owner item) is merged too. (W)
