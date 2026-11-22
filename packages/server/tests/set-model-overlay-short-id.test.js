@@ -9,6 +9,8 @@ import {
   _resetModelsOverlayForTests,
   _resetProviderRegistryCacheForTests,
 } from '../src/models.js'
+import { getProvider, registerProvider } from '../src/providers.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
 
@@ -43,9 +45,9 @@ function setup(overlay) {
   assert.equal(reloadModelsOverlay(writeOverlay(overlay)).reloaded, true)
 }
 
-function run(model) {
+function run(model, provider = PROVIDER) {
   const session = createMockSession()
-  const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider: PROVIDER }]])
+  const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp', provider }]])
   const broadcast = createSpy()
   const messages = []
   const ctx = nsCtx({
@@ -102,5 +104,55 @@ describe('#9139 set_model with an overlay short id on an allowlisted provider', 
     assert.equal(messages.length, 0)
     assert.equal(session.setModel.lastCall[0], 'model-two')
     assert.deepEqual(broadcast.lastCall.slice(1), [{ type: 'model_changed', model: 'model-two' }])
+  })
+})
+
+describe('#9153 roster lookup failure and alias collision', () => {
+  it('a throwing roster lookup logs a warning naming provider and id, and still refuses', () => {
+    setup({ 'model-one': { provider: PROVIDER, shortId: 'chosen', label: 'First' } })
+    const Base = getProvider(PROVIDER)
+    const THROWING = 'smoke-throwing-9153'
+    class Throwing extends Base {
+      static getFallbackModels() { throw new Error('roster boom') }
+    }
+    registerProvider(THROWING, Throwing)
+    const entries = []
+    const listener = (e) => { entries.push(e) }
+    addLogListener(listener)
+    try {
+      const { session, broadcast, messages } = run('chosen', THROWING)
+      assert.equal(session.setModel.callCount, 0)
+      assert.equal(broadcast.callCount, 0)
+      assert.equal(messages[0].code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+      const warn = entries.find((e) => e.level === 'warn'
+        && e.message.includes('roster lookup failed')
+        && e.message.includes(THROWING)
+        && e.message.includes('chosen'))
+      assert.ok(warn, 'expected a roster-lookup warning naming provider and requested id')
+      assert.ok(warn.message.includes('roster boom'), 'warning carries the error message')
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('an alias equal to another row\'s fullId: first row wins, allowlist gates the outcome', () => {
+    // Row A (target model-one, on the list) is aliased `clash`; row B's own
+    // target is `clash` (off the list). getRosterModelRow returns the first
+    // match in roster order, so `clash` resolves to model-one and is accepted.
+    setup({
+      'model-one': { provider: PROVIDER, shortId: 'clash', label: 'A' },
+      clash: { provider: PROVIDER, label: 'B' },
+    })
+    const { session, messages } = run('clash')
+    assert.equal(messages.length, 0, 'no error frame')
+    assert.equal(session.setModel.callCount, 1)
+    assert.equal(session.setModel.lastCall[0], 'model-one')
+  })
+
+  it('the colliding row alone (target off the list) is still refused', () => {
+    setup({ clash: { provider: PROVIDER, label: 'B' } })
+    const { session, messages } = run('clash')
+    assert.equal(session.setModel.callCount, 0)
+    assert.equal(messages[0].code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
   })
 })

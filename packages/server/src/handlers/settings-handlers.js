@@ -203,8 +203,10 @@ function handleSetModel(ws, client, msg, ctx) {
         let row = null
         try {
           row = getRosterModelRow(entry.provider, requested)
-        } catch {
-          // Roster unavailable: cannot resolve an alias, so refuse below.
+        } catch (err) {
+          // Roster unavailable: cannot resolve an alias, so refuse below —
+          // but leave a trace (#9153) so a broken lookup is not silent.
+          log.warn(`set_model roster lookup failed for provider '${entry.provider}' model '${msg.model}': ${err?.message || err}`)
         }
         // The re-check below is what refuses a target that is off the list.
         if (row && typeof row.fullId === 'string') {
