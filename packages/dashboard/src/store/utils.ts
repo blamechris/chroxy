@@ -562,6 +562,10 @@ export function createEmptyInFlightMarkers() {
     // exists must not suppress the first re-survey after a reconnect).
     sessionPrStatusLoading: {},
     sessionPrStatusRequestedAt: {},
+    // A trust change in flight (trust_folder / untrust_folder) is answered on the
+    // socket that carried it; after a drop its reply can never arrive, and the
+    // marker would keep Trust / Stop trusting disabled.
+    folderTrustPending: {},
     sessionPrThreadsLoading: {},
     // #6472: the IDE symbol-table request.
     symbolsLoading: false,

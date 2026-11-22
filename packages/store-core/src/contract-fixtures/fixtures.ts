@@ -3996,4 +3996,51 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { containerLostAt: 1700000000000, containerReattachError: 'refused' } },
     },
   },
+  {
+    // Per-folder trust: the state frame replaces the session's entry wholesale (the
+    // frame minus type/sessionId). The mobile app keeps it per session; the
+    // dashboard keeps one map keyed by session id.
+    name: 'folder_trust_state stores the session folder trust entry without its type and session id',
+    type: 'folder_trust_state',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'folder_trust_state',
+      sessionId: 's1',
+      status: 'trusted',
+      appliesFrom: 'next_turn',
+      launchedWithProject: false,
+    },
+    divergent: {
+      app: {
+        sessions: { s1: { folderTrust: { status: 'trusted', appliesFrom: 'next_turn', launchedWithProject: false } } },
+      },
+      dashboard: {
+        flat: { folderTrust: { s1: { status: 'trusted', appliesFrom: 'next_turn', launchedWithProject: false } } },
+      },
+      reason: 'the app keeps the entry on the session it belongs to; the dashboard keeps one session-keyed map',
+    },
+  },
+  {
+    // A refusal keeps its reason for the review dialog. The reply carries no
+    // requestId, so it settles the session it names.
+    name: 'folder_trust_result records the reason a trust change failed',
+    type: 'folder_trust_result',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'folder_trust_result',
+      sessionId: 's1',
+      ok: false,
+      status: 'untrusted',
+      error: 'This folder changed since you reviewed it',
+    },
+    divergent: {
+      app: {
+        sessions: { s1: { folderTrustError: 'This folder changed since you reviewed it', folderTrustPendingRequestId: null } },
+      },
+      dashboard: {
+        flat: { folderTrustError: { s1: 'This folder changed since you reviewed it' }, folderTrustPending: {} },
+      },
+      reason: 'the app keeps the error and the pending marker on the session; the dashboard keeps session-keyed maps',
+    },
+  },
 ]

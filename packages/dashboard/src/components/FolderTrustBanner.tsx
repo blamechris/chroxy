@@ -21,6 +21,7 @@
  */
 import { useEffect, useState, type CSSProperties } from 'react'
 import { Modal } from './Modal'
+import { canTrustFolderSnapshot, folderTrustAppliesFromText, folderTrustCountsText, folderTrustHasFileCounts, folderTrustMcpCommandLine } from '@chroxy/store-core'
 import type { FolderTrustEntry } from '../store/types'
 
 // The summary can be long (absolute paths, many servers and hooks). It scrolls
@@ -54,12 +55,6 @@ const BUTTON_STYLE: CSSProperties = {
 const LIST_STYLE: CSSProperties = { margin: '4px 0 12px', paddingLeft: 20, overflowWrap: 'anywhere' }
 const CODE_STYLE: CSSProperties = { fontFamily: 'monospace', fontSize: '0.9em' }
 
-export function appliesFromText(appliesFrom: FolderTrustEntry['appliesFrom']): string | null {
-  if (appliesFrom === 'next_turn') return 'Applies from the next turn'
-  if (appliesFrom === 'restart') return 'Restart the session to apply'
-  return null
-}
-
 function SummaryList({ entry }: { entry: FolderTrustEntry }) {
   const summary = entry.summary
   if (!summary) return null
@@ -78,7 +73,7 @@ function SummaryList({ entry }: { entry: FolderTrustEntry }) {
             {mcpServers.map((s, i) => (
               <li key={`${s.file}:${s.name}:${i}`} data-testid="folder-trust-mcp-server">
                 <strong>{s.name}</strong>{' '}
-                <code style={CODE_STYLE}>{[s.command ?? s.url ?? s.type ?? '', ...(s.args ?? [])].filter(Boolean).join(' ')}</code>
+                <code style={CODE_STYLE}>{folderTrustMcpCommandLine(s)}</code>
                 {s.envKeys && s.envKeys.length > 0 && <> (sets environment: {s.envKeys.join(', ')})</>}
               </li>
             ))}
@@ -114,11 +109,11 @@ function SummaryList({ entry }: { entry: FolderTrustEntry }) {
           </ul>
         </section>
       )}
-      {(counts.agents > 0 || counts.skills > 0 || counts.commands > 0) && (
+      {folderTrustHasFileCounts(counts) && (
         <section>
           <h4>Files</h4>
           <p data-testid="folder-trust-counts">
-            {counts.agents} agent {counts.agents === 1 ? 'file' : 'files'}, {counts.skills} skill {counts.skills === 1 ? 'file' : 'files'}, {counts.commands} command {counts.commands === 1 ? 'file' : 'files'}
+            {folderTrustCountsText(counts)}
           </p>
         </section>
       )}
@@ -152,7 +147,7 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
   // from it, and Trust sends ITS digest, whatever newer state has arrived since.
   const [snapshot, setSnapshot] = useState<FolderTrustEntry | null>(null)
   const status = entry?.status
-  const applies = entry ? appliesFromText(entry.appliesFrom) : null
+  const applies = entry ? folderTrustAppliesFromText(entry.appliesFrom) : null
 
   // Approving moves the state to trusted: the dialog has done its job.
   useEffect(() => {
@@ -186,7 +181,7 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
   // The owner approves what they reviewed: needs the summary and its digest, and a
   // folder that could be reviewed completely.
   const shown = snapshot ?? entry
-  const canTrust = Boolean(shown.summary && shown.digest && !shown.summary.untrustable)
+  const canTrust = canTrustFolderSnapshot(shown)
   const changed = snapshot !== null && entry.digest !== snapshot.digest
 
   return (
@@ -223,7 +218,7 @@ export function FolderTrustBanner({ entry, pending = false, error = null, onTrus
           </div>
           {canTrust && !changed && <p data-testid="folder-trust-warning">Trusting this folder lets these settings run, along with the code they point to.</p>}
           {!canTrust && <p data-testid="folder-trust-readonly">This folder's settings cannot be trusted from here.</p>}
-          {appliesFromText(shown.appliesFrom) && <p data-testid="folder-trust-applies">{appliesFromText(shown.appliesFrom)}</p>}
+          {folderTrustAppliesFromText(shown.appliesFrom) && <p data-testid="folder-trust-applies">{folderTrustAppliesFromText(shown.appliesFrom)}</p>}
           {error && <p data-testid="folder-trust-error" role="alert">{error}</p>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button type="button" onClick={() => setSnapshot(null)} data-testid="folder-trust-cancel" style={BUTTON_STYLE}>

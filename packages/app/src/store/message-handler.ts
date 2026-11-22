@@ -1,4 +1,4 @@
-import { getWsCloseMessage, WS_CLOSE_CREDENTIAL_INVALID, captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { getWsCloseMessage, WS_CLOSE_CREDENTIAL_INVALID, folderTrustEntryFromFrame, findFolderTrustReplySession, findFolderTrustErrorSession, FOLDER_TRUST_FALLBACK_ERROR, captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -1358,6 +1358,17 @@ export const _testQueueInternals = {
 // ---------------------------------------------------------------------------
 // Session update helpers
 // ---------------------------------------------------------------------------
+
+/** Each session's in-flight trust request id, for the shared reply/error matchers. */
+function trustPendingBySession(): Record<string, string> {
+  const states = getStore().getState().sessionStates;
+  const out: Record<string, string> = {};
+  for (const id of Object.keys(states)) {
+    const pending = states[id]?.folderTrustPendingRequestId;
+    if (pending) out[id] = pending;
+  }
+  return out;
+}
 
 /**
  * Update any session's state by ID. sessionStates is the single source of truth.
@@ -4248,6 +4259,35 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       break;
     }
 
+    case 'folder_trust_state': {
+      // Whether this session folder's project settings are loaded. The daemon is the
+      // authority; the entry is display state, replaced wholesale on every frame.
+      // A frame for a session this client does not know is dropped: the entry lives
+      // on the session, and keeping one for an id with no session would leak it past
+      // the session's removal. The daemon re-sends the frame on ready, subscribe and
+      // switch, so a session that appears later gets its entry then.
+      const parsed = folderTrustEntryFromFrame(msg as unknown as Parameters<typeof folderTrustEntryFromFrame>[0]);
+      if (!parsed) break;
+      updateSession(parsed.sessionId, () => ({ folderTrust: parsed.entry }));
+      break;
+    }
+
+    case 'folder_trust_result': {
+      // Settles the in-flight marker on EVERY reply (a failure included, or the
+      // buttons would stay disabled); a failure keeps its reason for the dialog and
+      // a success clears the last one. Matched by `requestId`, so a reply never
+      // settles a newer request of the same session; a reply without one falls back
+      // to the session it names.
+      const reply = msg as unknown as { requestId?: string; sessionId?: string; ok?: boolean; error?: string };
+      const settled = findFolderTrustReplySession(trustPendingBySession(), reply);
+      if (!settled) break;
+      updateSession(settled, () => ({
+        folderTrustPendingRequestId: null,
+        folderTrustError: reply.ok === true ? null : (reply.error || FOLDER_TRUST_FALLBACK_ERROR),
+      }));
+      break;
+    }
+
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface a modal alert so the user knows something failed.
@@ -4281,6 +4321,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // below only when it is not, so the news is never lost.
       const notDelivered = handleQuestionNotDelivered(msg);
       if (notDelivered && endQuestionCard(notDelivered.toolUseId, 'notDelivered', get)) break;
+
+      // A trust change the daemon refused or could not apply arrives as an error
+      // envelope (no `folder_trust_result`). The banner / dialog shows the reason, so
+      // the generic alert is not raised on top of it.
+      const trustErrSession = findFolderTrustErrorSession(trustPendingBySession(), {
+        requestId: errRequestId || undefined,
+        code: errCode,
+        sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : undefined,
+      });
+      if (trustErrSession && get().sessionStates[trustErrSession]) {
+        updateSession(trustErrSession, () => ({ folderTrustPendingRequestId: null, folderTrustError: errMsg || FOLDER_TRUST_FALLBACK_ERROR }));
+        break;
+      }
 
       // Match against an in-flight set_permission_mode request — if the
       // requestId lines up, revert the optimistic UI state and show a

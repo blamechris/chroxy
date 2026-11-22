@@ -1,4 +1,4 @@
-import { reconnectConnectionIdentity, captureConnectionIdentity, isSessionStarting, type ConnectionIdentityTarget } from '@chroxy/store-core';
+import { reconnectConnectionIdentity, captureConnectionIdentity, isSessionStarting, buildFolderTrustRequest, type ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Connection store — Zustand store managing WebSocket connection,
  * session state, and all server communication.
@@ -620,6 +620,61 @@ function clearSessionRolesAcrossSessions(
 }
 
 /**
+ * Settle every session's in-flight trust change (`trust_folder` / `untrust_folder`).
+ *
+ * The reply to such a request arrives on the socket that carried it, so after a
+ * transport drop it can never arrive, and a marker left behind would keep the
+ * Trust / Stop trusting buttons disabled for good. Used by both the
+ * `socket.onclose` cleanup and the user-initiated `disconnect()` path (which nulls
+ * `socket.onclose`) — same dual-call contract as `clearSessionRolesAcrossSessions`.
+ * The daemon re-sends `folder_trust_state` on reconnect, so the entry itself is kept.
+ *
+ * Skips the mutation when nothing is in flight so referential equality holds.
+ */
+function clearFolderTrustPendingAcrossSessions(
+  set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void,
+  get: () => ConnectionState,
+): void {
+  const sessionStates = get().sessionStates;
+  let changed = false;
+  const next: Record<string, SessionState> = {};
+  for (const id of Object.keys(sessionStates)) {
+    const ss = sessionStates[id];
+    if (ss && ss.folderTrustPendingRequestId !== null) {
+      next[id] = { ...ss, folderTrustPendingRequestId: null };
+      changed = true;
+    } else if (ss) {
+      next[id] = ss;
+    }
+  }
+  if (changed) set({ sessionStates: next });
+}
+
+/**
+ * Send `trust_folder` / `untrust_folder` for a session and mark it in flight.
+ * Refuses (false) when the socket is not open, when that session already has a
+ * request in flight, when the request cannot be formed (no session, or no digest to
+ * approve), or when the frame did not go out.
+ */
+function sendFolderTrust(
+  get: () => ConnectionState,
+  type: 'trust_folder' | 'untrust_folder',
+  sessionId: string,
+  digest?: string,
+): boolean {
+  const { socket, sessionStates } = get();
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  const session = sessionStates[sessionId];
+  if (!session || session.folderTrustPendingRequestId) return false;
+  const requestId = `folder-trust-${nextMessageId()}`;
+  const msg = buildFolderTrustRequest(type, sessionId, requestId, digest);
+  if (!msg) return false;
+  if (!wsSend(socket, msg)) return false;
+  updateSession(sessionId, () => ({ folderTrustPendingRequestId: requestId, folderTrustError: null }));
+  return true;
+}
+
+/**
  * #5725 / #8258 — leave the terminal `server_down` phase explicitly BEFORE
  * dialing. connect() sets 'reconnecting' when re-dialing the same URL
  * (isReconnect), and `server_down -> reconnecting` is an illegal FSM transition.
@@ -1157,6 +1212,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Every new socket must obtain its own session readiness snapshot, including
     // direct reconnects whose retired socket no longer runs onclose.
     clearStreamingAndPlanStateAcrossSessions(get);
+    // Same for a folder-trust change in flight: its reply can never arrive on the
+    // retired socket, and the marker would otherwise keep Trust / Stop trusting disabled.
+    clearFolderTrustPendingAcrossSessions(set, get);
     // #6286 — re-dialing over a still-`connected` phase (the resume/network
     // liveness paths, or switching servers while connected) is a RECONNECT, not
     // a fresh connect: `connected → connecting` is an illegal FSM exit and the
@@ -1609,6 +1667,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5623: clear the presence role across ALL sessions so a stale
       // "Observing"/driver badge doesn't survive the reconnect gap.
       clearSessionRolesAcrossSessions(set, get);
+      // A trust change in flight can never be answered on the dropped socket.
+      clearFolderTrustPendingAcrossSessions(set, get);
 
       // #5725 (#5698) — terminal: the reconnect ladder already gave up
       // (server_down). The PAIRED event of this same transport drop (RN fires
@@ -1749,6 +1809,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // it here so a stale "Observing"/driver badge doesn't survive into
     // the next connect.
     clearSessionRolesAcrossSessions(set, get);
+    // Same dual-call contract: a trust change in flight is socket-scoped.
+    clearFolderTrustPendingAcrossSessions(set, get);
     // #8148: same dual-call contract — user-initiated disconnect nulls
     // socket.onclose above, so the onclose streaming/plan sweep never runs;
     // mirror it here so a background session mid-stream (or with a pending
@@ -2070,6 +2132,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (activeSessionId) payload.sessionId = activeSessionId;
     return wsSend(socket, payload) ? 'sent' : false;
   },
+
+  // Per-folder trust: see MultiClientSessionActions.trustFolder. The request is
+  // marked in flight on the session only after the frame was handed to the socket;
+  // the marker clears on folder_trust_result, the matching error, or a socket close.
+  trustFolder: (sessionId, digest) => sendFolderTrust(get, 'trust_folder', sessionId, digest),
+  untrustFolder: (sessionId) => sendFolderTrust(get, 'untrust_folder', sessionId),
 
   sendInterrupt: () => {
     const { socket, activeSessionId } = get();
