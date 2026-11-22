@@ -578,6 +578,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setWorktree(false)
     setCodexSandbox('')
     setSkipPermissions('inherit')
+    // #9145: a stale environment id would otherwise be submitted after reopen.
+    setEnvironmentId('')
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     setBrowsing(false)
@@ -681,12 +683,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }), [permissionMode, effectiveWorktree, environmentId, skipPermissions, codexSandbox, provider])
   const advancedSummary = useMemo(() => {
     const parts: string[] = []
-    if (advancedChoices.permissionMode) parts.push(`permission mode ${PERMISSION_MODE_LABELS[advancedChoices.permissionMode] ?? advancedChoices.permissionMode}`)
-    if (advancedChoices.codexSandbox) parts.push(`Codex sandbox ${CODEX_SANDBOX_MODE_META.find(m => m.id === advancedChoices.codexSandbox)?.label ?? advancedChoices.codexSandbox}`)
-    if (advancedChoices.skipPermissions !== undefined) parts.push(advancedChoices.skipPermissions ? 'skip permission prompts' : 'require permission prompts')
-    if (advancedChoices.environmentId) parts.push(`environment ${environments.find(e => e.id === advancedChoices.environmentId)?.name ?? advancedChoices.environmentId}`)
+    if (advancedChoices.permissionMode) parts.push(`permission mode: ${PERMISSION_MODE_LABELS[advancedChoices.permissionMode] ?? advancedChoices.permissionMode}`)
+    if (advancedChoices.codexSandbox) parts.push(`Codex sandbox: ${CODEX_SANDBOX_MODE_META.find(m => m.id === advancedChoices.codexSandbox)?.label ?? advancedChoices.codexSandbox}`)
+    if (advancedChoices.skipPermissions !== undefined) parts.push(advancedChoices.skipPermissions ? 'permission prompts: skipped' : 'permission prompts: required')
+    if (advancedChoices.environmentId) parts.push(`environment: ${environments.find(e => e.id === advancedChoices.environmentId)?.name ?? advancedChoices.environmentId}`)
     if (advancedChoices.worktree) parts.push('worktree isolation')
-    return parts.map(p => `${p} selected`).join(', ')
+    return parts.join(', ')
   }, [advancedChoices, environments])
 
   const submit = useCallback(() => {
@@ -1277,12 +1279,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           className="advanced-toggle-btn"
           onClick={() => setShowAdvanced(!showAdvanced)}
           aria-expanded={showAdvanced}
-          aria-describedby={!showAdvanced && advancedSummary ? 'advanced-summary' : undefined}
         >
           {showAdvanced ? '\u25BC' : '\u25B6'} Advanced
           {/* #8221/#9145: disclose every submitted choice even while its control is hidden. */}
           {!showAdvanced && advancedSummary && (
-            <span id="advanced-summary" data-testid="advanced-summary" className="advanced-summary">{` (${advancedSummary})`}</span>
+            <span data-testid="advanced-summary" className="advanced-summary">{` (${advancedSummary})`}</span>
           )}
         </button>
       </div>

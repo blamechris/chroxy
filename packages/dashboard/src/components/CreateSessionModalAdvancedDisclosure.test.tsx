@@ -50,7 +50,9 @@ const create = () => fireEvent.click(screen.getByRole('button', { name: 'Create'
 function expectDisclosed(text: RegExp) {
   expect(toggle()).toHaveAttribute('aria-expanded', 'false')
   expect(summary()).toHaveTextContent(text)
-  expect(toggle()).toHaveAttribute('aria-describedby', 'advanced-summary')
+  // the accessible name carries the summary (read once; no aria-describedby)
+  expect(screen.getByRole('button', { name: new RegExp(`Advanced.*${text.source}`) })).toBe(toggle())
+  expect(toggle()).not.toHaveAttribute('aria-describedby')
 }
 
 describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
@@ -62,12 +64,39 @@ describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: undefined, environmentId: undefined, skipPermissions: undefined, codexSandbox: undefined, worktree: undefined }))
   })
 
+  it('submits exactly the base fields plus the Advanced choices for a default plain provider', () => {
+    mockStoreState.defaultProvider = 'claude-sdk'
+    mockStoreState.availableProviders = [{ name: 'claude-sdk', capabilities: {}, auth: READY }]
+    const onCreate = setup()
+    create()
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onCreate.mock.calls[0]![0]).toEqual({
+      name: 'repo', cwd: '/repo', provider: 'claude-sdk', connectionId: undefined, model: undefined,
+      permissionMode: undefined, worktree: undefined, environmentId: undefined, skipPermissions: undefined, codexSandbox: undefined,
+    })
+  })
+
+  it('does not carry an environment across close and reopen', () => {
+    const onCreate = vi.fn()
+    const props = { initialCwd: '/repo', onCreate, onClose: vi.fn() }
+    const view = render(<CreateSessionModal open {...props} />)
+    openAdv()
+    fireEvent.change(document.getElementById('env-select') as HTMLSelectElement, { target: { value: 'env-1' } })
+    openAdv()
+    expectDisclosed(/environment: dev-box/)
+    view.rerender(<CreateSessionModal open={false} {...props} />)
+    view.rerender(<CreateSessionModal open {...props} />)
+    expect(summary()).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    expect(onCreate.mock.calls[0]![0].environmentId).toBeUndefined()
+  })
+
   it('permission mode', () => {
     const onCreate = setup()
     openAdv()
     fireEvent.change(screen.getByLabelText('Permission mode'), { target: { value: 'acceptEdits' } })
     openAdv()
-    expectDisclosed(/permission mode Accept Edits selected/)
+    expectDisclosed(/permission mode: Accept Edits/)
     create()
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'acceptEdits' }))
     // the disclosure names the same mode that was submitted, and collapsing kept it
@@ -81,12 +110,12 @@ describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
     openAdv()
     fireEvent.change(screen.getByTestId('codex-sandbox-select'), { target: { value: 'read-only' } })
     openAdv()
-    expectDisclosed(/Codex sandbox .*selected/)
+    expectDisclosed(/Codex sandbox: Read-only/)
     create()
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'codex', codexSandbox: 'read-only' }))
   })
 
-  it.each([['on', true, /skip permission prompts selected/], ['off', false, /require permission prompts selected/]] as const)(
+  it.each([['on', true, /permission prompts: skipped/], ['off', false, /permission prompts: required/]] as const)(
     'skip permissions %s', (radio, sent, text) => {
       const onCreate = setup()
       openAdv()
@@ -102,7 +131,7 @@ describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
     openAdv()
     fireEvent.change(document.getElementById('env-select') as HTMLSelectElement, { target: { value: 'env-1' } })
     openAdv()
-    expectDisclosed(/environment dev-box selected/)
+    expectDisclosed(/environment: dev-box/)
     create()
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ environmentId: 'env-1' }))
   })
@@ -124,7 +153,7 @@ describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
     openAdv()
     fireEvent.change(screen.getByTestId('codex-sandbox-select'), { target: { value: 'read-only' } })
     openAdv()
-    expectDisclosed(/Codex sandbox/)
+    expectDisclosed(/Codex sandbox: Read-only/)
     fireEvent.change(screen.getByLabelText('Select provider'), { target: { value: 'claude-tui' } })
     expect(summary()).toBeNull()
     create()
@@ -139,6 +168,6 @@ describe('CreateSessionModal collapsed Advanced disclosure (#9145)', () => {
     fireEvent.change(document.getElementById('env-select') as HTMLSelectElement, { target: { value: 'env-1' } })
     expect(summary()).toBeNull()
     openAdv()
-    expectDisclosed(/permission mode.*skip permission prompts.*environment dev-box/)
+    expectDisclosed(/permission mode: Plan.*permission prompts: skipped.*environment: dev-box/)
   })
 })
