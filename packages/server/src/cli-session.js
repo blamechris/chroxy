@@ -15,7 +15,7 @@ import { BaseSession, buildBaseSessionOpts, reportInputAdmission, spawnRefusalAd
 import { buildContentBlocks } from './content-blocks.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
-import { forceKill, killProcessTree } from './platform.js'
+import { forceKill, killProcessTree, killRecordedTree, recordProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent, formatStatusContent } from './claude-stream-parser.js'
@@ -522,6 +522,13 @@ export class CliSession extends BaseSession {
     // on "the child is gone".
     this._stoppedByUser = false
 
+    // #9267: children the 5 s Stop timer retired, each with the descendants
+    // recorded (pid + start time) before it was signalled, so the escalation and
+    // destroy() can still reap a tree whose parent already exited. `_treeDeps`
+    // is the test seam for the ps / process.kill the tree operations use.
+    this._retiredChildren = new Set()
+    this._treeDeps = {}
+
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
 
@@ -865,6 +872,9 @@ export class CliSession extends BaseSession {
       ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
+    // #9267: a follow-up queued mid-turn (`_outgoingQueue`) behind a child that
+    // was retired has no `result` left to flush it; the fresh child's warmup does.
+    if (!this._isBusy && this._outgoingQueue?.length > 0) this.dequeueNextOutgoing()
   }
 
   /**
@@ -2752,11 +2762,18 @@ export class CliSession extends BaseSession {
   /**
    * #9267: the Stop safety timer fired and the child had not answered SIGINT.
    * The turn is being reported as stopped, so the child is abandoned like a
-   * respawn abandons one, minus the respawn: its readlines are closed, it stops
-   * being `_child` (so its stdout lines and its eventual `close` are ignored --
-   * no second result, no stop marker, no "exited unexpectedly"), it is
-   * SIGTERMed with its tree and SIGKILLed after a grace, and the session is
-   * left as a Stop leaves it, revivable by the next send (`_stoppedByUser`).
+   * respawn abandons one, minus the immediate respawn: its readlines are closed,
+   * it stops being `_child` (so its stdout lines and its eventual `close` are
+   * ignored -- no second result, no stop marker, no "exited unexpectedly"), its
+   * tree is SIGTERMed, and the session is left as a Stop leaves it, revivable by
+   * the next send (`_stoppedByUser`).
+   *
+   * The tree is recorded BEFORE the signal (pid + start time) and kept in
+   * `_retiredChildren` until the escalation, so it still gets SIGKILLed when
+   * the parent exits on SIGTERM but a descendant does not, and so `destroy()`
+   * can reach it although `_child` no longer points at it. Recorded descendants
+   * are signalled only while their start time still matches (never a recycled
+   * pid), and the escalation is NOT cancelled by the parent's close.
    */
   _retireUnresponsiveChild(child) {
     this._cleanupReadlines()
@@ -2766,24 +2783,29 @@ export class CliSession extends BaseSession {
     ;(this._log || log).warn('Retiring the claude process that ignored the Stop signal; the next message starts a fresh one')
     this._expirePendingPermissions('Permission request expired (the session process was stopped before it could be answered)')
     this._completeAgents()
-    let closed = false
-    const forceKillTimer = setTimeout(() => {
-      if (closed) return
-      try { this._killChildTree(child, { force: true }) } catch {}
+    this._clearPendingBackgroundShells() // the shells died with the child, as on a respawn
+    const entry = { child, recorded: this._recordChildTree(child), timer: null }
+    this._retiredChildren.add(entry)
+    entry.timer = setTimeout(() => {
+      this._retiredChildren.delete(entry)
+      try { this._killChildTree(child, { force: true, recorded: entry.recorded }) } catch {}
     }, 3000)
-    if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
-    child.on('close', () => { closed = true; clearTimeout(forceKillTimer) })
-    this._killChildTree(child)
+    if (typeof entry.timer.unref === 'function') entry.timer.unref()
+    this._killChildTree(child, { recorded: entry.recorded })
+  }
+
+  /** #9267: snapshot the tree to reap (a seam: `_treeDeps` carries the ps stubs). */
+  _recordChildTree(child) {
+    return recordProcessTree(child, this._treeDeps)
   }
 
   /**
-   * #9267: the one seam for signalling a retired child's process tree.
-   * Defaults to the platform helper (`ps`-enumerates the real descendants of
-   * `child.pid` and signals them); tests whose mock child carries a numeric pid
-   * override it so no real process is ever enumerated or signalled.
+   * #9267: the one seam for signalling a retired child's process tree. Defaults
+   * to the platform helper; tests whose mock child carries a numeric pid inject
+   * `_treeDeps` (or override this) so no real process is enumerated or signalled.
    */
-  _killChildTree(child, opts) {
-    killProcessTree(child, opts)
+  _killChildTree(child, { force = false, recorded = [] } = {}) {
+    killRecordedTree(child, recorded, { force, ...this._treeDeps })
   }
 
   /** Interrupt the current message (send SIGINT to child process) */
@@ -2841,6 +2863,12 @@ export class CliSession extends BaseSession {
         // starts a fresh child instead of writing to this one.
         if (this._child === interruptedChild) this._retireUnresponsiveChild(interruptedChild)
         this._emitInterruptedTurnResult(0, 'user_stop')
+        // #9267: a follow-up accepted during the window is parked behind a child that
+        // is gone; start the fresh one now (the path a new send takes) rather than
+        // leaving it to wait for yet another message.
+        if (this._stoppedByUser && (this._outgoingQueue.length > 0 || this._pendingQueue.length > 0)) {
+          this._restartAfterStop()
+        }
       }
     }, 5000)
     // #6043: fire-and-forget busy-state safety net — never gate process exit on
@@ -2853,6 +2881,13 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
+    // #9267: a child the Stop timer retired is no longer `_child`, so reach its
+    // tree here; the escalation timer is moot once the session is going away.
+    for (const entry of this._retiredChildren) {
+      clearTimeout(entry.timer)
+      try { this._killChildTree(entry.child, { force: true, recorded: entry.recorded }) } catch {}
+    }
+    this._retiredChildren.clear()
     // #5936: tear down the shared outgoing queue silently (no message_dequeued
     // for a session that's going away).
     this.clearOutgoingQueue({ emit: false })

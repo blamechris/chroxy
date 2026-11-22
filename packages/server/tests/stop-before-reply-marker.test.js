@@ -377,6 +377,7 @@ describe('claude-cli: ordering (#9241)', () => {
     // #9267: the Stop timer retires the child via this seam; pid 12345 is a mock, so never let the
     // real tree kill enumerate (ps) or signal whatever process holds that pid.
     session._killChildTree = () => {}
+    session._recordChildTree = () => []
     session.on('error', () => {})
     session._isBusy = true
     session._currentMessageId = 'm-1'

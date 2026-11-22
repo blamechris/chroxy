@@ -528,6 +528,8 @@ export class DockerSession extends CliSession {
     this._rl = rl
 
     rl.on('line', (line) => {
+      // #9267: a retired client's late output must not reach the session.
+      if (this._child !== child) return
       if (!line.trim()) return
       let data
       try {
@@ -548,6 +550,7 @@ export class DockerSession extends CliSession {
     })
 
     child.on('error', (err) => {
+      if (this._child !== child) return // #9267: a retired client's error is not the fresh one's
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
@@ -557,7 +560,13 @@ export class DockerSession extends CliSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => this._handleChildClose(code))
+    child.on('close', (code) => {
+      // #9267: the same identity guard the host provider has. A client the Stop timer
+      // retired closes AFTER a fresh one may be running; its close must not clear the
+      // fresh child's readlines, null `_child` or schedule a respawn.
+      if (this._child !== child) return
+      this._handleChildClose(code)
+    })
 
     this._processReady = true
     log.info('Container exec started, ready for messages')

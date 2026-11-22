@@ -595,6 +595,72 @@ export function killProcessTree(child, { force = false, ...deps } = {}) {
 }
 
 /**
+ * #9267: the start wall-clock of `pid` (`ps -o lstart=`), or null when the
+ * process is gone or unreadable. Fixed for a process's lifetime and different
+ * for a recycled pid's new occupant, so equality is the "same incarnation"
+ * check (the same one the user-shell orphan reaper uses). `deps.startTimeOf` is
+ * the test seam.
+ */
+export function processStartTime(pid, deps = {}) {
+  if (deps.startTimeOf) return deps.startTimeOf(pid) || null
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * #9267: snapshot `child`'s live descendants as `{ pid, started }` BEFORE
+ * anything is signalled, so a later escalation can still reach a descendant
+ * after its parent has exited and reparented it (a parent's exit erases the
+ * ppid links the enumeration depends on). A descendant whose start time cannot
+ * be read is left out: without an identity it can never be signalled safely.
+ * POSIX only (Windows reaps the tree with `taskkill /T`). `deps` are the test
+ * seams of {@link listDescendantPids} and {@link processStartTime}.
+ */
+export function recordProcessTree(child, deps = {}) {
+  if (!child || isWindows || !Number.isInteger(child.pid) || child.pid <= 0) return []
+  const out = []
+  for (const pid of listDescendantPids(child.pid, deps)) {
+    const started = processStartTime(pid, deps)
+    if (started) out.push({ pid, started })
+  }
+  return out
+}
+
+/**
+ * #9267: signal `child` and the descendants recorded by {@link recordProcessTree}.
+ * PID-reuse safe by construction: a recorded descendant is signalled only while
+ * a process with that pid is alive AND still reports the start time recorded
+ * for it, so a recycled pid is never touched. The direct child is signalled
+ * through its handle (a no-op once Node has reaped it), never by pid. Deepest
+ * descendant first, the parent last, as {@link killProcessTree} does. Does NOT
+ * re-enumerate, which is the point: it works after the parent has exited.
+ * `force` selects SIGKILL over SIGTERM; `deps.kill` is the `process.kill` seam.
+ */
+export function killRecordedTree(child, recorded = [], { force = false, ...deps } = {}) {
+  if (!child) return
+  if (isWindows) {
+    killProcessTree(child, { force, ...deps })
+    return
+  }
+  const signal = force ? 'SIGKILL' : 'SIGTERM'
+  const kill = deps.kill || process.kill
+  for (let i = recorded.length - 1; i >= 0; i--) {
+    const { pid, started } = recorded[i]
+    if (processStartTime(pid, deps) !== started) continue // gone, or a recycled pid
+    try { kill(pid, signal) } catch { /* already gone */ }
+  }
+  try { child.kill(signal) } catch { /* already gone */ }
+}
+
+/**
  * Force-kill `child` and its whole descendant tree (#6643, #7606). POSIX
  * SIGKILLs the enumerated tree; Windows reaps it via taskkill. See
  * {@link killProcessTree}. `deps` are the same test seams.
