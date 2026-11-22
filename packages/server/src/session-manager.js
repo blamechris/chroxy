@@ -15,7 +15,7 @@ import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { isGitRepoSync } from './utils/git-repo.js'
-import { sweepOrphanChroxyWorktrees, worktreeHasUnsavedWork } from './worktree-gc.js'
+import { sweepOrphanChroxyWorktrees, worktreeUnsavedWorkReport, describeUnsavedWork, sanitizeNoticeText } from './worktree-gc.js'
 import { hasPersistedTranscript, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
 import { resolveTranscriptSource } from './transcript-sources.js'
 import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
@@ -3144,9 +3144,53 @@ export class SessionManager extends EventEmitter {
    * @returns {boolean}
    */
   hasUnsavedWorktreeWork(sessionId) {
+    return this.unsavedWorktreeWork(sessionId)?.has === true
+  }
+
+  /**
+   * #9286: the same question as hasUnsavedWorktreeWork, answered with WHAT was found
+   * (`{ has, kinds, samples }`, see worktreeUnsavedWorkReport). `null` for a session
+   * with no worktree.
+   * @param {string} sessionId
+   */
+  unsavedWorktreeWork(sessionId) {
     const entry = this._sessions.get(sessionId)
-    if (!entry?.worktreePath) return false
-    return worktreeHasUnsavedWork(entry.worktreePath)
+    if (!entry?.worktreePath) return null
+    return worktreeUnsavedWorkReport(entry.worktreePath)
+  }
+
+  /**
+   * #9286: tell the person why a deleted scheduled task's session was kept. A `system`
+   * message in the session's own history, so it renders in the chat, replays on
+   * reconnect and survives a restart (flushed now); it is also broadcast live. It
+   * only informs: nothing is removed, and closing the session stays the person's call.
+   * Never throws: a failed notice must not undo the keep.
+   * @param {string} sessionId
+   * @param {string} taskId
+   * @param {{ kinds: string[], samples: Record<string, string[]> }} report
+   * @param {string} [taskName] - the deleted task's own name (not the session's, which may be renamed)
+   * @returns {boolean} whether the notice was recorded
+   */
+  noteScheduledSessionKept(sessionId, taskId, report, taskName) {
+    try {
+      const entry = this._sessions.get(sessionId)
+      if (!entry || entry._destroying) return false
+      const what = describeUnsavedWork(report) || 'unsaved work'
+      const label = typeof taskName === 'string' && taskName ? `Scheduled task "${sanitizeNoticeText(taskName, 120)}"` : 'A scheduled task'
+      const data = {
+        type: 'system',
+        content: `${label} was deleted, but this session was kept open instead of being closed, because its worktree holds unsaved work: ${what}. ` +
+          'It is an ordinary session now and nothing has been removed. Review the worktree, then close the session yourself to remove it.',
+        timestamp: Date.now(),
+      }
+      this._recordHistory(sessionId, 'message', data)
+      this.emit('session_event', { sessionId, event: 'message', data })
+      this._flushPersistOrWarn(sessionId)
+      return true
+    } catch (err) {
+      log.warn(`Could not record the kept-session notice for ${sessionId}: ${err?.message || err}`)
+      return false
+    }
   }
 
   /**

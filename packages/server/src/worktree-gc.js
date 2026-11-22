@@ -248,6 +248,11 @@ export function planRepoGc(repoPath, deps = {}) {
   return { repo: repoPath, items }
 }
 
+// `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
+// is one line, not thousands) while `--untracked-files=all` still enumerates
+// every untracked file; any ignored entry at all still reads as not clean.
+const STRICT_STATUS_ARGS = ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
+
 /**
  * `git -C <worktree> status --porcelain --ignored` → clean? null when it can't
  * be run. The `--ignored` flag is load-bearing (#5244): `git worktree remove`
@@ -264,12 +269,7 @@ function isClean(git, worktreePath, { strict = false } = {}) {
     // entries, and `diff.ignoreSubmodules` hides a dirty submodule; each would read
     // a worktree holding real work as clean. The GC callers keep their historical
     // command (strict=false) unchanged.
-    const args = strict
-      // `--ignored=matching` lists an ignored DIRECTORY once (a populated node_modules
-      // is one line, not thousands) while `--untracked-files=all` still enumerates
-      // every untracked file; any ignored entry at all still reads as not clean.
-      ? ['-c', 'status.showUntrackedFiles=all', '-c', 'diff.ignoreSubmodules=none', 'status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=none']
-      : ['status', '--porcelain', '--ignored']
+    const args = strict ? STRICT_STATUS_ARGS : ['status', '--porcelain', '--ignored']
     return git(worktreePath, args).trim().length === 0
   } catch {
     return null
@@ -293,18 +293,74 @@ function isClean(git, worktreePath, { strict = false } = {}) {
  * @returns {boolean}
  */
 export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
+  return scanUnsavedWork(worktreePath, deps, true).has
+}
+
+/** Most sample paths reported per kind (#9286). */
+const UNSAVED_SAMPLE_PER_KIND = 5
+
+/**
+ * #9286: WHAT would be lost, not just whether anything would. Same checks, same
+ * order and same fail-safe as worktreeHasUnsavedWork (which is this scan stopped at
+ * the first finding), but every kind is collected so a person can see why a session
+ * was kept.
+ *
+ * kinds (each present once, in discovery order): `modified` (tracked edits),
+ * `untracked`, `ignored` (a `.env`, `node_modules`...), `hidden-index`
+ * (assume-unchanged / skip-worktree tracked files), `submodule` (a populated gitlink
+ * directory), `unreachable-commits` (HEAD holds a commit no ref reaches),
+ * `unreadable` (a question git or the filesystem could not answer: kept, fail safe).
+ * `samples` maps a kind to at most 5 paths (none for `unreachable-commits`/`unreadable`).
+ *
+ * @param {string} worktreePath
+ * @param {{ git?: Function, lstat?: Function, readdir?: Function }} [deps]
+ * @returns {{ has: boolean, kinds: string[], samples: Record<string, string[]> }}
+ */
+export function worktreeUnsavedWorkReport(worktreePath, deps = {}) {
+  return scanUnsavedWork(worktreePath, deps, false)
+}
+
+function scanUnsavedWork(worktreePath, deps, firstOnly) {
   const { git = strictGit, lstat = lstatSync, readdir = readdirSync } = deps
+  const kinds = []
+  const samples = {}
+  const found = (kind, path) => {
+    if (!kinds.includes(kind)) kinds.push(kind)
+    if (path === undefined) return
+    const list = (samples[kind] ||= [])
+    if (list.length < UNSAVED_SAMPLE_PER_KIND) list.push(path)
+  }
+  const done = () => ({ has: kinds.length > 0, kinds, samples })
   // A directory that is already gone (ENOENT, and only ENOENT) holds nothing that
   // removal could lose. Any other stat error (EACCES, EIO, an unmounted volume) is
   // "cannot tell", which is "keep".
   try {
     lstat(worktreePath)
   } catch (err) {
-    return err?.code === 'ENOENT' ? false : true
+    if (err?.code !== 'ENOENT') found('unreadable')
+    return done()
   }
-  if (isClean(git, worktreePath, { strict: true }) !== true) return true
+  const status = readStatus(git, worktreePath)
+  if (status === null) {
+    found('unreadable')
+    return done()
+  }
+  if (status.trim().length > 0) {
+    for (const line of status.split('\n')) {
+      if (!line) continue
+      const code = line.slice(0, 2)
+      const kind = code === '??' ? 'untracked' : code === '!!' ? 'ignored' : 'modified'
+      found(kind, line.slice(3))
+    }
+    // An unparseable non-empty status is still unsaved work.
+    if (kinds.length === 0) found('modified')
+    if (firstOnly) return done()
+  }
   try {
-    if (git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0) return true
+    if (git(worktreePath, ['rev-list', '-n', '1', 'HEAD', '--not', '--branches', '--tags', '--remotes']).trim().length > 0) {
+      found('unreachable-commits')
+      if (firstOnly) return done()
+    }
     // Work `status` cannot see. (1) A tracked file flagged assume-unchanged (lowercase
     // tag; also what `core.ignoreStat` effectively does) or skip-worktree (`S`) can be
     // edited without any status line. (2) A submodule's own status probe runs without
@@ -314,7 +370,10 @@ export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
     // directory has any entry is kept, initialised or not. Both are the simple fail-safe
     // (keep) rather than recursing into each submodule.
     for (const rec of git(worktreePath, ['ls-files', '-v', '-z']).split('\0')) {
-      if (/^[a-zS] /.test(rec)) return true
+      if (/^[a-zS] /.test(rec)) {
+        found('hidden-index', rec.slice(2))
+        if (firstOnly) return done()
+      }
     }
     for (const rec of git(worktreePath, ['ls-files', '-s', '-z']).split('\0')) {
       const m = /^160000 [0-9a-f]+ \d\t(.+)$/s.exec(rec)
@@ -324,13 +383,65 @@ export function worktreeHasUnsavedWork(worktreePath, deps = {}) {
         entries = readdir(joinPath(worktreePath, m[1]))
       } catch (err) {
         if (err?.code === 'ENOENT') continue // the gitlink's directory is absent: nothing there
-        return true // cannot tell (EACCES, ENOTDIR, ...): keep
+        found('unreadable') // cannot tell (EACCES, ENOTDIR, ...): keep
+        if (firstOnly) return done()
+        continue
       }
-      if (entries.length > 0) return true
+      if (entries.length > 0) {
+        found('submodule', m[1])
+        if (firstOnly) return done()
+      }
     }
-    return false
   } catch {
-    return true
+    found('unreadable')
+  }
+  return done()
+}
+
+const UNSAVED_KIND_LABELS = {
+  modified: 'uncommitted changes to tracked files',
+  untracked: 'untracked files',
+  ignored: 'ignored files (build output, node_modules, a local .env...)',
+  'hidden-index': 'tracked files hidden from status (assume-unchanged / skip-worktree)',
+  submodule: 'a populated submodule directory',
+  'unreachable-commits': 'commits no branch, tag or remote reaches',
+  unreadable: 'state that could not be read (kept to be safe)',
+}
+
+// Control characters, bidi overrides/isolates and zero-width characters: text from git
+// or the filesystem must not be able to reorder or hide what the notice shows.
+// eslint-disable-next-line no-control-regex
+const NOTICE_STRIP = /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
+/** Strip spoofing characters, then cap at `max` code points (never splitting a surrogate pair). */
+export function sanitizeNoticeText(text, max) {
+  const chars = Array.from(String(text).replace(NOTICE_STRIP, ''))
+  return chars.length > max ? `${chars.slice(0, max - 3).join('')}...` : chars.join('')
+}
+
+/**
+ * #9286: one human-readable line for a worktreeUnsavedWorkReport(), kinds in the
+ * report's order, each with its sample paths. Paths come from git and the
+ * filesystem, so control characters are stripped and each is length-capped.
+ * @param {{ kinds: string[], samples: Record<string, string[]> }} report
+ * @returns {string}
+ */
+export function describeUnsavedWork(report) {
+  const kinds = Array.isArray(report?.kinds) ? report.kinds : []
+  return kinds.map((kind) => {
+    const label = UNSAVED_KIND_LABELS[kind] || kind
+    const paths = (report.samples?.[kind] || []).map((p) => sanitizeNoticeText(p, 120))
+    return paths.length > 0 ? `${label}: ${paths.join(', ')}` : label
+  }).join('; ')
+}
+
+/** The strict status output (raw, untrimmed), or null when it cannot be run. */
+function readStatus(git, worktreePath) {
+  try {
+    const out = git(worktreePath, STRICT_STATUS_ARGS)
+    return typeof out === 'string' ? out : null
+  } catch {
+    return null
   }
 }
 
