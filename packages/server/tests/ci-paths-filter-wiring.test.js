@@ -71,6 +71,18 @@ import {
  *              satisfiable: every `github.event_name == '<event>'` it names is an
  *              event the workflow triggers on, and it lets `pull_request`
  *              through when the workflow has that trigger.
+ *   gate       every consumer's job-level `if:` is EXACTLY one of GATE_SHAPES
+ *              (an explicit allowlist, see below) naming a declared output, and
+ *              a consumer with no job-level `if:` is reported — nothing else
+ *              can skip it on the filter. The value checked is js-yaml's parsed
+ *              value (what Actions evaluates), not the comment-stripped lines,
+ *              so a `#` line inside a block scalar stays in the value and fails.
+ *
+ * NOT detected as consumers (each is covered today only by the roster rule,
+ * because every output has exactly one consumer; a SECOND reader of the same
+ * output would hide the loss): a job that reads the filter only through
+ * `toJSON(needs)` or `needs.*.outputs.x`, and a job that loses every
+ * `needs.changes` read (it stops being a consumer, so nothing checks its `if:`).
  *
  * WHY `needs:` MUST BE DIRECT, not merely transitive. The `needs` context holds
  * only a job's DIRECT dependencies. A job that reaches `changes` through
@@ -445,9 +457,26 @@ export function producerIfIssues(producer, workflowText) {
 export const GATE_SHAPES = [
   {
     name: `needs.${PRODUCER_JOB}.outputs.<name> == 'true'`,
-    re: new RegExp(String.raw`^needs\.${PRODUCER_JOB}\.outputs\.([A-Za-z_][\w-]*)\s*==\s*'true'$`),
+    re: new RegExp(String.raw`^needs\.${PRODUCER_JOB}\.outputs\.([A-Za-z_][\w-]*)[ \t]*==[ \t]*'true'$`),
   },
 ]
+
+const ASCII_WS = /[ \t\r\n]+/g // NOT \s: that also folds NBSP and U+2028, which Actions does not read as a space
+const foldWs = (s) => s.replace(ASCII_WS, ' ').replace(/^ | $/g, '')
+
+/**
+ * The value Actions evaluates for a job's `if:`: js-yaml's parsed value when the
+ * document parses and has the job (so a block scalar's `#` line stays IN the
+ * value, as it does for Actions, instead of being dropped by the line reader's
+ * comment stripping), else the line reader's. null = no job-level `if:`.
+ */
+function gateValueOf(job, docJobs) {
+  const parsed = docJobs?.[job.id]
+  if (parsed !== null && typeof parsed === 'object') {
+    return Object.hasOwn(parsed, 'if') && parsed.if !== null ? String(parsed.if) : null
+  }
+  return jobIf(stripYamlComments(job.body))
+}
 
 const quoteIf = (v) => (v.length > 160 ? `${v.slice(0, 160)}… (${v.length} chars)` : v)
 
@@ -465,16 +494,15 @@ export function gateExpressionIssues(expr, outputNames) {
   if (expr === null) {
     return [`has no job-level if: — a job-level if: of an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) is the only thing that can skip it, so it runs on every change whatever the filter says`]
   }
-  let v = expr.trim().replace(/^[|>][+-]?\s*/, '')
+  let v = foldWs(expr)
   const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(v)
-  if (wrapped) v = wrapped[1]
-  v = squash(v)
+  if (wrapped) v = foldWs(wrapped[1])
   for (const shape of GATE_SHAPES) {
     const m = shape.re.exec(v)
     if (!m) continue
     return outputNames.includes(m[1]) ? [] : [`its if: names output '${m[1]}', which '${PRODUCER_JOB}' does not declare`]
   }
-  return [`its if: (${quoteIf(squash(expr))}) is not an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) — it may defeat the filter (always runs, never runs) or only look like it gates; if it is a legitimate new shape, add it to GATE_SHAPES with review`]
+  return [`its if: (${quoteIf(foldWs(expr))}) is not an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) — it may defeat the filter (always runs, never runs) or only look like it gates; if it is a legitimate new shape, add it to GATE_SHAPES with review`]
 }
 
 const stepLabel = (step, idx) =>
@@ -546,9 +574,11 @@ export function pathsFilterWiring(
   // an exception here would surface as a cancelled `before` hook and a wall of
   // "did not finish" subtests, which is red but names nothing.
   let docSteps = []
+  let docJobs = null
   let yamlError = null
   try {
-    docSteps = (yaml.load(workflow.text)?.jobs?.[PRODUCER_JOB]?.steps ?? []).filter(Boolean)
+    docJobs = yaml.load(workflow.text)?.jobs ?? null
+    docSteps = (docJobs?.[PRODUCER_JOB]?.steps ?? []).filter(Boolean)
   } catch (e) {
     yamlError = e
     issues.push(
@@ -678,7 +708,7 @@ export function pathsFilterWiring(
         issue('reference', `job '${job.id}' reads needs.${PRODUCER_JOB}.outputs but does not list '${PRODUCER_JOB}' in its own needs: (${direct.join(', ') || 'none'}) — the needs context holds DIRECT dependencies only, so every reference is empty and the job never runs`)
       )
     }
-    for (const text of gateExpressionIssues(jobIf(stripYamlComments(job.body)), outputNames)) issues.push(issue('gate', `job '${job.id}': ${text}`))
+    for (const text of gateExpressionIssues(gateValueOf(job, docJobs), outputNames)) issues.push(issue('gate', `job '${job.id}': ${text}`))
     checkLoud(job, 'a real failure would not fail the job')
   }
   for (const key of swallowExemptions.keys()) {
@@ -1359,6 +1389,20 @@ describe('pathsFilterWiring reports each defect it exists to find, on a syntheti
         assertReports(run(withIf(expr)), 'gate', NOT_SHAPE, name)
       })
     }
+
+    it('reports a block scalar whose value carries a # line (Actions evaluates it; the line reader would strip it)', () => {
+      const r = run(withIf("|\n      needs.changes.outputs.alpha == 'true'\n      # || true"))
+      assertReports(r, 'gate', NOT_SHAPE, 'block scalar with a # line')
+    })
+
+    it('accepts a block scalar holding exactly the plain shape (control)', () => {
+      assert.deepEqual(textsOf(run(withIf("|\n      needs.changes.outputs.alpha == 'true'")), 'gate'), [])
+    })
+
+    it('reports a non-ASCII space (NBSP) around ==, which is not whitespace to Actions', () => {
+      assertReports(run(withIf("needs.changes.outputs.alpha == 'true'")), 'gate', NOT_SHAPE, 'NBSP')
+      assertReports(run(withIf("needs.changes.outputs.alpha == 'true'")), 'gate', NOT_SHAPE, 'NBSP one side')
+    })
 
     it('reports a 20000-deep nesting instead of throwing', () => {
       const deep = `${'('.repeat(20000)}${F}${')'.repeat(20000)}`
