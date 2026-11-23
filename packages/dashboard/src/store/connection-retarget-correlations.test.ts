@@ -43,6 +43,7 @@ class MockWebSocket {
 
 const { useConnectionStore } = await import('./connection')
 const mh = await import('./message-handler')
+const { createEmptyInFlightMarkers, createEmptySessionState } = await import('./utils')
 
 type McpResult = { ok: boolean; code?: string }
 
@@ -79,6 +80,8 @@ interface Armed {
   summarize: { error: string | null }
   mcp: { result: McpResult | null }
   git: { result: { error?: string | null } | null }
+  destroyExpired: { fired: boolean }
+  markerKeys: string[]
 }
 
 /** Arm one request per socket-scoped correlation family on the CURRENT store socket. */
@@ -89,6 +92,8 @@ function armAll(): Armed {
     summarize: { error: null },
     mcp: { result: null },
     git: { result: null },
+    destroyExpired: { fired: false },
+    markerKeys: [],
   }
   mh.registerEvaluatorRequest('eval-1', {
     resolve: () => { /* never resolved in these tests */ },
@@ -100,11 +105,39 @@ function armAll(): Armed {
   st.setGitStageCallback((r: { error?: string | null }) => { armed.git.result = r })
   st.requestScheduledTasks()
   mh.registerModelChangeRequest('model-1', { sessionId: 's1', previousModel: 'm0' })
+  // Map-based correlations armed through their real registration functions.
+  mh.registerTrustGrantRequest('trust-1', { skillName: 'sk', author: 'au' })
+  mh.registerPermissionModeChangeRequest('pm-1', { sessionId: 's1', previousMode: 'default' } as never)
+  mh.registerThinkingLevelChangeRequest('tl-1', { sessionId: 's1', previousLevel: 'low' })
+  mh.armEnvironmentDestroyTimer('env-1', 5_000, () => { armed.destroyExpired.fired = true })
+  // Store-state families. These have no wire-level arming path reachable from the
+  // fake socket (the UI actions that set them go through panels), so they are set
+  // as store state exactly as those actions leave it.
+  const base = useConnectionStore.getState().sessionStates.s1 ?? createEmptySessionState()
+  useConnectionStore.setState({
+    sessionStates: {
+      ...useConnectionStore.getState().sessionStates,
+      s1: { ...base, pendingTrustGrants: [{ requestId: 'trust-1', skillName: 'sk', author: 'au' }] },
+    },
+    transcriptViewer: { conversationId: 'c1', status: 'loading', messages: [], error: null },
+    failedRestoreHistories: { h1: { entries: [], total: 0, loading: true, pendingOffset: 0 } },
+    archivedSessionHistories: { h2: { entries: [], total: 0, loading: true, pendingOffset: 0 } },
+  } as never)
+  // Every in-flight marker in the roster, set non-empty by shape.
+  const nonEmpty: Record<string, unknown> = {}
+  for (const [key, empty] of Object.entries(createEmptyInFlightMarkers())) {
+    if (empty instanceof Set) nonEmpty[key] = new Set(['x'])
+    else if (typeof empty === 'boolean') nonEmpty[key] = true
+    else if (empty !== null && typeof empty === 'object') nonEmpty[key] = { x: true }
+    else continue
+    armed.markerKeys.push(key)
+  }
+  useConnectionStore.setState(nonEmpty as never)
   return armed
 }
 
 /** Every family settled NOW (no timer has been advanced since arming). */
-async function expectAllCleared(armed: Armed): Promise<void> {
+async function expectAllCleared(armed: Armed, opts: { viewerResetByPath?: boolean } = {}): Promise<void> {
   await vi.advanceTimersByTimeAsync(0) // let promise rejections land; NOT a timeout
   expect(armed.evaluator.error !== null).toBe(true)
   expect(armed.summarize.error !== null).toBe(true)
@@ -114,6 +147,37 @@ async function expectAllCleared(armed: Armed): Promise<void> {
   expect(mh._testModelRevertPendingSize()).toBe(0)
   expect(mh._testEvaluatorPendingSize()).toBe(0)
   expect(mh._testMcpServerOpPendingSize()).toBe(0)
+  expect(mh._testTrustGrantPendingSize()).toBe(0)
+  expect(mh._testPermissionModeRevertPendingSize()).toBe(0)
+  expect(mh._testThinkingLevelRevertPendingSize()).toBe(0)
+  const st = useConnectionStore.getState()
+  expect(st.sessionStates.s1?.pendingTrustGrants?.length ?? 0).toBe(0)
+  // Paths that ALSO reset the viewer wholesale afterwards (disconnect(), and a
+  // retarget's forgetSession()) leave it idle; the rest must have failed it.
+  if (opts.viewerResetByPath) expect(st.transcriptViewer.status).not.toBe('loading')
+  else expect(st.transcriptViewer.status).toBe('error')
+  // Same split for the history views: settled to loading:false, or (on the paths
+  // that reset them wholesale) gone.
+  if (opts.viewerResetByPath) {
+    expect(st.failedRestoreHistories.h1?.loading).not.toBe(true)
+    expect(st.archivedSessionHistories.h2?.loading).not.toBe(true)
+  } else {
+    expect(st.failedRestoreHistories.h1?.loading).toBe(false)
+    expect(st.archivedSessionHistories.h2?.loading).toBe(false)
+  }
+  // The destroy timer was cancelled, not merely not-yet-due.
+  await vi.advanceTimersByTimeAsync(6_000)
+  expect(armed.destroyExpired.fired).toBe(false)
+  // Every roster marker is empty again (the roster must have been non-trivial).
+  expect(armed.markerKeys.length).toBeGreaterThan(5)
+  const state = st as unknown as Record<string, unknown>
+  const stuck = armed.markerKeys.filter((k) => {
+    const v = state[k]
+    if (v instanceof Set) return v.size > 0
+    if (typeof v === 'boolean') return v
+    return v !== null && typeof v === 'object' && Object.keys(v as object).length > 0
+  })
+  expect(stuck).toEqual([])
 }
 
 beforeEach(() => {
@@ -121,6 +185,10 @@ beforeEach(() => {
   MockWebSocket.instances = []
   mh.resetReconnectAttempt()
   mh.clearPendingModelReverts()
+  mh.clearPendingTrustGrants()
+  mh.clearPendingPermissionModeReverts()
+  mh.clearPendingThinkingLevelReverts()
+  mh.cancelAllEnvironmentDestroyTimers()
   for (const k of Object.keys(lsStore)) delete lsStore[k]
   useConnectionStore.setState({
     serverRegistry: [],
@@ -151,7 +219,7 @@ describe('#9218 connect() replacing a live socket ends that socket\'s correlatio
     expect(useConnectionStore.getState().scheduledTasksLoading).toBe(true)
 
     useConnectionStore.getState().connect(URL_B, 'tok')
-    await expectAllCleared(armed)
+    await expectAllCleared(armed, { viewerResetByPath: true })
     expect(armed.evaluator.error).toContain('replaced')
     expect(armed.summarize.error).toContain('replaced')
   })
@@ -225,7 +293,7 @@ describe('#9218 close / error / disconnect still clear the same set', () => {
     await authenticated(URL_A)
     const armed = armAll()
     useConnectionStore.getState().disconnect()
-    await expectAllCleared(armed)
+    await expectAllCleared(armed, { viewerResetByPath: true })
     expect(armed.evaluator.error).toContain('Disconnected')
   })
 })

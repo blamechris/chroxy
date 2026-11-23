@@ -3128,11 +3128,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket: existing } = get();
     // #9218 — `retireSocket` detaches onclose/onerror, so a store `socket` that is
     // replaced here never runs its own teardown. It is the only socket that can
-    // carry correlations (every request send is gated on it; a mid-handshake
+    // carry correlations (every request SEND is gated on it; a mid-handshake
     // `liveSocket` is not yet in the store), so clear them now, BEFORE the new
     // socket is built. A null `existing` (first connect, a retry after onclose /
     // onerror already ran, after disconnect()) clears nothing: anything armed
-    // while the store socket is null belongs to the NEXT connection.
+    // while the store socket is null belongs to the NEXT connection. That is why
+    // this gates on the store `socket`, not on `liveSocket` or on every connect:
+    // git one-shot callbacks are ARMED independently of the socket (before the
+    // send), so a callback armed while disconnected must survive the retry's
+    // connect().
     if (existing) clearSocketScopedCorrelations(set, get, 'replaced');
     retireSocket(existing);
     if (liveSocket !== existing) retireSocket(liveSocket);
@@ -3636,7 +3640,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // ordering (onclose already armed the timer); the error → close
       // ordering is covered symmetrically by onclose's `wasConnected`
       // gate (handler defined above).
-            scheduleReconnect('WebSocket error', 'Connection error');
+      scheduleReconnect('WebSocket error', 'Connection error');
     };
     } // end _connectWebSocket
   },
