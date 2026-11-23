@@ -653,8 +653,10 @@ export class SessionCiWatcher {
     const verdict = terminalVerdict(snapshot)
 
     // #9301: a different head for a PR whose wake is parked means a newer push
-    // replaced it — that result is stale, never deliver it.
-    const perPr = this._deferred.get(sessionId)
+    // replaced it — that result is stale, never deliver it. Only on the watcher's
+    // OWN reading (`fire`): an `observe()` survey can resolve after a push while
+    // reporting the OLDER head, and must not discard the parked wake for the current one.
+    const perPr = fire ? this._deferred.get(sessionId) : undefined
     if (perPr) {
       // The session's current PR is `number`: anything parked for another PR is
       // for one it has moved on from. Same PR, different head: superseded.

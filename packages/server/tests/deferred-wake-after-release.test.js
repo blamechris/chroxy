@@ -208,8 +208,18 @@ describe('CI wake refused as orchestrated is delivered once after release (#9301
   it('moving to another PR drops what was parked for the old one', async () => {
     mgr.markTurnDriven('s1', A)
     settleHead('h1')
-    watcher._reconcile('s1', snap('x1', true, { number: 8 }))
+    watcher._reconcile('s1', snap('h1', true, { number: 8 })) // SAME head: only the PR-number clause can drop it
     assert.equal(watcher._deferred.size, 0)
+  })
+
+  it('a stale observe() reading of an older head does not discard the parked wake', async () => {
+    mgr.markTurnDriven('s1', A)
+    settleHead('h2')
+    assert.equal(watcher.observe('s1', { ...snap('h1', true), reason: null }), 'armed')
+    assert.equal(watcher._deferred.get('s1')?.size, 1, 'still parked for h2')
+    mgr.releaseTurnDriven('s1', A)
+    await settle()
+    assert.equal(session.sent.length, 1)
   })
 
   it('no-pr clears the parked entry', async () => {
@@ -320,6 +330,15 @@ describe('mailbox nudge refused as orchestrated is delivered once after release 
     mgr.releaseTurnDriven('s1', A)
     await settle()
     assert.equal(session.writes.length, 0)
+  })
+
+  it('a ping for an id with no session clears the owed nudge', async () => {
+    mgr.markTurnDriven('s1', A)
+    await ping()
+    assert.equal(_owedNudgesForTest(mgr).size, 1)
+    mgr.unregisterAgentCommId('coder')
+    assert.equal((await ping()).body.reason, 'no-session')
+    assert.equal(_owedNudgesForTest(mgr).size, 0)
   })
 
   it('a tool_start that is not the agent-comm receive_next does not drop the owed nudge', async () => {
