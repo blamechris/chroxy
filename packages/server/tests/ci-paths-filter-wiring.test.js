@@ -71,6 +71,18 @@ import {
  *              satisfiable: every `github.event_name == '<event>'` it names is an
  *              event the workflow triggers on, and it lets `pull_request`
  *              through when the workflow has that trigger.
+ *   gate       every consumer's job-level `if:` is EXACTLY one of GATE_SHAPES
+ *              (an explicit allowlist, see below) naming a declared output, and
+ *              a consumer with no job-level `if:` is reported — nothing else
+ *              can skip it on the filter. The value checked is js-yaml's parsed
+ *              value (what Actions evaluates), not the comment-stripped lines,
+ *              so a `#` line inside a block scalar stays in the value and fails.
+ *
+ * NOT detected as consumers (each is covered today only by the roster rule,
+ * because every output has exactly one consumer; a SECOND reader of the same
+ * output would hide the loss): a job that reads the filter only through
+ * `toJSON(needs)` or `needs.*.outputs.x`, and a job that loses every
+ * `needs.changes` read (it stops being a consumer, so nothing checks its `if:`).
  *
  * WHY `needs:` MUST BE DIRECT, not merely transitive. The `needs` context holds
  * only a job's DIRECT dependencies. A job that reaches `changes` through
@@ -222,7 +234,7 @@ export function needsReads(job) {
 
 const NEEDS_CHANGES = new RegExp(
   String.raw`\bneeds\s*(?:\.\s*${PRODUCER_JOB}|\[\s*(['"])${PRODUCER_JOB}\1\s*\])(?![\w-])`,
-  'g'
+  'gi'
 )
 
 /**
@@ -242,10 +254,10 @@ export function changesReferences(job) {
   const bad = []
   for (const m of text.matchAll(NEEDS_CHANGES)) {
     const tail = text.slice(m.index + m[0].length, m.index + m[0].length + 80)
-    const out = /^\.outputs\.([A-Za-z_][\w-]*)(?![\w-])/.exec(tail)
+    const out = /^\.outputs\.([A-Za-z_][\w-]*)(?![\w-])/i.exec(tail)
     if (out) {
       refs.push({ output: out[1], comparedToTrue: /^\s*==\s*'true'/.test(tail.slice(out[0].length)) })
-    } else if (!/^\.result(?![\w-])/.test(tail)) {
+    } else if (!/^\.result(?![\w-])/i.test(tail)) {
       bad.push(
         `reads needs.${PRODUCER_JOB}${tail.split('\n')[0].slice(0, 30)} — a form this guard cannot resolve to an output name; spell it needs.${PRODUCER_JOB}.outputs.<name>`
       )
@@ -419,6 +431,80 @@ export function producerIfIssues(producer, workflowText) {
   return issues
 }
 
+// ---- a consumer's `if:` must be an allowlisted gate shape (#9151) ----------
+//
+// `needs.changes.outputs.<x> == 'true' || true` always runs the job (wasted CI)
+// and `... && false` never does (lost coverage); both used to pass because the
+// rule only asked that the output be NAMED and compared to 'true'. A first fix
+// evaluated the expression over a truth table, and review found it accepted a
+// long tail of gate-defeating spellings (`!F == 'true'` read with the wrong
+// precedence, `TRUE`/`NULL` in another case, `contains('a','a')`, `!cancelled()`,
+// correlated atoms, a mis-cased `NEEDS.changes`, ...). Deciding an arbitrary
+// GitHub expression is not what this guard is for, so it is STRUCTURAL: a
+// consumer's job-level `if:` must be, exactly, one of GATE_SHAPES, after (and
+// only after) stripping a trailing `# comment` (done by stripYamlComments), one
+// `${{ ... }}` wrapper around the whole value, and runs of whitespace.
+//
+// To allow a new shape, add a named entry to GATE_SHAPES in a reviewed change
+// and give it a cell below; nothing else decides what is a gate.
+//
+// KNOWN FALSE REJECTS (acceptable, and reported rather than passed): matching is
+// case-sensitive, so `== 'TRUE'` is rejected; a YAML-quoted whole value
+// (`if: "needs... == 'true'"`) is rejected; `&& github.event_name == ...`
+// combinations are rejected until a shape for them is added.
+
+/** The only job-level `if:` shapes a consumer may use. Group 1 is the output name. */
+export const GATE_SHAPES = [
+  {
+    name: `needs.${PRODUCER_JOB}.outputs.<name> == 'true'`,
+    re: new RegExp(String.raw`^needs\.${PRODUCER_JOB}\.outputs\.([A-Za-z_][\w-]*)[ \t]*==[ \t]*'true'$`),
+  },
+]
+
+const ASCII_WS = /[ \t\r\n]+/g // NOT \s: that also folds NBSP and U+2028, which Actions does not read as a space
+const foldWs = (s) => s.replace(ASCII_WS, ' ').replace(/^ | $/g, '')
+
+/**
+ * The value Actions evaluates for a job's `if:`: js-yaml's parsed value when the
+ * document parses and has the job (so a block scalar's `#` line stays IN the
+ * value, as it does for Actions, instead of being dropped by the line reader's
+ * comment stripping), else the line reader's. null = no job-level `if:`.
+ */
+function gateValueOf(job, docJobs) {
+  const parsed = docJobs?.[job.id]
+  if (parsed !== null && typeof parsed === 'object') {
+    return Object.hasOwn(parsed, 'if') && parsed.if !== null ? String(parsed.if) : null
+  }
+  return jobIf(stripYamlComments(job.body))
+}
+
+const quoteIf = (v) => (v.length > 160 ? `${v.slice(0, 160)}… (${v.length} chars)` : v)
+
+/**
+ * What is wrong with a consumer's job-level `if:` value — `[]` when, once
+ * normalised, it is exactly an allowlisted shape naming a declared output.
+ * `expr` is null when the job has no job-level `if:` (then nothing can skip it
+ * on the filter, which is reported too).
+ *
+ * @param {string|null} expr
+ * @param {string[]} outputNames the `changes` job's declared outputs
+ * @returns {string[]}
+ */
+export function gateExpressionIssues(expr, outputNames) {
+  if (expr === null) {
+    return [`has no job-level if: — a job-level if: of an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) is the only thing that can skip it, so it runs on every change whatever the filter says`]
+  }
+  let v = foldWs(expr)
+  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(v)
+  if (wrapped) v = foldWs(wrapped[1])
+  for (const shape of GATE_SHAPES) {
+    const m = shape.re.exec(v)
+    if (!m) continue
+    return outputNames.includes(m[1]) ? [] : [`its if: names output '${m[1]}', which '${PRODUCER_JOB}' does not declare`]
+  }
+  return [`its if: (${quoteIf(foldWs(expr))}) is not an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) — it may defeat the filter (always runs, never runs) or only look like it gates; if it is a legitimate new shape, add it to GATE_SHAPES with review`]
+}
+
 const stepLabel = (step, idx) =>
   stepInput(step, 'name') ?? stepInput(step, 'uses') ?? `#${idx + 1}`
 
@@ -488,9 +574,11 @@ export function pathsFilterWiring(
   // an exception here would surface as a cancelled `before` hook and a wall of
   // "did not finish" subtests, which is red but names nothing.
   let docSteps = []
+  let docJobs = null
   let yamlError = null
   try {
-    docSteps = (yaml.load(workflow.text)?.jobs?.[PRODUCER_JOB]?.steps ?? []).filter(Boolean)
+    docJobs = yaml.load(workflow.text)?.jobs ?? null
+    docSteps = (docJobs?.[PRODUCER_JOB]?.steps ?? []).filter(Boolean)
   } catch (e) {
     yamlError = e
     issues.push(
@@ -620,6 +708,7 @@ export function pathsFilterWiring(
         issue('reference', `job '${job.id}' reads needs.${PRODUCER_JOB}.outputs but does not list '${PRODUCER_JOB}' in its own needs: (${direct.join(', ') || 'none'}) — the needs context holds DIRECT dependencies only, so every reference is empty and the job never runs`)
       )
     }
+    for (const text of gateExpressionIssues(gateValueOf(job, docJobs), outputNames)) issues.push(issue('gate', `job '${job.id}': ${text}`))
     checkLoud(job, 'a real failure would not fail the job')
   }
   for (const key of swallowExemptions.keys()) {
@@ -660,6 +749,12 @@ function assertNone(report, kind) {
 function assertReports(report, kind, re, what) {
   const t = textsOf(report, kind)
   assert.ok(t.some((x) => re.test(x)), `${what}: expected a '${kind}' issue matching ${re}, got ${JSON.stringify(t)}`)
+}
+
+/** Job ids the line reader found that js-yaml does not see (the reverse cross-check, #9151). */
+export const phantomJobs = (workflow) => {
+  const oracleIds = Object.keys(yaml.load(workflow.text).jobs ?? {})
+  return workflow.jobs.map((j) => j.id).filter((id) => !oracleIds.includes(id))
 }
 
 const asWorkflow = (text, name = WORKFLOW) => ({ name, text, jobs: parseJobs(text, name) })
@@ -714,6 +809,13 @@ describe(`${WORKFLOW}: every path-filtered job is wired to a real '${PRODUCER_JO
       `the consumer set disagrees with js-yaml: ${report.consumers.map((c) => c.id).join(', ')} vs ${oracleConsumers.join(', ')}`
     )
 
+    // The reverse direction (#9151): a job the line reader invents (a `key:` at job
+    // indent inside a block scalar, say) is a phantom no rule should be judged on.
+    for (const workflow of workflows) {
+      const phantoms = phantomJobs(workflow)
+      assert.ok(phantoms.length === 0, `the line reader invented job(s) ${phantoms.join(', ')} in ${workflow.name} that js-yaml does not see`)
+    }
+
     for (const workflow of workflows) {
       for (const [id, oracleJob] of Object.entries(yaml.load(workflow.text).jobs ?? {})) {
         const job = workflow.jobs.find((j) => j.id === id)
@@ -733,6 +835,10 @@ describe(`${WORKFLOW}: every path-filtered job is wired to a real '${PRODUCER_JO
 
   it("every job's needs.<id> read names a job in its own needs:, and every reader of needs.changes.outputs names an output that exists and compares it to 'true'", () => {
     assertNone(report, 'reference')
+  })
+
+  it("every consumer's job-level if: is exactly an allowlisted gate shape naming a declared output (#9151)", () => {
+    assertNone(report, 'gate')
   })
 
   it('every output is read by some job or is exempt with a reason, and every exemption still matches', () => {
@@ -1232,6 +1338,121 @@ describe('pathsFilterWiring reports each defect it exists to find, on a syntheti
     assert.ok(!textsOf(r, 'mapping').some((t) => /not an inline mapping/.test(t)), 'the unreadable-filters noise must not repeat the YAML finding')
   })
 
+
+  // ---- #9151: an if: that is not an allowlisted gate shape ------------------
+  describe('#9151: a consumer if: that is not exactly the allowlisted gate shape is reported', () => {
+    const withIf = (expr) => swap(FIXTURE, "    if: needs.changes.outputs.alpha == 'true'\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@abc\n      - name: Check a", `    if: ${expr}\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@abc\n      - name: Check a`)
+    const F = "needs.changes.outputs.alpha == 'true'"
+    const NOT_SHAPE = /^job 'job-a': its if: \(.*\) is not an allowlisted gate shape \(needs\.changes\.outputs\.<name> == 'true'\)/
+
+    for (const [name, expr] of [
+      ['|| true', `${F} || true`],
+      ['|| true with a trailing comment', `${F} || true  # keep running`],
+      ['|| always()', `${F} || always()`],
+      ['|| always() with a trailing comment', `${F} || always()  # even when cancelled`],
+      ['|| success()', `${F} || success()`],
+      ["|| 'true'", `${F} || 'true'`],
+      ["|| 'false'", `${F} || 'false'`],
+      ['|| 1', `${F} || 1`],
+      ['parenthesised || true', `(${F}) || (true)`],
+      ['wrapped in ${{ }} || true', `\${{ ${F} || true }}`],
+      ['a leading true ||', `true || ${F}`],
+      ['|| !false', `${F} || !false`],
+      ['a tautology F || !F', `${F} || !(${F})`],
+      ['&& false', `${F} && false`],
+      ['&& false with a trailing comment', `${F} && false  # disabled for now`],
+      ["&& ''", `${F} && ''`],
+      ['&& 0', `${F} && 0`],
+      ['&& null', `${F} && null`],
+      ['&& !always()', `${F} && !always()`],
+      ['a contradiction F && !F', `${F} && !(${F})`],
+      ['(F && false) || an unrelated condition', `(${F} && false) || github.event_name == 'push'`],
+      ['! binding tighter than ==', "!needs.changes.outputs.alpha == 'true'"],
+      ['|| TRUE', `${F} || TRUE`],
+      ['&& FALSE', `${F} && FALSE`],
+      ['|| True', `${F} || True`],
+      ['|| NULL', `${F} || NULL`],
+      ["|| contains('a','a')", `${F} || contains('a','a')`],
+      ["|| fromJSON('true')", `${F} || fromJSON('true')`],
+      ['|| !cancelled()', `${F} || !cancelled()`],
+      ['|| !failure()', `${F} || !failure()`],
+      ["|| x == 'push' || x != 'push'", `${F} || github.event_name == 'push' || github.event_name != 'push'`],
+      ["|| the same output != 'true'", `${F} || needs.changes.outputs.alpha != 'true'`],
+      ["a mis-cased NEEDS with || true", `NEEDS.changes.outputs.alpha == 'true' || true`],
+      ['a mis-cased CHANGES', "needs.CHANGES.outputs.alpha == 'true'"],
+      ["== 'TRUE' (a false reject, by design)", "needs.changes.outputs.alpha == 'TRUE'"],
+      ['a real-looking combination not on the allowlist', `${F} && github.event_name == 'pull_request'`],
+      ['an unbalanced expression', `(${F}`],
+      ['a bare output with no comparison', 'needs.changes.outputs.alpha'],
+    ]) {
+      it(`reports ${name}`, () => {
+        assertReports(run(withIf(expr)), 'gate', NOT_SHAPE, name)
+      })
+    }
+
+    it('reports a block scalar whose value carries a # line (Actions evaluates it; the line reader would strip it)', () => {
+      const r = run(withIf("|\n      needs.changes.outputs.alpha == 'true'\n      # || true"))
+      assertReports(r, 'gate', NOT_SHAPE, 'block scalar with a # line')
+    })
+
+    it('accepts a block scalar holding exactly the plain shape (control)', () => {
+      assert.deepEqual(textsOf(run(withIf("|\n      needs.changes.outputs.alpha == 'true'")), 'gate'), [])
+    })
+
+    it('reports a non-ASCII space (NBSP) around ==, which is not whitespace to Actions', () => {
+      assertReports(run(withIf("needs.changes.outputs.alpha == 'true'")), 'gate', NOT_SHAPE, 'NBSP')
+      assertReports(run(withIf("needs.changes.outputs.alpha == 'true'")), 'gate', NOT_SHAPE, 'NBSP one side')
+    })
+
+    it('reports a 20000-deep nesting instead of throwing', () => {
+      const deep = `${'('.repeat(20000)}${F}${')'.repeat(20000)}`
+      const r = run(withIf(deep))
+      assertReports(r, 'gate', /not an allowlisted gate shape/, 'deep')
+      assert.ok(textsOf(r, 'gate').every((t) => t.length < 1000), 'the quoted value must be truncated')
+    })
+
+    it('reports an allowlisted shape naming an output the changes job does not declare', () => {
+      assertReports(run(withIf("needs.changes.outputs.nope == 'true'")), 'gate', /names output 'nope', which 'changes' does not declare/, 'undeclared')
+    })
+
+    it('accepts exactly the plain shape, with a trailing comment, a whole-value ${{ }}, or extra internal whitespace (controls)', () => {
+      for (const expr of [
+        F,
+        `${F}  # why`,
+        `\${{ ${F} }}`,
+        `\${{${F}}}  # both`,
+        "needs.changes.outputs.alpha   ==   'true'",
+        "needs.changes.outputs.alpha=='true'",
+      ]) {
+        assert.deepEqual(textsOf(run(withIf(expr)), 'gate'), [], expr)
+      }
+    })
+
+    it('classifies a mis-cased needs.changes reader as a consumer (so it is checked, not invisible)', () => {
+      const r = run(withIf("NEEDS.changes.outputs.alpha == 'true' || true"))
+      assert.ok(r.consumers.some((c) => c.id === 'job-a'), 'job-a must still be a consumer')
+    })
+
+    it('reports a consumer with no job-level if: (nothing can skip it on the filter)', () => {
+      const noIf = swap(FIXTURE, "    if: needs.changes.outputs.beta == 'true'\n", '')
+      const withStepIf = swap(noIf, '      - name: Check b\n', "      - name: Check b\n        if: needs.changes.outputs.beta == 'true'\n")
+      assertReports(run(withStepIf), 'gate', /^job 'job-b': has no job-level if:/, 'no job-level if')
+    })
+
+    it('reports a consumer whose job-level if: has no filter comparison', () => {
+      const text = swap(withIf('always()'), '      - name: Check a\n', "      - name: Check a\n        if: needs.changes.outputs.alpha == 'true'\n")
+      assertReports(run(text), 'gate', /^job 'job-a': its if: \(always\(\)\) is not an allowlisted gate shape/, 'always()')
+    })
+  })
+
+  it('#9151: the reverse job cross-check reports a job only the line reader sees', () => {
+    assert.deepEqual(phantomJobs(asWorkflow(FIXTURE)), [])
+    // a top-level key AFTER jobs: its 2-space child looks like a job to the line reader, not to js-yaml
+    const text = `${FIXTURE}\ntrailer:\n  phantom:\n    a: b\n`
+    const lineReaderSees = asWorkflow(text).jobs.map((j) => j.id)
+    assert.ok(lineReaderSees.includes('phantom'), 'fixture sanity: the line reader should see the phantom')
+    assert.deepEqual(phantomJobs(asWorkflow(text)), ['phantom'])
+  })
 })
 
 // ---- the same defects, injected into the REAL ci.yml, on every consumer -----
