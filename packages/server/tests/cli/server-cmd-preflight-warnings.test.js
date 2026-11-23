@@ -2,8 +2,8 @@
  * Exercise the real Commander action with synthetic preflight and launch boundaries.
  * Every local dependency is replaced before server-cmd.js is imported: importing
  * the real server or doctor would perform unrelated host/provider discovery.
- * The capture-log cap is stubbed to record only that and when it was called; its
- * byte behaviour belongs to the logger's own tests.
+ * The capture-log cap is stubbed to record when it was called and to return the
+ * entries a test supplies; its byte behaviour belongs to the logger's own tests.
  */
 import assert from 'node:assert/strict'
 import { after, afterEach, beforeEach, describe, it, mock } from 'node:test'
@@ -63,7 +63,7 @@ const moduleMocks = [
       capStdioCaptureLogs: () => {
         fixture.captureCalls++
         fixture.events.push('capture')
-        return []
+        return fixture.captureEntries
       },
     },
   }),
@@ -90,6 +90,7 @@ beforeEach((t) => {
     directCalls: [],
     supervisorCalls: [],
     captureCalls: 0,
+    captureEntries: [],
     output: [],
     errors: [],
     events: [],
@@ -263,5 +264,38 @@ describe('start preflight warning hint (#8234)', () => {
     assert.equal(fixture.output.filter((line) => line.includes('preflight warning')).length, 0)
     assert.deepEqual(fixture.events, ['capture', 'supervisor'])
     assertLaunch('supervisor')
+  })
+
+  const notice = ({ file, archive, preservedBytes }) =>
+    `[chroxy] capped oversized capture log ${file} (last ${preservedBytes} bytes preserved to ${archive})`
+
+  it('prints the capped-capture-log notice to stdout before the warning hint and launch (#9137)', async () => {
+    process.env.CHROXY_DAEMON = '1'
+    const entry = { file: '/synthetic/capture.log', archive: '/synthetic/capture.log.1', preservedBytes: 4096 }
+    fixture.captureEntries = [entry]
+    fixture.checks = [check('credentials', 'warn')]
+    await start()
+    assert.deepEqual(fixture.output, [notice(entry), hint(1)])
+    assert.deepEqual(fixture.events, ['doctor', 'capture', 'log', 'warning', 'supervisor'])
+    assertLaunch('supervisor')
+  })
+
+  it('prints one notice per capped file, in order (#9137)', async () => {
+    process.env.CHROXY_DAEMON = '1'
+    const first = { file: '/synthetic/out.log', archive: '/synthetic/out.log.1', preservedBytes: 10 }
+    const second = { file: '/synthetic/err.log', archive: '/synthetic/err.log.1', preservedBytes: 20 }
+    fixture.captureEntries = [first, second]
+    fixture.checks = [check('credentials', 'warn')]
+    await start()
+    assert.deepEqual(fixture.output, [notice(first), notice(second), hint(1)])
+    assert.deepEqual(fixture.events, ['doctor', 'capture', 'log', 'log', 'warning', 'supervisor'])
+    assertLaunch('supervisor')
+  })
+
+  it('prints no notice when nothing was capped (#9137)', async () => {
+    process.env.CHROXY_DAEMON = '1'
+    await start()
+    assert.deepEqual(fixture.output, [])
+    assert.deepEqual(fixture.events, ['doctor', 'capture', 'supervisor'])
   })
 })
