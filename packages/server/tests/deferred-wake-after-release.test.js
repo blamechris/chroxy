@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
 import { BaseSession, reportInputAdmission } from '../src/base-session.js'
-import { handleMailboxPing } from '../src/mailbox-route.js'
+import { handleMailboxPing, _owedNudgesForTest } from '../src/mailbox-route.js'
 import { buildSessionCiWatcher } from '../src/session-ci-watcher.js'
 
 /**
@@ -42,10 +42,10 @@ class FakeTurnSession extends BaseSession {
   }
 }
 
-const snap = (head, pending) => ({
-  pr: { number: 7, title: 't', url: 'u', headRefOid: head },
+const snap = (head, pending, { number = 7, failing = false } = {}) => ({
+  pr: { number, title: 't', url: 'u', headRefOid: head },
   repo: { owner: 'o', name: 'r' },
-  checks: { counts: pending ? { pending: 1, failure: 0, success: 0 } : { pending: 0, failure: 0, success: 1 } },
+  checks: { counts: pending ? { pending: 1, failure: 0, success: 0 } : failing ? { pending: 0, failure: 1, success: 0 } : { pending: 0, failure: 0, success: 1 } },
   merge: { mergeStateStatus: 'CLEAN' },
 })
 
@@ -69,6 +69,19 @@ describe('turn_driven_released announcement (#9301)', () => {
     assert.deepEqual(seen, ['s1'])
     mgr._sessions.clear(); mgr.destroyAll()
   })
+
+  it('coalesces release / re-drive / release inside one tick into one emit', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpPath('state') })
+    mgr._sessions.set('s1', { session: new FakeTurnSession(), name: 'S1', cwd: '/repo' })
+    const seen = []
+    mgr.on('turn_driven_released', (e) => seen.push(e.sessionId))
+    const A = {}
+    mgr.markTurnDriven('s1', A); mgr.releaseTurnDriven('s1', A)
+    mgr.markTurnDriven('s1', A); mgr.releaseTurnDriven('s1', A)
+    await settle()
+    assert.deepEqual(seen, ['s1'])
+    mgr._sessions.clear(); mgr.destroyAll()
+  })
 })
 
 describe('CI wake refused as orchestrated is delivered once after release (#9301)', () => {
@@ -76,9 +89,9 @@ describe('CI wake refused as orchestrated is delivered once after release (#9301
   const A = { name: 'driverA' }
   const B = { name: 'driverB' }
   // arm on `pending`, settle on the same head: the real fire path, lastFired included.
-  const settleHead = (head) => {
-    watcher._reconcile('s1', snap(head, true))
-    watcher._reconcile('s1', snap(head, false))
+  const settleHead = (head, opts) => {
+    watcher._reconcile('s1', snap(head, true, opts))
+    watcher._reconcile('s1', snap(head, false, opts))
   }
 
   beforeEach(() => {
@@ -179,6 +192,51 @@ describe('CI wake refused as orchestrated is delivered once after release (#9301
     assert.equal(watcher._deferred.size, 1)
   })
 
+  it('a same-head re-fire between release and the announcement drops the stale parked wake', async () => {
+    mgr.markTurnDriven('s1', A)
+    settleHead('h1', { failing: true }) // parked: failure
+    mgr.releaseTurnDriven('s1', A) // announcement scheduled, not yet run
+    settleHead('h1') // re-run of h1 settles success; session is free, wakes at once
+    assert.equal(session.sent.length, 1)
+    const first = session.sent[0]
+    await settle()
+    assert.equal(session.sent.length, 1, 'the stale failure is not delivered after it')
+    assert.equal(session.sent[0], first)
+    assert.equal(watcher._deferred.size, 0)
+  })
+
+  it('moving to another PR drops what was parked for the old one', async () => {
+    mgr.markTurnDriven('s1', A)
+    settleHead('h1')
+    watcher._reconcile('s1', snap('x1', true, { number: 8 }))
+    assert.equal(watcher._deferred.size, 0)
+  })
+
+  it('no-pr clears the parked entry', async () => {
+    mgr.markTurnDriven('s1', A)
+    settleHead('h1')
+    assert.equal(watcher._deferred.size, 1)
+    assert.equal(watcher._reconcile('s1', { pr: null }), 'no-pr')
+    assert.equal(watcher._deferred.size, 0)
+  })
+
+  it('the tick prune drops entries for sessions that are gone', async () => {
+    watcher._deferred.set('ghost', new Map([[7, { event: {}, verdict: 'passed' }]]))
+    await watcher.tick()
+    assert.equal(watcher._deferred.has('ghost'), false)
+  })
+
+  it('stop()/start() leave no extra release listener behind', () => {
+    const base = mgr.listenerCount('turn_driven_released')
+    assert.ok(base >= 1)
+    watcher.stop()
+    assert.equal(mgr.listenerCount('turn_driven_released'), base - 1)
+    watcher.stop()
+    assert.equal(mgr.listenerCount('turn_driven_released'), base - 1)
+    watcher.start()
+    assert.equal(mgr.listenerCount('turn_driven_released'), base)
+  })
+
   it('a refusal that is not orchestrated is still dropped (not parked)', async () => {
     mgr._userStopped.add('s1')
     settleHead('h1')
@@ -256,10 +314,57 @@ describe('mailbox nudge refused as orchestrated is delivered once after release 
   it('destroyed while driven: nothing delivered', async () => {
     mgr.markTurnDriven('s1', A)
     await ping()
+    assert.equal(_owedNudgesForTest(mgr).size, 1)
     await mgr.destroySession('s1')
+    assert.equal(_owedNudgesForTest(mgr).size, 0, 'owed entry dropped on destroy (no leak)')
     mgr.releaseTurnDriven('s1', A)
     await settle()
     assert.equal(session.writes.length, 0)
+  })
+
+  it('a tool_start that is not the agent-comm receive_next does not drop the owed nudge', async () => {
+    mgr.markTurnDriven('s1', A)
+    await ping()
+    for (const tool of ['Bash', 'mcp__x__receive_next_all', 'receive_next_batch']) {
+      mgr.emit('session_event', { sessionId: 's1', event: 'tool_start', data: { tool } })
+    }
+    assert.equal(_owedNudgesForTest(mgr).size, 1)
+    mgr.releaseTurnDriven('s1', A)
+    await settle()
+    assert.equal(session.writes.length, 1)
+  })
+
+  it('a later injected ping clears the owed nudge (no double nudge on release)', async () => {
+    mgr.markTurnDriven('s1', A)
+    await ping()
+    mgr._turnDriven.delete('s1') // free without announcing: the ping lands first
+    assert.equal((await ping()).body.reason, 'injected')
+    assert.equal(_owedNudgesForTest(mgr).size, 0)
+    mgr.emit('turn_driven_released', { sessionId: 's1' })
+    assert.equal(session.writes.length, 1)
+  })
+
+  it('a later ping refused busy leaves the owed nudge in place', async () => {
+    mgr.markTurnDriven('s1', A)
+    await ping()
+    mgr._turnDriven.delete('s1')
+    session.isRunning = true
+    assert.equal((await ping()).body.reason, 'busy')
+    assert.equal(_owedNudgesForTest(mgr).size, 1, 'nothing injected, still owed')
+  })
+
+  it('busy at delivery stays owed and is delivered on the next release', async () => {
+    mgr.markTurnDriven('s1', A)
+    await ping()
+    session.isRunning = true
+    mgr.releaseTurnDriven('s1', A)
+    await settle()
+    assert.equal(session.writes.length, 0)
+    assert.equal(_owedNudgesForTest(mgr).size, 1)
+    session.isRunning = false
+    mgr.markTurnDriven('s1', A); mgr.releaseTurnDriven('s1', A)
+    await settle()
+    assert.equal(session.writes.length, 1)
   })
 
   it('re-driven right after release: stays owed, nudged on the next release', async () => {

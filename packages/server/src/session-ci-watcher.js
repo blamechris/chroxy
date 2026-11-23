@@ -654,8 +654,14 @@ export class SessionCiWatcher {
 
     // #9301: a different head for a PR whose wake is parked means a newer push
     // replaced it — that result is stale, never deliver it.
-    const parked = this._deferred.get(sessionId)?.get(number)
-    if (parked && parked.event.headRefOid !== headRefOid) this._dropDeferred(sessionId, number)
+    const perPr = this._deferred.get(sessionId)
+    if (perPr) {
+      // The session's current PR is `number`: anything parked for another PR is
+      // for one it has moved on from. Same PR, different head: superseded.
+      for (const [n, { event: parkedEvent }] of [...perPr]) {
+        if (n !== number || parkedEvent.headRefOid !== headRefOid) this._dropDeferred(sessionId, n)
+      }
+    }
 
     if (verdict === null) {
       // Still going, or no run yet for this head.
@@ -761,6 +767,10 @@ export class SessionCiWatcher {
    * versa.
    */
   _fire(sessionId, snapshot, verdict) {
+    // #9301: whatever was parked for this PR is older than this completion (a
+    // same-head re-run, or a newer head); never let it be delivered after this
+    // one. Re-parked below only if THIS completion is itself refused `orchestrated`.
+    this._dropDeferred(sessionId, snapshot.pr.number)
     const event = {
       sessionId,
       prNumber: snapshot.pr.number,

@@ -215,7 +215,10 @@ export function handleMailboxPing(server, req, res) {
 
     const reason = injectWakeup(server, to, unreadCount)
     if (reason === 'orchestrated') oweNudge(server, to, unreadCount)
-    else clearOwedNudge(server.sessionManager, to)
+    // Clear the owed nudge only when this ping really reached the agent
+    // (`injected`) or the session is gone. `busy` / `pty-dead` / `not-tui` / ...
+    // injected nothing, so the earlier refused nudge is still owed.
+    else if (reason === 'injected' || reason === 'no-session') clearOwedNudge(server.sessionManager, to)
     // Record the delivery for the Control Room "Mailbox" tab (observability;
     // recordMailboxEvent never throws into the delivery path).
     server.sessionManager?.recordMailboxEvent?.({ to, from, unreadCount, outcome: reason })
@@ -267,12 +270,24 @@ function injectWakeup(server, to, unreadCount) {
  */
 const owed = new WeakMap()
 const subscribed = new WeakSet()
-const RECEIVE_NEXT = /receive_next/i
+// The agent-comm MCP tool, as a TOKEN match on the tool id: `receive_next` or any
+// `mcp__<server>__receive_next` (the server name is operator-chosen, so it is not
+// pinned). Not a substring match: `receive_next_batch`-style names do not count.
+// Read-state is a PROXY (chroxy cannot query the mailbox): one receive_next may not
+// drain every message, so a later message can go un-nudged only if no later ping
+// arrives; and for claude-tui the transcript `tool_start` can lag past release, which
+// yields a spurious extra nudge, never a lost one.
+const RECEIVE_NEXT = /(^|__)receive_next$/
 
 function owedFor(sm) {
   let m = owed.get(sm)
   if (!m) { m = new Map(); owed.set(sm, m) }
   return m
+}
+
+/** Test-only: the owed-nudge map for a manager (leak assertions). */
+export function _owedNudgesForTest(sm) {
+  return owed.get(sm) ?? new Map()
 }
 
 function clearOwedNudge(sm, to) {
@@ -314,7 +329,15 @@ function deliverOwedNudges(server, sessionId) {
     if (sm.agentCommIdSessionId(to) !== sessionId) { m.delete(to); continue }
     if (sm.isAgentCommIdTurnDriven(to)) continue // re-driven: stay owed
     m.delete(to) // before delivery: exactly once
-    const reason = injectWakeup(server, to, o.unreadCount)
-    sm.recordMailboxEvent?.({ to, from: 'daemon', unreadCount: o.unreadCount, outcome: `deferred:${reason}` })
+    try {
+      const reason = injectWakeup(server, to, o.unreadCount)
+      // `busy` (e.g. a TUI still settling one tick after release): nothing was typed,
+      // so it stays owed. There is no idle signal to retry on; it is re-delivered by
+      // the next ping (which re-evaluates) or the next release.
+      if (reason === 'busy') m.set(to, o)
+      sm.recordMailboxEvent?.({ to, from: 'daemon', unreadCount: o.unreadCount, outcome: `deferred:${reason}` })
+    } catch (err) {
+      log.warn(`deferred mailbox nudge for ${to} failed: ${err?.message || err}`)
+    }
   }
 }

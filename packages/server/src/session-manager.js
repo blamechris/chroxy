@@ -1105,6 +1105,9 @@ export class SessionManager extends EventEmitter {
     // #8327: sessionId -> Set of owners (TurnDriver instances) currently occupying it. THE one
     // registry every driver reports to (see markTurnDriven); daemonTurnRefusal answers `orchestrated`.
     this._turnDriven = new Map()
+    // #9301: sessions with a release announcement already scheduled (coalesces a
+    // release / re-drive / release inside one tick into a single emit).
+    this._releaseAnnouncing = new Set()
     // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
     // continued as a NEW thread, held until the first accepted user input carries it.
     this._continuationSeeds = new Map()
@@ -6150,7 +6153,10 @@ export class SessionManager extends EventEmitter {
    * Emits `turn_driven_released { sessionId }`.
    */
   _announceReleased(sessionId) {
+    if (this._releaseAnnouncing.has(sessionId)) return
+    this._releaseAnnouncing.add(sessionId)
     setImmediate(() => {
+      this._releaseAnnouncing.delete(sessionId)
       if (!this._sessions.has(sessionId) || this.isTurnDriven(sessionId)) return
       try {
         this.emit('turn_driven_released', { sessionId })
