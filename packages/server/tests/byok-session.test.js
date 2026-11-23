@@ -11,6 +11,7 @@ import { TurnDriver } from '../src/orchestration/turn-driver.js'
 import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -3116,7 +3117,7 @@ describe('ClaudeByokSession', () => {
 
       it('a TurnDriver driving a session stopped mid-stream rejects TURN_STOPPED (#8553)', async () => {
         const session = streamPhaseSession({ stop: 'requested' })
-        const sm = new EventEmitter()
+        const sm = installTurnDrivenRegistry(new EventEmitter())
         sm.getSession = () => ({ session })
         for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
           session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))
@@ -3561,7 +3562,7 @@ describe('ClaudeByokSession', () => {
 
       it('a TurnDriver driving the session rejects the cut-off turn instead of resolving it', async () => {
         const session = toolPhaseSession()
-        const sm = new EventEmitter()
+        const sm = installTurnDrivenRegistry(new EventEmitter())
         sm.getSession = () => ({ session })
         for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
           session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))

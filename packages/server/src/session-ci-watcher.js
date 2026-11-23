@@ -761,6 +761,14 @@ export class SessionCiWatcher {
     if (refusal !== null) {
       // The user is still notified above; only the agent half is withheld, and
       // nothing is sent, queued or recorded.
+      //
+      // #9184, decided: a refused wake is DROPPED for every reason, `orchestrated`
+      // included — there is no deferral queue, and the CI arm for this head is
+      // already consumed (`lastFired`), so nothing re-fires it. It is not silent:
+      // the reason lands in the "settled ... (wake: <reason>)" log line below and
+      // the push above still tells the user. A driven turn can last up to the turn
+      // timeout, so the agent may miss that head's result; deferral-on-release is a
+      // separate subsystem, filed as a follow-up rather than built here.
       wakeOutcome = refusal
     } else if (this._wakeAgent && this._resolveSession) {
       // Stable, daemon-authored id for the turn-input route: the provider's

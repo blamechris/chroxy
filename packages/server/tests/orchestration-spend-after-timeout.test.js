@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, it, mock } from 'node:test'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 const snapshots = new Map()
 const mocks = [
@@ -51,7 +52,7 @@ function projected(data) {
 }
 function fixture(t, { role = 'audit', label = 'execute', priceTurn, maxParseRetries = 2, sendImpl, turnTimeoutMs = 5000, drainTimeoutMs } = {}) {
   const baseDir = mkdtempSync(join(tmpdir(), 'rejected-usage-'))
-  const sm = new EventEmitter()
+  const sm = installTurnDrivenRegistry(new EventEmitter())
   const warnings = []
   const log = { warn: (m) => warnings.push(String(m)), info() {}, error() {}, debug() {} }
   const sent = []

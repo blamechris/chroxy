@@ -8,6 +8,7 @@ import { SdkSession } from '../src/sdk-session.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
 import { SessionStatePersistence } from '../src/session-state-persistence.js'
 import { resetModels } from '../src/models.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 /**
  * Tests for SdkSession — permission handling, question handling,
@@ -4204,7 +4205,7 @@ describe('SdkSession', () => {
       const s = createSession({ streamStallTimeoutMs: 60_000 })
       s._isBusy = true
       s._currentMessageId = 'msg_ss'
-      const sm = new EventEmitter()
+      const sm = installTurnDrivenRegistry(new EventEmitter())
       sm.getSession = () => ({ session: s })
       for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
         s.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))

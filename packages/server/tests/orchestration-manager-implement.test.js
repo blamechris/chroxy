@@ -15,6 +15,7 @@ import { RunSummarySchema, RunDetailSchema, ServerOrchestrationRunDeltaSchema } 
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
 import { RunLedger } from '../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 const KIND_RE = /kind "([a-z_]+)"/
 const fenced = (obj) => 'ok\n\n```chroxy-decision\n' + JSON.stringify(obj) + '\n```'
@@ -63,6 +64,7 @@ class FakeSession extends EventEmitter {
 class FakeSM extends EventEmitter {
   constructor(decide, { architectModel = 'fable', workerModel = 'codex-m' } = {}) {
     super()
+    installTurnDrivenRegistry(this)
     this.setMaxListeners(0)
     this._decide = decide
     this._models = { architect: architectModel, worker: workerModel }

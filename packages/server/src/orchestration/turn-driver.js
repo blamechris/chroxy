@@ -123,6 +123,15 @@ export class TurnDriver {
     if (!sessionManager || typeof sessionManager.on !== 'function') {
       throw new Error('TurnDriver requires a sessionManager EventEmitter')
     }
+    // #9184: the turn-driven registry is what keeps a daemon wake out of a driven
+    // session (#8327). A manager without it must fail HERE, not silently run
+    // unguarded ("cannot check" reading as "nothing to check"). There is no
+    // guard-free mode: every construction site passes a real SessionManager.
+    for (const method of ['markTurnDriven', 'releaseTurnDriven']) {
+      if (typeof sessionManager[method] !== 'function') {
+        throw new Error(`TurnDriver requires a sessionManager with ${method}() (the turn-driven registry, #8327)`)
+      }
+    }
     this._sm = sessionManager
     this._log = log
     this._defaultTimeoutMs = defaultTimeoutMs
@@ -327,12 +336,12 @@ export class TurnDriver {
   // construction site gets the registration for free, through its sessionManager.
   _occupy(sessionId) {
     this._occupied.add(sessionId)
-    try { this._sm.markTurnDriven?.(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: markTurnDriven failed: ${err?.message || err}`) }
+    try { this._sm.markTurnDriven(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: markTurnDriven failed: ${err?.message || err}`) }
   }
 
   _vacate(sessionId) {
     this._occupied.delete(sessionId)
-    try { this._sm.releaseTurnDriven?.(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: releaseTurnDriven failed: ${err?.message || err}`) }
+    try { this._sm.releaseTurnDriven(sessionId, this) } catch (err) { this._log?.warn?.(`TurnDriver: releaseTurnDriven failed: ${err?.message || err}`) }
   }
 
   _handleSessionEvent({ sessionId, event, data } = {}) {

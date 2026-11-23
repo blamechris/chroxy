@@ -92,6 +92,7 @@ function makeServer(sessionForId = {}, { pushManager = makePushManager() } = {})
     pushManager,
     sessionManager: {
       resolveSessionByAgentCommId: (id) => sessionForId[id] || null,
+      isAgentCommIdTurnDriven: () => false,
       registerAgentCommId: (sid) => sid !== 'no-such-session',
       recordMailboxEvent: (ev) => recordedMailboxEvents.push(ev),
       recordedMailboxEvents,

@@ -11,6 +11,7 @@ import { EventEmitter } from 'node:events'
 
 import { buildOrchestrationManager } from '../src/orchestration/build-manager.js'
 import { OrchestrationManager } from '../src/orchestration/orchestration-manager.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 const tmpDirs = []
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'buildmgr-')); tmpDirs.push(d); return d }
@@ -28,7 +29,7 @@ test('returns null when the feature is off (fail-closed default)', () => {
 
 test('constructs a wired manager when features.orchestration is on', async () => {
   const dir = tmp()
-  const sm = new EventEmitter() // TurnDriver only needs .on
+  const sm = installTurnDrivenRegistry(new EventEmitter()) // TurnDriver needs .on + the turn-driven registry (#9184)
   sm.listSessions = () => []
   try {
     const mgr = buildOrchestrationManager({
@@ -68,7 +69,7 @@ test('recovers prior run records from disk at boot (index not clobbered)', async
     features: { orchestration: true }, homeOverride: fakeHome,
     orchestration: { roles: { architect: { provider: 'claude-sdk', model: 'm' }, worker: { provider: 'codex', model: 'm' } } },
   }
-  const mkSm = () => { const sm = new EventEmitter(); sm.listSessions = () => []; return sm }
+  const mkSm = () => { const sm = installTurnDrivenRegistry(new EventEmitter()); sm.listSessions = () => []; return sm }
   // boot 1: create a run and dispose (flushes run.json)
   const mgr1 = buildOrchestrationManager({ sessionManager: mkSm(), config: cfg, chroxyDir: dir })
   const rec = mgr1.createRun({ goal: 'g', cwd })
@@ -83,7 +84,7 @@ test('recovers prior run records from disk at boot (index not clobbered)', async
 
 test('dispose() unhooks the engine listeners from the session manager', async () => {
   const dir = tmp()
-  const sm = new EventEmitter()
+  const sm = installTurnDrivenRegistry(new EventEmitter())
   sm.listSessions = () => []
   const before = sm.eventNames().length
   const mgr = buildOrchestrationManager({
@@ -100,7 +101,7 @@ test('honors the CHROXY_ENABLE_ORCHESTRATION=1 env override', async () => {
   const prev = process.env.CHROXY_ENABLE_ORCHESTRATION
   process.env.CHROXY_ENABLE_ORCHESTRATION = '1'
   const dir = tmp()
-  const sm = new EventEmitter()
+  const sm = installTurnDrivenRegistry(new EventEmitter())
   sm.listSessions = () => []
   try {
     const mgr = buildOrchestrationManager({ sessionManager: sm, config: {}, chroxyDir: dir })

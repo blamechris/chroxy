@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { SdkSession } from '../src/sdk-session.js'
 import { EventEmitter } from 'node:events'
 import { TurnDriver } from '../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 /**
  * #8461 -- a requested Stop must leave no "Stopped" chip on claude-sdk, and is
@@ -162,7 +163,7 @@ describe('SdkSession result of a stopped turn is marked interrupted (#7072)', ()
   })
 
   it('a TurnDriver driving the session rejects a Stop answered with an aborted result', async () => {
-    const sm = new EventEmitter()
+    const sm = installTurnDrivenRegistry(new EventEmitter())
     sm.getSession = () => ({ session })
     for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
       session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))

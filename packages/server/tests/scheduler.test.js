@@ -19,6 +19,7 @@ import {
 import { validateCwdAllowed } from '../src/handler-utils.js'
 import { DEFAULT_PROVIDER } from '../src/providers.js'
 import { isSchedulerEnabled } from '../src/config.js'
+import { installTurnDrivenRegistry } from './helpers/turn-driven-registry.js'
 
 /**
  * #6865 — the headless scheduler engine. Covers the enable gate (off by default:
@@ -1676,6 +1677,7 @@ class FakeSessionManager extends EventEmitter {
    */
   constructor({ permissionRequest = null, providerType = undefined, defaultCwd = undefined, refuseModeChange = false, interruptEmitsStopped = false, stopAfterSend = false } = {}) {
     super()
+    installTurnDrivenRegistry(this)
     this.sessions = new Map()
     this.created = []
     this.destroyed = []

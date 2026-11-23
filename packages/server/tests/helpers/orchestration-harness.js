@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { OrchestrationManager } from '../../src/orchestration/orchestration-manager.js'
 import { RunLedger } from '../../src/orchestration/run-ledger.js'
 import { TurnDriver } from '../../src/orchestration/turn-driver.js'
+import { installTurnDrivenRegistry } from './turn-driven-registry.js'
 
 const KIND_RE = /kind "([a-z_]+)"/
 
@@ -73,6 +74,7 @@ class FakeSession extends EventEmitter {
 class FakeSM extends EventEmitter {
   constructor(decide) {
     super()
+    installTurnDrivenRegistry(this)
     this.setMaxListeners(0)
     this._decide = decide
     this._sessions = new Map()
