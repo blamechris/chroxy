@@ -222,7 +222,7 @@ export function needsReads(job) {
 
 const NEEDS_CHANGES = new RegExp(
   String.raw`\bneeds\s*(?:\.\s*${PRODUCER_JOB}|\[\s*(['"])${PRODUCER_JOB}\1\s*\])(?![\w-])`,
-  'g'
+  'gi'
 )
 
 /**
@@ -242,10 +242,10 @@ export function changesReferences(job) {
   const bad = []
   for (const m of text.matchAll(NEEDS_CHANGES)) {
     const tail = text.slice(m.index + m[0].length, m.index + m[0].length + 80)
-    const out = /^\.outputs\.([A-Za-z_][\w-]*)(?![\w-])/.exec(tail)
+    const out = /^\.outputs\.([A-Za-z_][\w-]*)(?![\w-])/i.exec(tail)
     if (out) {
       refs.push({ output: out[1], comparedToTrue: /^\s*==\s*'true'/.test(tail.slice(out[0].length)) })
-    } else if (!/^\.result(?![\w-])/.test(tail)) {
+    } else if (!/^\.result(?![\w-])/i.test(tail)) {
       bad.push(
         `reads needs.${PRODUCER_JOB}${tail.split('\n')[0].slice(0, 30)} — a form this guard cannot resolve to an output name; spell it needs.${PRODUCER_JOB}.outputs.<name>`
       )
@@ -419,209 +419,62 @@ export function producerIfIssues(producer, workflowText) {
   return issues
 }
 
-// ---- a consumer's `if:` must still depend on the filter output (#9151) -----
+// ---- a consumer's `if:` must be an allowlisted gate shape (#9151) ----------
 //
 // `needs.changes.outputs.<x> == 'true' || true` always runs the job (wasted CI)
 // and `... && false` never does (lost coverage); both used to pass because the
-// rule only asked that the output be NAMED and compared to 'true'. The `if:` is
-// therefore parsed as a GitHub expression (`||`, `&&`, `!`, parentheses,
-// comparisons, literals, function calls) and evaluated over a truth table: each
-// distinct comparison on `needs.changes.outputs` is a FILTER atom, every other
-// comparison or context read is an opaque atom, `always()` and `success()` are
-// true (a consumer's `needs` has passed whenever it can run), and a literal is
-// truthy or falsy as the Actions runner reads it (`'false'` is a non-empty
-// string, so `|| 'false'` is as good as `|| true`). If the result cannot change
-// when only the filter atoms change, the gate is defeated. Anything the parser
-// cannot read is reported as UNREADABLE, never accepted.
+// rule only asked that the output be NAMED and compared to 'true'. A first fix
+// evaluated the expression over a truth table, and review found it accepted a
+// long tail of gate-defeating spellings (`!F == 'true'` read with the wrong
+// precedence, `TRUE`/`NULL` in another case, `contains('a','a')`, `!cancelled()`,
+// correlated atoms, a mis-cased `NEEDS.changes`, ...). Deciding an arbitrary
+// GitHub expression is not what this guard is for, so it is STRUCTURAL: a
+// consumer's job-level `if:` must be, exactly, one of GATE_SHAPES, after (and
+// only after) stripping a trailing `# comment` (done by stripYamlComments), one
+// `${{ ... }}` wrapper around the whole value, and runs of whitespace.
+//
+// To allow a new shape, add a named entry to GATE_SHAPES in a reviewed change
+// and give it a cell below; nothing else decides what is a gate.
+//
+// KNOWN FALSE REJECTS (acceptable, and reported rather than passed): matching is
+// case-sensitive, so `== 'TRUE'` is rejected; a YAML-quoted whole value
+// (`if: "needs... == 'true'"`) is rejected; `&& github.event_name == ...`
+// combinations are rejected until a shape for them is added.
 
-const MAX_TRUTH_ATOMS = 12
-const FILTER_ATOM = /\bneeds\s*(?:\.\s*changes|\[\s*(['"])changes\1\s*\])\s*(?:\.\s*outputs|\[\s*(['"])outputs\2\s*\])/
+/** The only job-level `if:` shapes a consumer may use. Group 1 is the output name. */
+export const GATE_SHAPES = [
+  {
+    name: `needs.${PRODUCER_JOB}.outputs.<name> == 'true'`,
+    re: new RegExp(String.raw`^needs\.${PRODUCER_JOB}\.outputs\.([A-Za-z_][\w-]*)\s*==\s*'true'$`),
+  },
+]
 
-class UnreadableIf extends Error {}
-
-function tokenizeIf(src) {
-  const toks = []
-  let i = 0
-  const fail = (why) => {
-    throw new UnreadableIf(`${why} at '${src.slice(i, i + 20)}'`)
-  }
-  while (i < src.length) {
-    const c = src[i]
-    if (/\s/.test(c)) { i++; continue }
-    const two = src.slice(i, i + 2)
-    if (two === '||' || two === '&&') { toks.push({ t: two }); i += 2; continue }
-    if (['==', '!=', '<=', '>='].includes(two)) { toks.push({ t: 'cmp', op: two }); i += 2; continue }
-    if (c === '<' || c === '>') { toks.push({ t: 'cmp', op: c }); i++; continue }
-    if (c === '(' || c === ')' || c === '!') { toks.push({ t: c }); i++; continue }
-    if (c === "'") {
-      let j = i + 1
-      let v = ''
-      for (;;) {
-        if (j >= src.length) fail('unterminated string')
-        if (src[j] === "'") {
-          if (src[j + 1] === "'") { v += "'"; j += 2; continue }
-          break
-        }
-        v += src[j++]
-      }
-      toks.push({ t: 'lit', v, raw: src.slice(i, j + 1) })
-      i = j + 1
-      continue
-    }
-    const num = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?(?![\w.])/.exec(src.slice(i))
-    if (num) { toks.push({ t: 'lit', v: Number(num[0]), raw: num[0] }); i += num[0].length; continue }
-    if (/[A-Za-z_]/.test(c)) {
-      let j = i
-      for (;;) {
-        const ch = src[j]
-        if (ch !== undefined && /[\w.*-]/.test(ch)) { j++; continue }
-        if (ch === '[' || ch === '(') {
-          const close = ch === '[' ? ']' : ')'
-          let depth = 0
-          for (; j < src.length; j++) {
-            if (src[j] === "'") {
-              j++
-              while (j < src.length && !(src[j] === "'" && src[j + 1] !== "'")) j += src[j] === "'" ? 2 : 1
-              continue
-            }
-            if (src[j] === ch) depth++
-            else if (src[j] === close && --depth === 0) { j++; break }
-          }
-          if (depth !== 0) { i = j; fail(`unbalanced '${ch}'`) }
-          continue
-        }
-        break
-      }
-      const raw = src.slice(i, j)
-      const lit = { true: true, false: false, null: null }
-      if (Object.hasOwn(lit, raw)) toks.push({ t: 'lit', v: lit[raw], raw })
-      else toks.push({ t: 'ref', raw })
-      i = j
-      continue
-    }
-    fail(`unexpected '${c}'`)
-  }
-  return toks
-}
-
-const truthy = (v) => !(v === '' || v === 0 || v === null || Number.isNaN(v) || v === false)
-
-function parseIf(toks) {
-  let p = 0
-  const peek = () => toks[p]?.t
-  const atoms = new Map()
-  const atom = (text, filter) => {
-    const key = squash(text)
-    if (!atoms.has(key)) atoms.set(key, { filter, idx: atoms.size })
-    return { k: 'atom', key }
-  }
-  const operand = () => {
-    const tok = toks[p]
-    if (!tok) throw new UnreadableIf('expression ends where an operand is expected')
-    if (tok.t === '(') {
-      p++
-      const e = or()
-      if (peek() !== ')') throw new UnreadableIf("missing ')'")
-      p++
-      return { paren: e }
-    }
-    if (tok.t === 'lit' || tok.t === 'ref') { p++; return tok }
-    throw new UnreadableIf(`unexpected '${tok.t}' where an operand is expected`)
-  }
-  const primary = () => {
-    if (peek() === '!') { p++; return { k: 'not', x: primary() } }
-    const left = operand()
-    if (peek() === 'cmp') {
-      const { op } = toks[p++]
-      const right = operand()
-      const text = (o) => (o.paren ? '(…)' : o.raw)
-      if (left.paren || right.paren) throw new UnreadableIf('a comparison of a parenthesised expression')
-      if (left.t === 'lit' && right.t === 'lit') throw new UnreadableIf(`a comparison of two literals (${left.raw} ${op} ${right.raw})`)
-      const full = `${text(left)} ${op} ${text(right)}`
-      return atom(full, FILTER_ATOM.test(full))
-    }
-    if (left.paren) return left.paren
-    if (left.t === 'lit') return { k: 'lit', v: truthy(left.v) }
-    const fn = /^([A-Za-z_]\w*)\(/.exec(left.raw)?.[1]?.toLowerCase()
-    if (fn === 'always' || fn === 'success') return { k: 'lit', v: true }
-    return atom(left.raw, FILTER_ATOM.test(left.raw))
-  }
-  const and = () => {
-    let l = primary()
-    while (peek() === '&&') { p++; l = { k: 'and', a: l, b: primary() } }
-    return l
-  }
-  function or() {
-    let l = and()
-    while (peek() === '||') { p++; l = { k: 'or', a: l, b: and() } }
-    return l
-  }
-  const tree = or()
-  if (p < toks.length) throw new UnreadableIf(`unexpected '${toks[p].t}' after a complete expression`)
-  return { tree, atoms }
-}
-
-const evalIf = (n, env) => {
-  switch (n.k) {
-    case 'lit': return n.v
-    case 'atom': return env.get(n.key)
-    case 'not': return !evalIf(n.x, env)
-    case 'and': return evalIf(n.a, env) && evalIf(n.b, env)
-    default: return evalIf(n.a, env) || evalIf(n.b, env)
-  }
-}
+const quoteIf = (v) => (v.length > 160 ? `${v.slice(0, 160)}… (${v.length} chars)` : v)
 
 /**
- * What is wrong with a consumer's job-level `if:` expression — `[]` when it
- * still depends on a `needs.changes.outputs` comparison, otherwise a message
- * (defeated gate, or UNREADABLE).
+ * What is wrong with a consumer's job-level `if:` value — `[]` when, once
+ * normalised, it is exactly an allowlisted shape naming a declared output.
+ * `expr` is null when the job has no job-level `if:` (then nothing can skip it
+ * on the filter, which is reported too).
  *
- * @param {string} expr
+ * @param {string|null} expr
+ * @param {string[]} outputNames the `changes` job's declared outputs
  * @returns {string[]}
  */
-export function gateExpressionIssues(expr) {
-  let src = expr.trim().replace(/^[|>][+-]?\s*/, '')
-  if (/^"[\s\S]*"$/.test(src)) src = src.slice(1, -1)
-  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(src)
-  if (wrapped) src = wrapped[1]
-  let parsed
-  try {
-    if (src.includes('${{') || src.includes('}}')) throw new UnreadableIf("a '${{ }}' that does not wrap the whole expression")
-    parsed = parseIf(tokenizeIf(src))
-  } catch (e) {
-    if (!(e instanceof UnreadableIf)) throw e
-    return [`its if: (${squash(expr)}) is UNREADABLE to this guard (${e.message}), so it cannot tell whether the gate still depends on the filter — rewrite it in the plain \`needs.${PRODUCER_JOB}.outputs.<name> == 'true'\` form or extend gateExpressionIssues`]
+export function gateExpressionIssues(expr, outputNames) {
+  if (expr === null) {
+    return [`has no job-level if: — a job-level if: of an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) is the only thing that can skip it, so it runs on every change whatever the filter says`]
   }
-  const entries = [...parsed.atoms.entries()]
-  const filters = entries.filter(([, a]) => a.filter).map(([k]) => k)
-  const others = entries.filter(([, a]) => !a.filter).map(([k]) => k)
-  if (filters.length === 0) return [] // the job reads the filter elsewhere; its job-level if: is not a gate on it
-  if (entries.length > MAX_TRUTH_ATOMS) {
-    return [`its if: (${squash(expr)}) has ${entries.length} distinct conditions (more than ${MAX_TRUTH_ATOMS}) — UNREADABLE to this guard, simplify it or raise MAX_TRUTH_ATOMS`]
+  let v = expr.trim().replace(/^[|>][+-]?\s*/, '')
+  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(v)
+  if (wrapped) v = wrapped[1]
+  v = squash(v)
+  for (const shape of GATE_SHAPES) {
+    const m = shape.re.exec(v)
+    if (!m) continue
+    return outputNames.includes(m[1]) ? [] : [`its if: names output '${m[1]}', which '${PRODUCER_JOB}' does not declare`]
   }
-  let dependsOnFilter = false
-  let sawTrue = false
-  let sawFalse = false
-  for (let o = 0; o < 1 << others.length; o++) {
-    const results = new Set()
-    for (let f = 0; f < 1 << filters.length; f++) {
-      const env = new Map()
-      others.forEach((k, i) => env.set(k, Boolean((o >> i) & 1)))
-      filters.forEach((k, i) => env.set(k, Boolean((f >> i) & 1)))
-      const r = Boolean(evalIf(parsed.tree, env))
-      results.add(r)
-      if (r) sawTrue = true
-      else sawFalse = true
-    }
-    if (results.size > 1) dependsOnFilter = true
-  }
-  if (dependsOnFilter) return []
-  const what = !sawFalse
-    ? 'is true whatever the filter says, so the job ALWAYS runs and the path filter saves nothing'
-    : !sawTrue
-      ? 'is false whatever the filter says, so the job NEVER runs and its coverage is silently lost'
-      : 'does not change with the filter output, so the path filter does not gate the job'
-  return [`its if: (${squash(expr)}) ${what}`]
+  return [`its if: (${quoteIf(squash(expr))}) is not an allowlisted gate shape (${GATE_SHAPES.map((g) => g.name).join(' | ')}) — it may defeat the filter (always runs, never runs) or only look like it gates; if it is a legitimate new shape, add it to GATE_SHAPES with review`]
 }
 
 const stepLabel = (step, idx) =>
@@ -825,10 +678,7 @@ export function pathsFilterWiring(
         issue('reference', `job '${job.id}' reads needs.${PRODUCER_JOB}.outputs but does not list '${PRODUCER_JOB}' in its own needs: (${direct.join(', ') || 'none'}) — the needs context holds DIRECT dependencies only, so every reference is empty and the job never runs`)
       )
     }
-    const gateExpr = jobIf(stripYamlComments(job.body))
-    if (gateExpr !== null) {
-      for (const text of gateExpressionIssues(gateExpr)) issues.push(issue('gate', `job '${job.id}': ${text}`))
-    }
+    for (const text of gateExpressionIssues(jobIf(stripYamlComments(job.body)), outputNames)) issues.push(issue('gate', `job '${job.id}': ${text}`))
     checkLoud(job, 'a real failure would not fail the job')
   }
   for (const key of swallowExemptions.keys()) {
@@ -957,7 +807,7 @@ describe(`${WORKFLOW}: every path-filtered job is wired to a real '${PRODUCER_JO
     assertNone(report, 'reference')
   })
 
-  it("every consumer's job-level if: still depends on the filter output (no || true, && false, ...), and is one this guard can read (#9151)", () => {
+  it("every consumer's job-level if: is exactly an allowlisted gate shape naming a declared output (#9151)", () => {
     assertNone(report, 'gate')
   })
 
@@ -1459,72 +1309,95 @@ describe('pathsFilterWiring reports each defect it exists to find, on a syntheti
   })
 
 
-  // ---- #9151: an if: that defeats the gate -----------------------------------
-  describe('#9151: a consumer if: that ignores the filter output is reported', () => {
+  // ---- #9151: an if: that is not an allowlisted gate shape ------------------
+  describe('#9151: a consumer if: that is not exactly the allowlisted gate shape is reported', () => {
     const withIf = (expr) => swap(FIXTURE, "    if: needs.changes.outputs.alpha == 'true'\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@abc\n      - name: Check a", `    if: ${expr}\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@abc\n      - name: Check a`)
     const F = "needs.changes.outputs.alpha == 'true'"
-    const ALWAYS = /job 'job-a': its if: \(.*\) is true whatever the filter says, so the job ALWAYS runs/
-    const NEVER = /job 'job-a': its if: \(.*\) is false whatever the filter says, so the job NEVER runs/
+    const NOT_SHAPE = /^job 'job-a': its if: \(.*\) is not an allowlisted gate shape \(needs\.changes\.outputs\.<name> == 'true'\)/
 
-    for (const [name, expr, re] of [
-      ['|| true', `${F} || true`, ALWAYS],
-      ['|| true with a trailing comment', `${F} || true  # keep running`, ALWAYS],
-      ['|| always()', `${F} || always()`, ALWAYS],
-      ['|| always() with a trailing comment', `${F} || always()  # even when cancelled`, ALWAYS],
-      ['|| success()', `${F} || success()`, ALWAYS],
-      ["|| 'true'", `${F} || 'true'`, ALWAYS],
-      ["|| 'false' (a non-empty string is truthy)", `${F} || 'false'`, ALWAYS],
-      ['|| 1', `${F} || 1`, ALWAYS],
-      ['parenthesised || true', `(${F}) || (true)`, ALWAYS],
-      ['wrapped in ${{ }}', `\${{ ${F} || true }}`, ALWAYS],
-      ['a leading true ||', `true || ${F}`, ALWAYS],
-      ['|| !false', `${F} || !false`, ALWAYS],
-      ['a tautology F || !F', `${F} || !(${F})`, ALWAYS],
-      ['&& false', `${F} && false`, NEVER],
-      ['&& false with a trailing comment', `${F} && false  # disabled for now`, NEVER],
-      ["&& ''", `${F} && ''`, NEVER],
-      ['&& 0', `${F} && 0`, NEVER],
-      ['&& null', `${F} && null`, NEVER],
-      ['&& !always()', `${F} && !always()`, NEVER],
-      ['a contradiction F && !F', `${F} && !(${F})`, NEVER],
-      ['a filter OR-ed with an unrelated condition that swamps it', `(${F} && false) || github.event_name == 'push'`, /does not change with the filter output, so the path filter does not gate the job/],
+    for (const [name, expr] of [
+      ['|| true', `${F} || true`],
+      ['|| true with a trailing comment', `${F} || true  # keep running`],
+      ['|| always()', `${F} || always()`],
+      ['|| always() with a trailing comment', `${F} || always()  # even when cancelled`],
+      ['|| success()', `${F} || success()`],
+      ["|| 'true'", `${F} || 'true'`],
+      ["|| 'false'", `${F} || 'false'`],
+      ['|| 1', `${F} || 1`],
+      ['parenthesised || true', `(${F}) || (true)`],
+      ['wrapped in ${{ }} || true', `\${{ ${F} || true }}`],
+      ['a leading true ||', `true || ${F}`],
+      ['|| !false', `${F} || !false`],
+      ['a tautology F || !F', `${F} || !(${F})`],
+      ['&& false', `${F} && false`],
+      ['&& false with a trailing comment', `${F} && false  # disabled for now`],
+      ["&& ''", `${F} && ''`],
+      ['&& 0', `${F} && 0`],
+      ['&& null', `${F} && null`],
+      ['&& !always()', `${F} && !always()`],
+      ['a contradiction F && !F', `${F} && !(${F})`],
+      ['(F && false) || an unrelated condition', `(${F} && false) || github.event_name == 'push'`],
+      ['! binding tighter than ==', "!needs.changes.outputs.alpha == 'true'"],
+      ['|| TRUE', `${F} || TRUE`],
+      ['&& FALSE', `${F} && FALSE`],
+      ['|| True', `${F} || True`],
+      ['|| NULL', `${F} || NULL`],
+      ["|| contains('a','a')", `${F} || contains('a','a')`],
+      ["|| fromJSON('true')", `${F} || fromJSON('true')`],
+      ['|| !cancelled()', `${F} || !cancelled()`],
+      ['|| !failure()', `${F} || !failure()`],
+      ["|| x == 'push' || x != 'push'", `${F} || github.event_name == 'push' || github.event_name != 'push'`],
+      ["|| the same output != 'true'", `${F} || needs.changes.outputs.alpha != 'true'`],
+      ["a mis-cased NEEDS with || true", `NEEDS.changes.outputs.alpha == 'true' || true`],
+      ['a mis-cased CHANGES', "needs.CHANGES.outputs.alpha == 'true'"],
+      ["== 'TRUE' (a false reject, by design)", "needs.changes.outputs.alpha == 'TRUE'"],
+      ['a real-looking combination not on the allowlist', `${F} && github.event_name == 'pull_request'`],
+      ['an unbalanced expression', `(${F}`],
+      ['a bare output with no comparison', 'needs.changes.outputs.alpha'],
     ]) {
       it(`reports ${name}`, () => {
-        assertReports(run(withIf(expr)), 'gate', re, name)
+        assertReports(run(withIf(expr)), 'gate', NOT_SHAPE, name)
       })
     }
 
-    it('accepts the plain form, ${{ }} wrapping, a comment, and a real combination (controls)', () => {
+    it('reports a 20000-deep nesting instead of throwing', () => {
+      const deep = `${'('.repeat(20000)}${F}${')'.repeat(20000)}`
+      const r = run(withIf(deep))
+      assertReports(r, 'gate', /not an allowlisted gate shape/, 'deep')
+      assert.ok(textsOf(r, 'gate').every((t) => t.length < 1000), 'the quoted value must be truncated')
+    })
+
+    it('reports an allowlisted shape naming an output the changes job does not declare', () => {
+      assertReports(run(withIf("needs.changes.outputs.nope == 'true'")), 'gate', /names output 'nope', which 'changes' does not declare/, 'undeclared')
+    })
+
+    it('accepts exactly the plain shape, with a trailing comment, a whole-value ${{ }}, or extra internal whitespace (controls)', () => {
       for (const expr of [
         F,
+        `${F}  # why`,
         `\${{ ${F} }}`,
-        `${F}  # comment with || true in it`,
-        `${F} && github.event_name == 'pull_request'`,
-        `(${F} || github.event_name == 'push') && always()`,
-        `always() && ${F}`,
-        `!(${F})`,
+        `\${{${F}}}  # both`,
+        "needs.changes.outputs.alpha   ==   'true'",
+        "needs.changes.outputs.alpha=='true'",
       ]) {
         assert.deepEqual(textsOf(run(withIf(expr)), 'gate'), [], expr)
       }
     })
 
-    it('reports an expression it cannot read as UNREADABLE instead of accepting it', () => {
-      for (const expr of [
-        `${F} || contains(github.ref, '(')) `,
-        `${F} || 1 == 1`,
-        `${F} | true`,
-        `${F} || "x"`,
-        `(${F}`,
-        `${F} ||`,
-        `\${{ ${F} }} || true`,
-      ]) {
-        assertReports(run(withIf(expr)), 'gate', /job 'job-a': its if: \(.*\) is UNREADABLE to this guard/, expr)
-      }
+    it('classifies a mis-cased needs.changes reader as a consumer (so it is checked, not invisible)', () => {
+      const r = run(withIf("NEEDS.changes.outputs.alpha == 'true' || true"))
+      assert.ok(r.consumers.some((c) => c.id === 'job-a'), 'job-a must still be a consumer')
     })
 
-    it('reports too many distinct conditions as UNREADABLE, not as fine', () => {
-      const many = Array.from({ length: 13 }, (_, i) => `github.ref == 'r${i}'`).join(' || ')
-      assertReports(run(withIf(`${F} && (${many})`)), 'gate', /has 14 distinct conditions .* UNREADABLE/, 'too many')
+    it('reports a consumer with no job-level if: (nothing can skip it on the filter)', () => {
+      const noIf = swap(FIXTURE, "    if: needs.changes.outputs.beta == 'true'\n", '')
+      const withStepIf = swap(noIf, '      - name: Check b\n', "      - name: Check b\n        if: needs.changes.outputs.beta == 'true'\n")
+      assertReports(run(withStepIf), 'gate', /^job 'job-b': has no job-level if:/, 'no job-level if')
+    })
+
+    it('reports a consumer whose job-level if: has no filter comparison', () => {
+      const text = swap(withIf('always()'), '      - name: Check a\n', "      - name: Check a\n        if: needs.changes.outputs.alpha == 'true'\n")
+      assertReports(run(text), 'gate', /^job 'job-a': its if: \(always\(\)\) is not an allowlisted gate shape/, 'always()')
     })
   })
 
