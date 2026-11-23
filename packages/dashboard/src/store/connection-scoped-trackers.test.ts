@@ -164,12 +164,7 @@ const TRACKERS_EXPECTED = [
  */
 const DISCONNECT_ONLY: Record<string, string> = {
   clearHandshakeTimer: 'the auth handshake timer of the socket being closed; a switch has nothing armed to cancel once disconnect() ran',
-  clearPendingTrustGrants: 'pending request/ack correlations on the dead socket; socket teardown, not retained across a switch',
-  clearPendingModelReverts: 'pending request/ack correlations on the dead socket; socket teardown',
-  clearPendingPermissionModeReverts: 'pending request/ack correlations on the dead socket; socket teardown',
-  clearPendingThinkingLevelReverts: 'pending request/ack correlations on the dead socket; socket teardown',
-  clearGitOneshotCallbacks: 'fast-rejects git one-shot replies that can never arrive on the closed socket (writes store callbacks, so it takes set/get)',
-  clearPendingMcpServerOps: 'pending add/remove MCP server correlations on the dead socket; socket teardown',
+  clearSocketScopedCorrelations: 'the shared socket-scoped correlation teardown (#9218: evaluator/summarize/trust/revert maps, git one-shots, scheduler, MCP ops, in-flight markers) also run by onclose/onerror/connect(); socket teardown, not retained across a switch',
   clearPermissionSplits: 'permission-boundary split tracking for the closed socket; socket teardown',
   resetReplayFlags: 'the mid-replay flags of the closed socket; subsumed by the helper\'s cursor/baseline reset on a switch (see _resetSessionMemory)',
   clearAllSessionPendingTrustGrants: 'a pure transform of store state (sessionStates) written into disconnect()\'s own set(), not a module-level tracker; a switch empties sessionStates wholesale',
