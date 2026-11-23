@@ -894,6 +894,86 @@ function abortTranscriptFetchesOnSocketDrop(
   }
 }
 
+type SocketCorrelationEndReason = 'closed' | 'errored' | 'disconnected' | 'replaced';
+
+// The user-visible rejection strings, one row per way a socket's life ends. A
+// new reason is a new row here, not a new inline literal in a handler.
+const SOCKET_CORRELATION_END_MESSAGES: Record<SocketCorrelationEndReason, { evaluator: string; summarize: string }> = {
+  closed: {
+    evaluator: 'Connection closed before evaluator response arrived',
+    summarize: 'Connection closed before the summary arrived',
+  },
+  errored: {
+    evaluator: 'Connection errored before evaluator response arrived',
+    summarize: 'Connection errored before the summary arrived',
+  },
+  disconnected: {
+    evaluator: 'Disconnected before evaluator response arrived',
+    summarize: 'Disconnected before the summary arrived',
+  },
+  replaced: {
+    evaluator: 'Connection replaced before evaluator response arrived',
+    summarize: 'Connection replaced before the summary arrived',
+  },
+};
+
+/**
+ * #9218 — the ONE definition of "this socket is gone, so every request that was
+ * waiting on a reply from it can never be answered". Run by `socket.onclose`,
+ * `socket.onerror`, `disconnect()` AND `connect()` when it replaces a live
+ * socket: `retireSocket` nulls `onclose`/`onerror` before closing (#8485), so
+ * without the `connect()` call a retarget (or any direct reconnect) left pending
+ * requests to outlive their connection — spinners hanging until their timeouts,
+ * stale correlations able to match a reply on the NEW socket.
+ *
+ * Add a new socket-scoped correlation (a pending-request map, a one-shot
+ * callback, an in-flight spinner marker) HERE, not in one of the four callers.
+ *
+ * What belongs here is anything whose reply can only arrive on the socket that
+ * just ended. What does NOT belong here, and stays in each caller, is the
+ * caller's own lifecycle: the heartbeat / handshake timer / daemon-update
+ * watchdog, `socket: null`, the transient per-session sweep, reconnect
+ * scheduling, and `disconnect()`'s full connection-scope reset. Persisted data
+ * (savedConnection, server registry, replay CURSORS) is never touched here.
+ */
+function clearSocketScopedCorrelations(
+  set: (partial: Partial<ConnectionState> | ((s: ConnectionState) => Partial<ConnectionState>)) => void,
+  get: () => ConnectionState,
+  reason: SocketCorrelationEndReason,
+): void {
+  const messages = SOCKET_CORRELATION_END_MESSAGES[reason];
+  // #7456 — the replay window and its live-arrival ledger are per-CONNECTION;
+  // cursors are deliberately KEPT (they make the reconnect a delta replay).
+  resetReplayReconcile();
+  // #3068 / #5547: awaiters get a fast error instead of waiting out a timeout.
+  rejectAllEvaluatorRequests(messages.evaluator);
+  rejectAllSummarizeRequests(messages.summarize);
+  // #3587: a stale toast action would call grantCommunitySkillTrust on a dead
+  // socket; the revert maps likewise belong to the dead socket's replies.
+  clearPendingTrustGrants();
+  clearPendingModelReverts();
+  clearPendingPermissionModeReverts();
+  clearPendingThinkingLevelReverts();
+  // #6954 / #6871 / #6999: git one-shots, scheduler requests and MCP server ops
+  // fast-reject so their busy flags clear now, not after the full watchdog.
+  clearGitOneshotCallbacks(set, get);
+  failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
+  clearPendingMcpServerOps();
+  abortTranscriptFetchesOnSocketDrop(set, get);
+  // #3588 / #3605: the per-session pendingTrustGrants arrays.
+  set({ sessionStates: clearAllSessionPendingTrustGrants(get().sessionStates) });
+  // #7586: every in-flight request marker (the *Loading flags, restore retries,
+  // PR/CI markers, ...). Stale snapshots and the `*Results` records are KEPT.
+  const staleMarkers = staleInFlightMarkers(get);
+  if (Object.keys(staleMarkers).length > 0) set(staleMarkers);
+  // #8860: a history page in flight settles into an error.
+  const settledHistories = settleHistoryViewsOnDropPatch(get);
+  if (Object.keys(settledHistories).length > 0) set(settledHistories);
+  // #8407: the destroy-in-flight markers are cleared above, so their safety
+  // timers have nothing left to guard.
+  cancelAllEnvironmentDestroyTimers();
+}
+
 /**
  * #7570 — the context-SWITCH teardown: everything that must happen, in this
  * order, before the tab is pointed at a DIFFERENT daemon (`serverId`), or at
@@ -3046,6 +3126,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // `auth_ok`, so also retire the live socket — one still mid-handshake is not
     // in the store yet but must not deliver into this connection.
     const { socket: existing } = get();
+    // #9218 — `retireSocket` detaches onclose/onerror, so a store `socket` that is
+    // replaced here never runs its own teardown. It is the only socket that can
+    // carry correlations (every request SEND is gated on it; a mid-handshake
+    // `liveSocket` is not yet in the store), so clear them now, BEFORE the new
+    // socket is built. A null `existing` (first connect, a retry after onclose /
+    // onerror already ran, after disconnect()) clears nothing: anything armed
+    // while the store socket is null belongs to the NEXT connection. That is why
+    // this gates on the store `socket`, not on `liveSocket` or on every connect:
+    // git one-shot callbacks are ARMED independently of the socket (before the
+    // send), so a callback armed while disconnected must survive the retry's
+    // connect().
+    if (existing) clearSocketScopedCorrelations(set, get, 'replaced');
     retireSocket(existing);
     if (liveSocket !== existing) retireSocket(liveSocket);
     liveSocket = null;
@@ -3449,79 +3541,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // CURRENT attempt's timer. (Idempotent if the handshake already completed.)
       clearHandshakeTimer();
 
-      // #7456 — the replay window and its live-arrival ledger are
-      // per-CONNECTION state, like the rebuild baseline: release them on the
-      // transport drop rather than waiting for the next `auth_ok`, which for a
-      // tab left open on a dead tunnel may never arrive. Load-bearing since
-      // #7455 made the window a refcount — a `history_replay_start` with no
-      // matching `_end` would otherwise strand a +1 and the window would never
-      // close again for that session. Cursors are deliberately KEPT (they are
-      // what makes the reconnect a delta replay, #5555.3).
-      resetReplayReconcile();
-
-      // #3068: any in-flight evaluator request is now a guaranteed no-op —
-      // reject them so awaiters get a fast error instead of waiting 60s for
-      // the timeout to fire.
-      rejectAllEvaluatorRequests('Connection closed before evaluator response arrived');
-      // #5547: a dropped socket means any in-flight summarize_session result
-      // will never arrive — reject so an awaiting create-session flow surfaces
-      // an error instead of hanging.
-      rejectAllSummarizeRequests('Connection closed before the summary arrived');
-      // #3587: drop any pending skill_trust_grant correlations — the
-      // matching error (if any) will arrive on a different socket (or
-      // never), and a stale toast action would call grantCommunitySkillTrust
-      // against a closed socket.
-      clearPendingTrustGrants();
-      clearPendingModelReverts();
-      clearPendingPermissionModeReverts();
-      clearPendingThinkingLevelReverts();
-      // #6954: a dropped socket means any in-flight git one-shot reply
-      // (stage/unstage, commit, create-PR) will never arrive — fast-reject
-      // the still-armed callback so GitPanel's busy flag clears immediately
-      // instead of spinning for up to the full 30s client-side timeout.
-      clearGitOneshotCallbacks(set, get);
-      // #6871 review (S1): same reasoning for the scheduler requests — a dropped
-      // socket means the snapshot/mutation reply can never arrive, so clear the
-      // Refresh spinner and release every pending mutation now rather than after
-      // the full watchdog window.
-      failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
-      // #6999: same fast-reject for any in-flight add_mcp_server /
-      // remove_mcp_server — a dropped socket means the daemon can never reply,
-      // so the add-form / remove-button spinner clears immediately instead of
-      // waiting out MCP_SERVER_OP_TIMEOUT_MS.
-      clearPendingMcpServerOps();
-      abortTranscriptFetchesOnSocketDrop(set, get);
-      // #3605: also clear the per-session pendingTrustGrants arrays
-      // (added in #3588). disconnect() handles user-initiated closes, but
-      // an unexpected drop here would otherwise leave the SkillsPanel
-      // Trust button stuck across an auto-reconnect.
-      const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
+      // #9218 — socket-scoped correlations (pending requests, one-shot
+      // callbacks, in-flight markers, replay window) end with the socket; one
+      // helper shared with onerror / disconnect() / connect()'s replacement.
+      clearSocketScopedCorrelations(set, get, 'closed');
 
       const wasConnected = get().connectionPhase === 'connected' || socketCtx.authReceived === true;
-      set({ socket: null, sessionStates: cleanedSessionStates });
+      set({ socket: null });
 
-      // #7586: every in-flight request marker — cancel_activity, the reindex /
-      // relay re-run / container / BYOK / host prune / simulator / emulator / WSL
-      // actions, restore retries, orchestration detail + pending actions, the
-      // Control Room survey *Loading flags (#6153), the session PR/CI request
-      // markers and their auto-pull window (#7344 / #7430) — is socket-scoped: the
-      // ack/failure that would clear it can never arrive on the dead socket. ONE
-      // roster (`createEmptyInFlightMarkers()`), shared with `disconnect()` and the
-      // two full-reset sites, so the four cannot drift. Stale snapshots are KEPT
-      // (the "generated Nm ago" line signals staleness; clearing would flash
-      // empty), and so are the `*Results` records beside each marker.
-      const staleMarkers = staleInFlightMarkers(get);
-      if (Object.keys(staleMarkers).length > 0) {
-        set(staleMarkers);
-      }
-      // #8860: a history page in flight on the dead socket settles into an error.
-      const settledHistories = settleHistoryViewsOnDropPatch(get);
-      if (Object.keys(settledHistories).length > 0) {
-        set(settledHistories);
-      }
-      // #8407: a transport drop clears the destroy-in-flight markers above, so
-      // their safety timers have nothing left to guard.
-      cancelAllEnvironmentDestroyTimers();
       // #8331: the daily-daemon update banner is per connection; a reply to a
       // Restart now / Postpone can never arrive on the dead socket either.
       clearDaemonUpdateWatchdog();
@@ -3601,37 +3628,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // dedupe would no-op the second one, but clearing keeps it tidy).
       clearHandshakeTimer();
 
-      // #7456 — the replay window and its live-arrival ledger are
-      // per-CONNECTION state, like the rebuild baseline: release them on the
-      // transport drop rather than waiting for the next `auth_ok`, which for a
-      // tab left open on a dead tunnel may never arrive. Load-bearing since
-      // #7455 made the window a refcount — a `history_replay_start` with no
-      // matching `_end` would otherwise strand a +1 and the window would never
-      // close again for that session. Cursors are deliberately KEPT (they are
-      // what makes the reconnect a delta replay, #5555.3).
-      resetReplayReconcile();
+      // #9218 — same shared teardown as onclose: an errored socket's pending
+      // requests (and #3605's trust-grant correlations) can never be answered.
+      clearSocketScopedCorrelations(set, get, 'errored');
 
-      // #3605: an unexpected error means any in-flight skill_trust_grant
-      // request will never be acked. Clear both the Map-based correlation
-      // (#3587) and the per-session arrays (#3588) so the SkillsPanel
-      // Trust button doesn't hang across the reconnect.
-      rejectAllEvaluatorRequests('Connection errored before evaluator response arrived');
-      rejectAllSummarizeRequests('Connection errored before the summary arrived');
-      clearPendingTrustGrants();
-      clearPendingModelReverts();
-      clearPendingPermissionModeReverts();
-      clearPendingThinkingLevelReverts();
-      // #6954: same fast-reject as onclose above — an errored socket means
-      // any in-flight git one-shot reply will never arrive.
-      clearGitOneshotCallbacks(set, get);
-      // #6871 review (S1): same fast-reject for the scheduler requests.
-      failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
-      // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
-      clearPendingMcpServerOps();
-      abortTranscriptFetchesOnSocketDrop(set, get);
-      const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
-
-      set({ socket: null, sessionStates: cleanedSessionStates });
+      set({ socket: null });
 
       // #3624: auto-reconnect on unexpected WS error (skip if user
       // explicitly disconnected). scheduleReconnect's per-socket
@@ -3654,27 +3655,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // #5721 (item 2) — user-initiated disconnect: cancel any armed handshake
     // timer so it can't fire (and schedule a reconnect) after an explicit close.
     clearHandshakeTimer();
-    // #3068: same as the onclose handler — fail any pending evaluator
-    // requests fast instead of waiting on the 60s timeout. We do this both
-    // here (user-initiated) and in onclose (transport drop) because we null
-    // out socket.onclose below to suppress auto-reconnect.
-    rejectAllEvaluatorRequests('Disconnected before evaluator response arrived');
-    rejectAllSummarizeRequests('Disconnected before the summary arrived');
-    // #3587: paired with rejectAllEvaluatorRequests — clear any pending
-    // skill_trust_grant correlations so a stale toast button can't fire
-    // against the disconnected socket.
-    clearPendingTrustGrants();
-    clearPendingModelReverts();
+    // #9218 — the shared socket-scoped correlation teardown (we null
+    // socket.onclose below to suppress auto-reconnect, so onclose's run never
+    // happens on a user-initiated close).
+    clearSocketScopedCorrelations(set, get, 'disconnected');
     clearDaemonUpdateWatchdog(); // #8331
-    clearPendingPermissionModeReverts();
-    clearPendingThinkingLevelReverts();
-    // #6954: same fast-reject as onclose/onerror — an explicit disconnect
-    // means any in-flight git one-shot reply will never arrive on this socket.
-    clearGitOneshotCallbacks(set, get);
-    // #6871 review (S1): same fast-reject for the scheduler requests.
-    failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
-    // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
-    clearPendingMcpServerOps();
     // #8485: null ALL the handlers (not just onclose) and also retire a socket
     // that never reached auth_ok — it is `liveSocket`, not the store's `socket`.
     const { socket } = get();

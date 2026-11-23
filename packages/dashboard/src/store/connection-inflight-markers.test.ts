@@ -352,9 +352,18 @@ describe('#7586 the roster is the ONLY place a marker is added', () => {
       'createEmptyInFlightMarkers() (utils.ts) instead — that is what disconnect() and both full-reset ' +
       'sites take, and a hand-copy here is how a user Disconnect left ~12 markers stuck (#7586).',
     ).toEqual([])
+    // #9218: the sweep now lives in the ONE shared teardown that onclose, onerror,
+    // disconnect() and connect()'s replacement all run.
     expect(
-      stripComments(oncloseBody).includes('staleInFlightMarkers('),
-      'onclose no longer sweeps the roster',
+      stripComments(oncloseBody).includes('clearSocketScopedCorrelations('),
+      'onclose no longer runs the shared socket-correlation teardown',
+    ).toBe(true)
+    const helperStart = connectionSrc.indexOf('function clearSocketScopedCorrelations(')
+    const helperBody = connectionSrc.slice(helperStart, connectionSrc.indexOf('\n}\n', helperStart))
+    expect(helperStart > -1 && helperBody.length > 200, 'shared teardown helper not found').toBe(true)
+    expect(
+      stripComments(helperBody).includes('staleInFlightMarkers('),
+      'the shared teardown no longer sweeps the roster',
     ).toBe(true)
   })
 

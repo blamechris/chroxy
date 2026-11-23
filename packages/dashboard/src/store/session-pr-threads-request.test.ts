@@ -130,7 +130,11 @@ describe('#7430 — requestSessionPrThreads', () => {
     expect(start, 'connection.ts should define socket.onclose').toBeGreaterThan(-1)
     const region = src.slice(start, src.indexOf('socket.onerror', start))
     expect(region.length).toBeGreaterThan(0)
-    expect(region.includes('staleInFlightMarkers(get)')).toBe(true)
+    // #9218: the sweep lives in the shared teardown helper that onclose runs.
+    expect(region.includes('clearSocketScopedCorrelations(')).toBe(true)
+    const helperStart = src.indexOf('function clearSocketScopedCorrelations(')
+    const helperBody = src.slice(helperStart, src.indexOf('\n}\n', helperStart))
+    expect(helperStart > -1 && helperBody.includes('staleInFlightMarkers(get)')).toBe(true)
   })
 
   it('positive control: the onclose slice does NOT reach the whole file', () => {
