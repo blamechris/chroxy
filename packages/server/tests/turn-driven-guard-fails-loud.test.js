@@ -142,6 +142,6 @@ describe('the mailbox wake refuses a driven session (#9184)', () => {
     assert.equal(res.body.injected, false)
     assert.equal(res.body.reason, 'orchestrated')
     assert.equal(session.writes.length, 0, 'nothing typed into the driven session')
-    assert.equal(mgr.getMailboxEvents?.().at(-1)?.outcome ?? 'orchestrated', 'orchestrated')
+    assert.equal(mgr.getMailboxEvents()[0].outcome, 'orchestrated', 'the refusal is recorded (newest first)')
   })
 })

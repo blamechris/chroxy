@@ -238,9 +238,11 @@ function injectWakeup(server, to, unreadCount) {
   if (!session) return 'no-session'
   // #9184: refuse into a session a TurnDriver occupies — same interleaving hazard
   // as a CI wake (#8327), and the session is idle BETWEEN the driver's turns, so
-  // the `isRunning` gate in wakeSession does not catch it. Dropping is safe here
-  // (unlike a lost CI result): the mail stays unread in the mailbox and the
-  // wakeup is only a nudge; the outcome is recorded in the Control Room event ring.
+  // the `isRunning` gate in wakeSession does not catch it.
+  // The wake is DROPPED, not deferred: the mail stays unread in the mailbox, but
+  // the agent is not nudged until the next ping or a self-initiated receive_next.
+  // Deferral is a follow-up (follow-up issue), as for the CI wake. The outcome is
+  // recorded in the Control Room event ring.
   // Not routed through daemonTurnRefusal: its other refusals (budget, user Stop,
   // wake cap) are deliberately not applied to mailbox wakes (#8326).
   if (server.sessionManager.isAgentCommIdTurnDriven(to)) return 'orchestrated'

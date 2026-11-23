@@ -4,6 +4,9 @@
  * SessionManager.markTurnDriven / releaseTurnDriven / isTurnDriven (a per-session
  * set of owners; driven until every owner released) rather than no-op stubs, so
  * a test can still observe occupancy through the double.
+ *
+ * Unlike the real manager it does NOT ignore unknown sessions (mark records any
+ * id) and does NOT clear a session's owners when the session is destroyed.
  */
 export function installTurnDrivenRegistry(sm) {
   const driven = new Map()
