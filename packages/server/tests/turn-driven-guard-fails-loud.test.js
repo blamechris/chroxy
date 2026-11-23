@@ -59,8 +59,8 @@ describe('TurnDriver requires the turn-driven registry (#9184)', () => {
   })
 })
 
-describe('a refused CI wake is dropped, visibly (#9184)', () => {
-  it('logs the refusal reason, still notifies the user, and never retries after release', async () => {
+describe('a refused CI wake is visible, and not delivered by a watcher that is not started (#9184, #9301)', () => {
+  it('logs the refusal reason, still notifies the user, and delivers nothing after release without a started watcher', async () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 2, stateFilePath: tmpPath('state') })
     const sent = []
     const session = Object.assign(new EventEmitter(), { sendMessage: (t) => sent.push(t), interrupt() {} })
@@ -86,10 +86,11 @@ describe('a refused CI wake is dropped, visibly (#9184)', () => {
       assert.deepEqual(sent, ['go'], 'only the driver\'s own prompt reached the session')
       assert.equal(pushes.length, 1, 'the user is still notified')
       assert.ok(logs.some((m) => /wake: orchestrated/.test(m)), 'the drop is logged with its reason')
-      // Release; nothing re-delivers the dropped wake (documented drop, no deferral).
+      // Release; this watcher was never start()ed, so it is not subscribed to
+      // releases (deferred delivery is covered in deferred-wake-after-release.test.js).
       driver.dispose()
       await new Promise((r) => setImmediate(r))
-      assert.deepEqual(sent, ['go'], 'dropped, not deferred')
+      assert.deepEqual(sent, ['go'], 'nothing delivered')
     } finally { driver.dispose() }
   })
 })
