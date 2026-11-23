@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { parse as acornParse } from 'acorn'
 import { harnessVerdict, SMOKE_MIN_CASES, smokeMinCases, requireIdeFrom } from './helpers/harness-floor.mjs'
 
 // Pure verdict fixtures only: this file never imports or runs the browser harness.
@@ -107,6 +108,114 @@ describe('smoke-test mode-aware verdict (#7657, #8435)', () => {
   })
 })
 
+// Structural check (#9142): `requireIdeFrom(process.env)` must be the SOLE decider of
+// strict mode in smoke-test.mjs. Parses the source with acorn rather than matching its
+// spelling, so an appended `&& ...`, a bracket read or any operator cannot slip past.
+// Returns a short list of problems (empty = wired correctly); throws on unparseable source.
+const FLAG = 'SMOKE_REQUIRE_IDE'
+const MODE = 'requireIde'
+
+function walk(node, visit) {
+  if (!node || typeof node.type !== 'string') return
+  visit(node)
+  for (const key of Object.keys(node)) {
+    const child = node[key]
+    if (Array.isArray(child)) child.forEach(c => walk(c, visit))
+    else if (child && typeof child.type === 'string') walk(child, visit)
+  }
+}
+
+function patternNames(pattern, out = []) {
+  if (!pattern) return out
+  if (pattern.type === 'Identifier') out.push(pattern.name)
+  else if (pattern.type === 'ObjectPattern') pattern.properties.forEach(p => patternNames(p.value || p.argument, out))
+  else if (pattern.type === 'ArrayPattern') pattern.elements.forEach(e => patternNames(e, out))
+  else if (pattern.type === 'AssignmentPattern') patternNames(pattern.left, out)
+  else if (pattern.type === 'RestElement') patternNames(pattern.argument, out)
+  return out
+}
+
+function isFlagKey(node, computed) {
+  if (!node) return false
+  if (!computed && node.type === 'Identifier') return node.name === FLAG
+  if (node.type === 'Literal') return node.value === FLAG
+  // `${'SMOKE_REQUIRE_IDE'}`-free template: `SMOKE_REQUIRE_IDE` in backticks
+  return node.type === 'TemplateLiteral' && node.expressions.length === 0 &&
+    node.quasis.length === 1 && node.quasis[0].value.cooked === FLAG
+}
+
+export function checkRequireIdeWiring(source) {
+  const ast = acornParse(source, { ecmaVersion: 'latest', sourceType: 'module' })
+  const declarators = []
+  const problems = []
+  let flagReads = 0
+  walk(ast, node => {
+    if (node.type === 'VariableDeclarator' && patternNames(node.id).includes(MODE)) declarators.push(node)
+    if (node.type === 'MemberExpression' && isFlagKey(node.property, node.computed)) flagReads++
+    // `const { SMOKE_REQUIRE_IDE } = process.env` reads the flag without a MemberExpression
+    if (node.type === 'ObjectPattern' && node.properties.some(p => p.type === 'Property' && isFlagKey(p.key, p.computed))) flagReads++
+    if (node.type === 'AssignmentExpression' && patternNames(node.left).includes(MODE)) problems.push('requireIde is reassigned')
+    if (node.type === 'UpdateExpression' && node.argument.type === 'Identifier' && node.argument.name === MODE) problems.push('requireIde is updated')
+  })
+  if (declarators.length !== 1) problems.push(`expected exactly one requireIde declaration, found ${declarators.length}`)
+  else {
+    const init = declarators[0].init
+    const isEnv = a => a && a.type === 'MemberExpression' && !a.computed && !a.optional &&
+      a.object.type === 'Identifier' && a.object.name === 'process' &&
+      a.property.type === 'Identifier' && a.property.name === 'env'
+    const ok = declarators[0].id.type === 'Identifier' && init && init.type === 'CallExpression' &&
+      !init.optional && init.callee.type === 'Identifier' && init.callee.name === 'requireIdeFrom' &&
+      init.arguments.length === 1 && isEnv(init.arguments[0])
+    if (!ok) problems.push('requireIde init is not exactly requireIdeFrom(process.env)')
+  }
+  if (flagReads !== 0) problems.push(`${flagReads} direct read(s) of ${FLAG} beside the shared helper`)
+  return problems
+}
+
+describe('requireIde wiring check proves both ways (#9142)', () => {
+  const real = "import { requireIdeFrom } from './helpers/harness-floor.mjs'\nconst requireIde = requireIdeFrom(process.env)\nasync function run() { if (requireIde) fail('x') }\n"
+  const rejected = {
+    'appended && expression (review mutation 1)':
+      "const requireIde = requireIdeFrom(process.env) && process.env['SMOKE_REQUIRE_IDE'] !== '0'",
+    'bracket read with !== (review mutation 2)':
+      "const requireIde = requireIdeFrom(process.env)\nconst x = process.env['SMOKE_REQUIRE_IDE'] !== '0'",
+    'dot read with ===': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env.SMOKE_REQUIRE_IDE === '1'",
+    'dot read with !==': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env.SMOKE_REQUIRE_IDE !== '0'",
+    'dot read with ==': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env.SMOKE_REQUIRE_IDE == '1'",
+    'bracket read with ===': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env['SMOKE_REQUIRE_IDE'] === '1'",
+    'bracket read with ==': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env['SMOKE_REQUIRE_IDE'] == '1'",
+    'bare dot truthiness read': "const requireIde = requireIdeFrom(process.env)\nif (process.env.SMOKE_REQUIRE_IDE) {}",
+    'bare bracket truthiness read': "const requireIde = requireIdeFrom(process.env)\nif (process.env['SMOKE_REQUIRE_IDE']) {}",
+    'template-literal key': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env[`SMOKE_REQUIRE_IDE`]",
+    'optional-chain read': "const requireIde = requireIdeFrom(process.env)\nconst x = process.env?.SMOKE_REQUIRE_IDE",
+    'destructured read': "const requireIde = requireIdeFrom(process.env)\nconst { SMOKE_REQUIRE_IDE } = process.env",
+    'reassignment': "let requireIde = requireIdeFrom(process.env)\nrequireIde = false",
+    'compound reassignment': "let requireIde = requireIdeFrom(process.env)\nrequireIde ||= true",
+    'second declaration': "const requireIde = requireIdeFrom(process.env)\nfunction f() { const requireIde = false }",
+    'no declaration': "const other = requireIdeFrom(process.env)",
+    'wrong argument': "const requireIde = requireIdeFrom({})",
+    'extra argument': "const requireIde = requireIdeFrom(process.env, true)",
+    'wrapped call': "const requireIde = !requireIdeFrom(process.env)",
+  }
+  for (const [name, source] of Object.entries(rejected)) {
+    it(`rejects: ${name}`, () => {
+      assert.notDeepEqual(checkRequireIdeWiring(source), [])
+    })
+  }
+
+  it('accepts the exact real form', () => {
+    assert.deepEqual(checkRequireIdeWiring(real), [])
+  })
+
+  it('ignores the flag name inside strings and comments', () => {
+    assert.deepEqual(checkRequireIdeWiring("// SMOKE_REQUIRE_IDE\nconst requireIde = requireIdeFrom(process.env)\nfail('expected (SMOKE_REQUIRE_IDE)')"), [])
+  })
+
+  it('fails loudly on unparseable source instead of passing', () => {
+    assert.throws(() => checkRequireIdeWiring('const requireIde = requireIdeFrom(process.env'))
+  })
+})
+
 // Static source assertions, not live smoke coverage. Keep them separate from
 // the executed pure-helper cases above: Playwright/server remain out of graph.
 describe('smoke-test source wiring (#7657, #8435)', () => {
@@ -120,9 +229,7 @@ describe('smoke-test source wiring (#7657, #8435)', () => {
   })
 
   it('the strict mode flag is derived once and keeps both required-IDE failures', () => {
-    assert.equal((src.match(/const requireIde = requireIdeFrom\(process\.env\)/g) || []).length, 1)
-    assert.ok(!/SMOKE_REQUIRE_IDE\s*===/.test(src), 'no inline flag parse beside the shared helper')
-    assert.equal((src.match(/\brequireIde\s*=/g) || []).length, 1, 'mode is never reassigned')
+    assert.deepEqual(checkRequireIdeWiring(src), [], 'requireIdeFrom(process.env) must be the sole decider')
     assert.ok(src.indexOf('const requireIde =') < src.indexOf('async function run()'), 'same mode reaches probes and summary')
     assert.ok(src.includes("if (requireIde) fail('IDE quick-open palette',"), 'missing required palette must still fail')
     assert.ok(src.includes("if (requireIde) fail('IDE go-to-def fixture',"), 'missing required fixture must still fail')

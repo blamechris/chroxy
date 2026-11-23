@@ -175,7 +175,7 @@ Output a summary table:
 
 If the test failed, check:
 - Is the throwaway daemon up? (`curl http://127.0.0.1:$PORT/health`, with `$PORT` read from the preview record)
-- A run against a daemon without the IDE feature (`features.ide` off, no `SMOKE_REQUIRE_IDE`) records 16 cases and exits 1 with `HARNESS BROKEN: ran 16 cases, expected at least 18` although every case passed. That is the floor, not a regression (#8435); judge the PASS/FAIL lines, not the exit code, until it is fixed.
+- A run against a daemon without the IDE feature (`features.ide` off) depends on the mode `requireIdeFrom(process.env)` picks. Strict mode is the default under `CI` (and with `SMOKE_REQUIRE_IDE=1`): the missing quick-open palette or `smoke_ide_sample` fixture records a FAIL and the run exits 1. Lenient mode (no `CI`, flag unset, or `SMOKE_REQUIRE_IDE=0`) skips the IDE cases, records the 16 base cases and passes against the 16-case floor, so a clean local run without the IDE surface exits 0 (#8435, #9140). `HARNESS BROKEN: ran N cases, expected at least M` means fewer than the floor (16 lenient, 18 strict) actually ran: a collapsed harness, not an IDE-off daemon.
 - Did the dashboard rebuild? (`npm run build -w @chroxy/dashboard`)
 - Are there console errors in the browser? (check screenshots or run with `--headed`)
 ```
