@@ -350,6 +350,11 @@ export class SessionCiWatcher {
    *   dispatch AND again when a queued wake is about to flush, since the
    *   preceding turn's result can trip the budget pause after the wake queued.
    *   A throw reads as a refusal. Absent = never refused.
+   * @param {(handlers: {onReleased: (sessionId: string) => void, onDestroyed: (sessionId: string) => void}) => (() => void)} [opts.subscribeTurnDrivenReleases]
+   *   - #9301: register for "no TurnDriver occupies this session any more" and
+   *   "this session is gone"; returns the unsubscribe. Absent = a wake refused as
+   *   `orchestrated` is dropped (the pre-#9301 behaviour). Attached by `start()`
+   *   and detached by `stop()`.
    * @param {boolean} [opts.wakeAgent] - when false, completions notify the user
    *   but never wake a session (neither the PTY route nor the turn-input route).
    * @param {(wake: {sessionId: string, text: string, messageId: string}) => void} [opts.recordWakeInput]
@@ -380,6 +385,7 @@ export class SessionCiWatcher {
     recordWakeInput,
     noteWakeDispatched,
     daemonTurnRefusal,
+    subscribeTurnDrivenReleases,
     wakeAgent = true,
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     discoveryIntervalMs = DEFAULT_DISCOVERY_INTERVAL_MS,
@@ -396,6 +402,17 @@ export class SessionCiWatcher {
     this._noteWakeDispatched = typeof noteWakeDispatched === 'function' ? noteWakeDispatched : null
     this._daemonTurnRefusal = typeof daemonTurnRefusal === 'function' ? daemonTurnRefusal : null
     this._wakeSeq = 0
+    this._subscribeReleases = typeof subscribeTurnDrivenReleases === 'function' ? subscribeTurnDrivenReleases : null
+    this._unsubscribeReleases = null
+    /**
+     * #9301: sessionId → Map<prNumber, { event, verdict }> — completions whose
+     * agent wake was refused as `orchestrated`. At most ONE per (session, PR):
+     * a newer fire for the same PR replaces it. Entries leave on delivery, on
+     * supersede (a different head for that PR is seen), when the PR is no longer
+     * open, and when the session is destroyed — so the map is bounded by live
+     * sessions x their open PRs.
+     */
+    this._deferred = new Map()
     this._wakeAgent = wakeAgent !== false
     this._tickIntervalMs = tickIntervalMs
     this._discoveryIntervalMs = discoveryIntervalMs
@@ -523,6 +540,9 @@ export class SessionCiWatcher {
       for (const id of this._state.keys()) {
         if (!live.has(id)) this._state.delete(id)
       }
+      for (const id of this._deferred.keys()) {
+        if (!live.has(id)) this._deferred.delete(id)
+      }
 
       const now = this._now()
       const due = sessions.filter(s => {
@@ -624,12 +644,26 @@ export class SessionCiWatcher {
     // left to report on, so drop any arm.
     if (!snapshot?.pr) {
       st.armed = null
+      this._dropDeferred(sessionId)
       return 'no-pr'
     }
 
     const number = snapshot.pr.number
     const headRefOid = snapshot.pr.headRefOid
     const verdict = terminalVerdict(snapshot)
+
+    // #9301: a different head for a PR whose wake is parked means a newer push
+    // replaced it — that result is stale, never deliver it. Only on the watcher's
+    // OWN reading (`fire`): an `observe()` survey can resolve after a push while
+    // reporting the OLDER head, and must not discard the parked wake for the current one.
+    const perPr = fire ? this._deferred.get(sessionId) : undefined
+    if (perPr) {
+      // The session's current PR is `number`: anything parked for another PR is
+      // for one it has moved on from. Same PR, different head: superseded.
+      for (const [n, { event: parkedEvent }] of [...perPr]) {
+        if (n !== number || parkedEvent.headRefOid !== headRefOid) this._dropDeferred(sessionId, n)
+      }
+    }
 
     if (verdict === null) {
       // Still going, or no run yet for this head.
@@ -735,6 +769,10 @@ export class SessionCiWatcher {
    * versa.
    */
   _fire(sessionId, snapshot, verdict) {
+    // #9301: whatever was parked for this PR is older than this completion (a
+    // same-head re-run, or a newer head); never let it be delivered after this
+    // one. Re-parked below only if THIS completion is itself refused `orchestrated`.
+    this._dropDeferred(sessionId, snapshot.pr.number)
     const event = {
       sessionId,
       prNumber: snapshot.pr.number,
@@ -762,66 +800,122 @@ export class SessionCiWatcher {
       // The user is still notified above; only the agent half is withheld, and
       // nothing is sent, queued or recorded.
       //
-      // #9184, decided: a refused wake is DROPPED for every reason, `orchestrated`
-      // included — there is no deferral queue, and the CI arm for this head is
-      // already consumed (`lastFired`), so nothing re-fires it. It is not silent:
-      // the reason lands in the "settled ... (wake: <reason>)" log line below and
-      // the push above still tells the user. A driven turn can last up to the turn
-      // timeout, so the agent may miss that head's result; deferral-on-release is a
-      // separate subsystem, filed as a follow-up rather than built here.
+      // #9184 / #9301, decided: a refused wake is DROPPED for every reason EXCEPT
+      // `orchestrated`. The CI arm for this head is already consumed (`lastFired`),
+      // so nothing re-fires it, and a driven turn can last up to the turn timeout:
+      // dropping would let the agent miss that head's result. So an `orchestrated`
+      // refusal is parked (one per session per PR) and delivered ONCE, through the
+      // same wake path, when the last TurnDriver releases the session
+      // (`_deliverDeferred`). It is discarded if a newer head replaces it, the PR
+      // closes or the session is destroyed. The user push above is never re-sent.
+      // Every other refusal (budget, Stop, wake cap, provider state) is still a
+      // drop, visible in the log line below.
+      if (refusal === 'orchestrated' && this._subscribeReleases) this._deferWake(sessionId, event, verdict)
       wakeOutcome = refusal
     } else if (this._wakeAgent && this._resolveSession) {
-      // Stable, daemon-authored id for the turn-input route: the provider's
-      // queue mirror and the history entry carry it. The time prefix keeps ids
-      // unique across daemon restarts (history is persisted, a bare counter
-      // would repeat). Charset/length satisfy input-handlers' id grammar.
-      const messageId = `chroxy-ci-wake-${this._now().toString(36)}-${++this._wakeSeq}`
-      // Admission can land AFTER wakeSession returns (an async provider). The
-      // flag lets the late callback say so in its own log line instead of the
-      // outcome in the line below being silently stale.
-      let firing = true
-      // #8326: count each DISPATCHED wake exactly once. The turn-input route
-      // reports dispatch through onAdmission('injected') (immediately, or at
-      // flush for a queued wake); the claude-tui PTY route returns 'injected'
-      // synchronously and never calls onAdmission.
-      let counted = false
-      const countOnce = () => {
-        if (counted) return
-        counted = true
-        this._noteDispatched(sessionId)
-      }
-      try {
-        wakeOutcome = wakeSession(this._resolveSession(sessionId), buildAgentWakeText(event), {
-          turnInput: true,
-          clientMessageId: messageId,
-          admitAtFlush: () => this._wakeRefusal(sessionId) === null,
-          onAdmission: ({ outcome, line }) => {
-            // Visible like a typed turn — but only once it has actually been
-            // DISPATCHED. A rejected wake never reached the model, and a queued
-            // one may yet be cancelled at flush (budget paused, user Stop,
-            // interrupt): recording it at enqueue left a phantom user turn in
-            // history that no model ever saw. `injected` arrives immediately for
-            // an idle session and at flush for a queued one.
-            if (outcome === 'injected') {
-              countOnce()
-              this._recordWake(sessionId, line, messageId)
-            }
-            if (!firing) {
-              this._log?.info?.(outcome === 'rejected'
-                ? `ci-watch: #${event.prNumber} wake for session ${sessionId} rejected late, after dispatch was first attempted (wake: ${outcome})`
-                : `ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
-            }
-          },
-        })
-        if (wakeOutcome === 'injected') countOnce()
-      } catch (err) {
-        wakeOutcome = 'error'
-        this._log?.warn?.(`ci-watch: agent wake failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
-      } finally {
-        firing = false
-      }
+      wakeOutcome = this._sendWake(sessionId, event)
     }
     this._log?.info?.(`ci-watch: #${event.prNumber} settled ${verdict} for session ${sessionId} (wake: ${wakeOutcome})`)
+  }
+
+  /**
+   * Hand the wake to the session (turn-input / PTY route) and report the outcome.
+   * Shared by `_fire` and the post-release delivery so both take the SAME path.
+   * The caller has already established that no refusal applies.
+   */
+  _sendWake(sessionId, event) {
+    let wakeOutcome = 'disabled'
+    // Stable, daemon-authored id for the turn-input route: the provider's
+    // queue mirror and the history entry carry it. The time prefix keeps ids
+    // unique across daemon restarts (history is persisted, a bare counter
+    // would repeat). Charset/length satisfy input-handlers' id grammar.
+    const messageId = `chroxy-ci-wake-${this._now().toString(36)}-${++this._wakeSeq}`
+    // Admission can land AFTER wakeSession returns (an async provider). The
+    // flag lets the late callback say so in its own log line instead of the
+    // outcome in the line below being silently stale.
+    let firing = true
+    // #8326: count each DISPATCHED wake exactly once. The turn-input route
+    // reports dispatch through onAdmission('injected') (immediately, or at
+    // flush for a queued wake); the claude-tui PTY route returns 'injected'
+    // synchronously and never calls onAdmission.
+    let counted = false
+    const countOnce = () => {
+      if (counted) return
+      counted = true
+      this._noteDispatched(sessionId)
+    }
+    try {
+      wakeOutcome = wakeSession(this._resolveSession(sessionId), buildAgentWakeText(event), {
+        turnInput: true,
+        clientMessageId: messageId,
+        admitAtFlush: () => this._wakeRefusal(sessionId) === null,
+        onAdmission: ({ outcome, line }) => {
+          // Visible like a typed turn — but only once it has actually been
+          // DISPATCHED. A rejected wake never reached the model, and a queued
+          // one may yet be cancelled at flush (budget paused, user Stop,
+          // interrupt): recording it at enqueue left a phantom user turn in
+          // history that no model ever saw. `injected` arrives immediately for
+          // an idle session and at flush for a queued one.
+          if (outcome === 'injected') {
+            countOnce()
+            this._recordWake(sessionId, line, messageId)
+          }
+          if (!firing) {
+            this._log?.info?.(outcome === 'rejected'
+              ? `ci-watch: #${event.prNumber} wake for session ${sessionId} rejected late, after dispatch was first attempted (wake: ${outcome})`
+              : `ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
+          }
+        },
+      })
+      if (wakeOutcome === 'injected') countOnce()
+    } catch (err) {
+      wakeOutcome = 'error'
+      this._log?.warn?.(`ci-watch: agent wake failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
+    } finally {
+      firing = false
+    }
+    return wakeOutcome
+  }
+
+  /** #9301: park a completion whose wake was refused as `orchestrated`. */
+  _deferWake(sessionId, event, verdict) {
+    let perPr = this._deferred.get(sessionId)
+    if (!perPr) { perPr = new Map(); this._deferred.set(sessionId, perPr) }
+    perPr.set(event.prNumber, { event, verdict })
+  }
+
+  _dropDeferred(sessionId, prNumber) {
+    const perPr = this._deferred.get(sessionId)
+    if (!perPr) return
+    if (prNumber === undefined) perPr.clear(); else perPr.delete(prNumber)
+    if (perPr.size === 0) this._deferred.delete(sessionId)
+  }
+
+  /**
+   * #9301: the last TurnDriver let go of `sessionId` — deliver what it deferred,
+   * once. Each entry is re-checked first: still the head this watcher last
+   * announced for that PR (a newer head would have replaced or cleared it), and
+   * the session still wakeable. `orchestrated` again (re-driven in the meantime)
+   * KEEPS the entry for the next release; any other refusal drops it, exactly as
+   * it would have at fire time. The entry is removed BEFORE dispatch so a
+   * re-entrant release cannot deliver it twice.
+   */
+  _deliverDeferred(sessionId) {
+    const perPr = this._deferred.get(sessionId)
+    if (!perPr || this._stopped) return
+    const st = this._state.get(sessionId)
+    for (const [prNumber, { event }] of [...perPr]) {
+      const last = st?.lastFired
+      if (!last || last.number !== prNumber || last.headRefOid !== event.headRefOid) {
+        this._dropDeferred(sessionId, prNumber)
+        continue
+      }
+      const refusal = this._wakeRefusal(sessionId)
+      if (refusal === 'orchestrated') continue
+      this._dropDeferred(sessionId, prNumber)
+      const outcome = refusal ?? this._sendWake(sessionId, event)
+      this._log?.info?.(`ci-watch: #${prNumber} deferred wake for session ${sessionId} delivered after release (wake: ${outcome})`)
+    }
   }
 
   /**
@@ -861,9 +955,23 @@ export class SessionCiWatcher {
     }
   }
 
+  /** #9301: listen for session release / destroy (idempotent). */
+  _attachReleases() {
+    if (!this._subscribeReleases || this._unsubscribeReleases) return
+    this._unsubscribeReleases = this._subscribeReleases({
+      onReleased: sessionId => {
+        try { this._deliverDeferred(sessionId) } catch (err) {
+          this._log?.warn?.(`ci-watch: deferred wake for ${sessionId} failed: ${getErrorMessage(err, 'unknown error')}`)
+        }
+      },
+      onDestroyed: sessionId => this._dropDeferred(sessionId),
+    })
+  }
+
   /** Start the periodic sweep. The first tick runs immediately. Idempotent. */
   start() {
     this._stopped = false
+    this._attachReleases()
     // A second start() would otherwise leak the first interval: `_timer` is
     // overwritten and stop() can only ever clear the last one.
     if (this._timer) return this
@@ -879,6 +987,9 @@ export class SessionCiWatcher {
   /** Stop the sweep. Idempotent. */
   stop() {
     this._stopped = true
+    this._unsubscribeReleases?.()
+    this._unsubscribeReleases = null
+    this._deferred.clear()
     if (this._timer) {
       clearInterval(this._timer)
       this._timer = null
@@ -960,6 +1071,19 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     // #8326: the cap on consecutive daemon wakes with no user-typed input between.
     daemonTurnRefusal: (sessionId) => sessionManager?.daemonTurnRefusal?.(sessionId, { maxConsecutiveWakes }) ?? null,
     noteWakeDispatched: (sessionId) => sessionManager?.noteDaemonWake?.(sessionId),
+    // #9301: deliver a wake refused as `orchestrated` once the driver releases.
+    subscribeTurnDrivenReleases: sessionManager?.on
+      ? ({ onReleased, onDestroyed }) => {
+        const released = ({ sessionId } = {}) => onReleased(sessionId)
+        const destroyed = ({ sessionId } = {}) => onDestroyed(sessionId)
+        sessionManager.on('turn_driven_released', released)
+        sessionManager.on('session_destroyed', destroyed)
+        return () => {
+          sessionManager.off('turn_driven_released', released)
+          sessionManager.off('session_destroyed', destroyed)
+        }
+      }
+      : undefined,
     recordWakeInput: ({ sessionId, text, messageId }) => {
       sessionManager?.recordDaemonUserInput?.(sessionId, text, messageId)
     },

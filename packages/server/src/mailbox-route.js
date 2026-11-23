@@ -214,6 +214,11 @@ export function handleMailboxPing(server, req, res) {
     }
 
     const reason = injectWakeup(server, to, unreadCount)
+    if (reason === 'orchestrated') oweNudge(server, to, unreadCount)
+    // Clear the owed nudge only when this ping really reached the agent
+    // (`injected`) or the session is gone. `busy` / `pty-dead` / `not-tui` / ...
+    // injected nothing, so the earlier refused nudge is still owed.
+    else if (reason === 'injected' || reason === 'no-session') clearOwedNudge(server.sessionManager, to)
     // Record the delivery for the Control Room "Mailbox" tab (observability;
     // recordMailboxEvent never throws into the delivery path).
     server.sessionManager?.recordMailboxEvent?.({ to, from, unreadCount, outcome: reason })
@@ -239,10 +244,14 @@ function injectWakeup(server, to, unreadCount) {
   // #9184: refuse into a session a TurnDriver occupies — same interleaving hazard
   // as a CI wake (#8327), and the session is idle BETWEEN the driver's turns, so
   // the `isRunning` gate in wakeSession does not catch it.
-  // The wake is DROPPED, not deferred: the mail stays unread in the mailbox, but
-  // the agent is not nudged until the next ping or a self-initiated receive_next.
-  // Deferral is a follow-up (follow-up issue), as for the CI wake. The outcome is
-  // recorded in the Control Room event ring.
+  // #9301, decided: the refused nudge is DEFERRED, not dropped. The mail stays
+  // unread in the mailbox, and the daemon owes this agent ONE nudge (`oweNudge`,
+  // at most one per mailbox id): delivered through this same function when the
+  // last TurnDriver releases the session, unless the agent ran receive_next in
+  // the meantime (the mail was read), a newer ping already nudged it, or the
+  // session was destroyed. If the session is driven again at release time the
+  // nudge stays owed for the next release. The outcome is recorded in the
+  // Control Room event ring.
   // Not routed through daemonTurnRefusal: its other refusals (budget, user Stop,
   // wake cap) are deliberately not applied to mailbox wakes (#8326).
   if (server.sessionManager.isAgentCommIdTurnDriven(to)) return 'orchestrated'
@@ -251,4 +260,84 @@ function injectWakeup(server, to, unreadCount) {
   // is one-shot ("you have unread mail"), not a self-re-arming loop like
   // wake -> push -> CI -> wake, and it never reaches daemonTurnRefusal.
   return wakeSession(session, `You have ${countText} — run receive_next to process them.`)
+}
+
+/**
+ * #9301 — nudges owed to agents whose mailbox wake was refused as `orchestrated`.
+ * Per SessionManager: mailboxId -> { sessionId, unreadCount }. Bounded to one entry
+ * per mailbox id (a newer refusal replaces it) and cleared on delivery, on read,
+ * on a later successful nudge and on session destroy.
+ */
+const owed = new WeakMap()
+const subscribed = new WeakSet()
+// The agent-comm MCP tool, as a TOKEN match on the tool id: `receive_next` or any
+// `mcp__<server>__receive_next` (the server name is operator-chosen, so it is not
+// pinned). Not a substring match: `receive_next_batch`-style names do not count.
+// Read-state is a PROXY (chroxy cannot query the mailbox): one receive_next may not
+// drain every message, so a later message can go un-nudged only if no later ping
+// arrives; and for claude-tui the transcript `tool_start` can lag past release, which
+// yields a spurious extra nudge, never a lost one.
+const RECEIVE_NEXT = /(^|__)receive_next$/
+
+function owedFor(sm) {
+  let m = owed.get(sm)
+  if (!m) { m = new Map(); owed.set(sm, m) }
+  return m
+}
+
+/** Test-only: the owed-nudge map for a manager (leak assertions). */
+export function _owedNudgesForTest(sm) {
+  return owed.get(sm) ?? new Map()
+}
+
+function clearOwedNudge(sm, to) {
+  if (sm) owed.get(sm)?.delete(to)
+}
+
+function oweNudge(server, to, unreadCount) {
+  const sm = server.sessionManager
+  const sessionId = sm?.agentCommIdSessionId?.(to)
+  if (!sessionId || typeof sm.on !== 'function') return
+  owedFor(sm).set(to, { sessionId, unreadCount })
+  if (subscribed.has(sm)) return
+  subscribed.add(sm)
+  // One set of listeners per manager, attached the first time a nudge is owed.
+  sm.on('turn_driven_released', ({ sessionId: sid } = {}) => deliverOwedNudges(server, sid))
+  sm.on('session_destroyed', ({ sessionId: sid } = {}) => dropOwedForSession(sm, sid))
+  // The agent read its mail itself while driven: nothing left to nudge about.
+  sm.on('session_event', (ev) => {
+    if (ev?.event !== 'tool_start') return
+    const tool = ev.data?.tool ?? ev.data?.toolName
+    if (typeof tool === 'string' && RECEIVE_NEXT.test(tool)) dropOwedForSession(sm, ev.sessionId)
+  })
+}
+
+function dropOwedForSession(sm, sessionId) {
+  const m = owed.get(sm)
+  if (!m) return
+  for (const [to, o] of m) if (o.sessionId === sessionId) m.delete(to)
+}
+
+function deliverOwedNudges(server, sessionId) {
+  const sm = server.sessionManager
+  const m = owed.get(sm)
+  if (!m) return
+  for (const [to, o] of [...m]) {
+    if (o.sessionId !== sessionId) continue
+    // Same agent, same session: a mailbox id re-registered to another session
+    // is not this agent's mail any more.
+    if (sm.agentCommIdSessionId(to) !== sessionId) { m.delete(to); continue }
+    if (sm.isAgentCommIdTurnDriven(to)) continue // re-driven: stay owed
+    m.delete(to) // before delivery: exactly once
+    try {
+      const reason = injectWakeup(server, to, o.unreadCount)
+      // `busy` (e.g. a TUI still settling one tick after release): nothing was typed,
+      // so it stays owed. There is no idle signal to retry on; it is re-delivered by
+      // the next ping (which re-evaluates) or the next release.
+      if (reason === 'busy') m.set(to, o)
+      sm.recordMailboxEvent?.({ to, from: 'daemon', unreadCount: o.unreadCount, outcome: `deferred:${reason}` })
+    } catch (err) {
+      log.warn(`deferred mailbox nudge for ${to} failed: ${err?.message || err}`)
+    }
+  }
 }

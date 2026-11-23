@@ -1105,6 +1105,9 @@ export class SessionManager extends EventEmitter {
     // #8327: sessionId -> Set of owners (TurnDriver instances) currently occupying it. THE one
     // registry every driver reports to (see markTurnDriven); daemonTurnRefusal answers `orchestrated`.
     this._turnDriven = new Map()
+    // #9301: sessions with a release announcement already scheduled (coalesces a
+    // release / re-drive / release inside one tick into a single emit).
+    this._releaseAnnouncing = new Set()
     // #8866: sessionId -> { seed, claimed } — the archived-transcript seed of a session
     // continued as a NEW thread, held until the first accepted user input carries it.
     this._continuationSeeds = new Map()
@@ -1304,6 +1307,11 @@ export class SessionManager extends EventEmitter {
     if (!sessionId) return null
     const entry = this._sessions.get(sessionId)
     return entry ? entry.session : null
+  }
+
+  /** #9301: the session id a mailbox id is registered to, or null. */
+  agentCommIdSessionId(agentCommId) {
+    return (typeof agentCommId === 'string' && this._agentCommIds.get(agentCommId)) || null
   }
 
   /**
@@ -6128,7 +6136,34 @@ export class SessionManager extends EventEmitter {
     const owners = this._turnDriven.get(sessionId)
     if (!owners) return
     owners.delete(owner)
-    if (owners.size === 0) this._turnDriven.delete(sessionId)
+    if (owners.size === 0) {
+      this._turnDriven.delete(sessionId)
+      this._announceReleased(sessionId)
+    }
+  }
+
+  /**
+   * #9301: tell the daemon-wake paths a session is free again, so a wake refused
+   * as `orchestrated` can be delivered once. Fires only when the LAST owner has
+   * released (the caller checks), and one tick LATER, re-checking occupancy: the
+   * scheduler / orchestration may hand the session to its next turn synchronously
+   * after a release, and a wake delivered into THAT turn is the interleaving the
+   * refusal exists to prevent. If it is driven again by then nothing is emitted —
+   * the next release announces it. Not emitted for a session destroyed meanwhile.
+   * Emits `turn_driven_released { sessionId }`.
+   */
+  _announceReleased(sessionId) {
+    if (this._releaseAnnouncing.has(sessionId)) return
+    this._releaseAnnouncing.add(sessionId)
+    setImmediate(() => {
+      this._releaseAnnouncing.delete(sessionId)
+      if (!this._sessions.has(sessionId) || this.isTurnDriven(sessionId)) return
+      try {
+        this.emit('turn_driven_released', { sessionId })
+      } catch (err) {
+        log.warn(`turn_driven_released listener threw for session ${sessionId}: ${err?.message || err}`)
+      }
+    })
   }
 
   /** #8327: is any TurnDriver occupying this session right now? */
