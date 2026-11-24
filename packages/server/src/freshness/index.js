@@ -7,6 +7,8 @@
 export * from './core.js'
 export * from './adapter.js'
 export * from './state-file-adapter.js'
+export * from './session-registry-adapter.js'
+export * from './activity-meter.js'
 export * from './file-ledger.js'
 export { H, canonical, sha256 } from './hash.js'
 export * as keys from './keys.js'
