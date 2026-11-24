@@ -359,6 +359,12 @@ The recurring causes:
   among them. The bug report's own table listed five of the eleven, and the
   enumeration written to replace it found a seventeenth file nobody had scoped
   in (`#7653`)
+- a search or observation keyed on a property the subject itself changes — a
+  harness looked for its fixture by script path with `pgrep -f`, the fixture
+  `exec`ed `sleep 40` and so replaced its own argv, and the two "process is
+  gone" assertions passed against a wrapper that reaped nothing; the fix's first
+  revision also accepted a `Z` row from `ps` before checking `ps` had succeeded
+  (`#9088`)
 
 **Collapse to a boolean before asserting against file text.** A failing
 `assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`
