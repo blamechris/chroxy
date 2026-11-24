@@ -54,7 +54,7 @@ const CODE_RE = /^[a-z][a-z0-9_]{0,39}$/
  * at most 64 characters. It names an adapter in ledger records; it is not an
  * MCP server name.
  */
-function validSourceName(name) {
+export function validSourceName(name) {
   return typeof name === 'string' && name.length >= 1 && name.length <= 64 && /^[a-z][a-z0-9_-]*$/.test(name)
 }
 
