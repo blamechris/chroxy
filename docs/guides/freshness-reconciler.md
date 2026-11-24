@@ -115,6 +115,41 @@ The four-slot status block is parsed by the daemon's own `extractDeclaredStatus`
 (`declared-status.js`); `reportFromText` maps its result to a report for sources
 that hold message text.
 
+## The session-registry adapter and the activity meter
+
+`session-registry-adapter.js` reads the Claude Code command-line tool's local
+registry of live sessions: a directory with one `<pid>.json` file per live
+process (`~/.claude/sessions/` by default; the caller passes the directory, the
+adapter never derives it). It is activity evidence only. It never returns a
+report, so a session it reads is graded `unknown` (no status line) and can never
+be `fresh`. What it returns is native activity: whether a turn is in flight and
+a `registry_busy` or `registry_idle` event timed at the row's `statusUpdatedAt`,
+with the host application (from `entrypoint`) in the event's `ref`. The session
+is listed with its project (the last segment of `cwd`) as its scope.
+
+The registry is not a documented interface. Only `sessionId`, `cwd`, `status`
+(`busy` or `idle`), `statusUpdatedAt` (epoch milliseconds) and `entrypoint` are
+read, and each must have the expected type. The title (`name`) and every other
+field are never read into a value, so planted content there leaves no trace in
+the ledger; an `entrypoint` that is not a short lowercase token is recorded as
+`other`. A row that fails the check, an unparseable or oversized row, a
+duplicate `sessionId`, a row file that is not a regular file or a registry
+directory that is missing makes the whole registry `error` for that tick
+(`shape_changed`, `parse_failed`, `too_large`, `source_missing`), never `idle`.
+A row dated more than five minutes ahead of the check is `error: clock_skew`.
+Files not named `<digits>.json` are ignored unopened. An empty directory is a
+registry with no live sessions. The directory is only read.
+
+`activity-meter.js` turns samples of the registry (`sampleRegistry`) into one
+record per day: for each host application, the live sessions seen and the hours
+it was active. A sample's busy state holds until the next sample, a span is
+credited at most 30 minutes (a gap is not evidence), the last sample credits
+nothing and the day is clipped to its UTC window (shifted by an offset).
+Active time is wall time with at least one busy session of the application, not
+a sum over sessions. The meter is separate from provider quota (#6778). Running
+either against the real registry, and where samples are kept between ticks, are
+for the runner (#9282).
+
 ## Relation to the daemon's stall alerts (#8709)
 
 #8709 compares declared with observed state inside the daemon and alerts on a
