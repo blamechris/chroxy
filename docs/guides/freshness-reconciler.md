@@ -14,21 +14,21 @@ package's `files`, so **it ships**. Nothing in the daemon imports it yet and
 nothing starts it: it is a library until a runner is added (#9282).
 
 The model's pure rule modules moved there from `tests/freshness/model/`
-(`hash`, `keys`, `grade`, `config`, `ledger`, `checks`, `derive`, `policy`, and
-the driver in `runtime.js`). The files of the same name under
+(`hash`, `keys`, `grade`, `config`, `ledger`, `checks`, `derive`, `policy`,
+`investigation`, and the driver in `runtime.js`). The files of the same name under
 `tests/freshness/model/` re-export them, so the model tests and the reconciler
 run one implementation. Everything in those files ships, including the parts the
 core does not run: `derive.js` folds the surface, owner and investigation
 records, and `policy.js` holds the owner-block, surface-order and investigation
-rules. What stays under `tests/` and does not ship: the investigation scheduler
-(`investigation.js`), the owner queue (`queue.js`), the model's tick planner
-(`reconciler.js`) and the test helpers.
+rules. What stays under `tests/` and does not ship: the owner queue
+(`queue.js`), the model's tick planner (`reconciler.js`) and the test helpers.
 
 | File | Role |
 |---|---|
 | `adapter.js` | The read-only adapter contract, and the shape check of every read |
 | `state-file-adapter.js` | Adapter over the daemon's persisted session-state file |
 | `file-ledger.js` | The durable file ledger and its single-writer guard |
+| `investigation.js` | The bounded, read-only stale investigation |
 | `core.js` | `openReconciler`, `planCoreTick`, `coreConfig` |
 | `index.js` | The public surface |
 
@@ -162,8 +162,44 @@ outside it. They should share the freshness thresholds and the grading
 daemon can import `gradeRead` and the thresholds from `src/freshness/`, and the
 ledger's `check` records are what a per-repo pulse (#8855) can display.
 
+## The stale investigation
+
+Each tick, after it has read its sessions, runs the model's investigation
+(`investigation.js`; the rules and classifications are in the model's README).
+A trigger that holds (an old `running` line, an idle or done line while a turn is
+in flight, a session dropped from the listing, two errored checks in a row, or a
+recheck of a session found working or waiting) opens at most one investigation
+for that session, which reads, classifies and closes in the same tick.
+
+What it may do is what the adapter allows: the tick's listing and `read(session,
+now)` on the sealed adapter, which has no send or write member, and appends to
+the ledger. A re-read, its retry, the confirmation that a session is gone and a
+separate activity read for a source that has one are all that same `read`; an
+activity read ignores the report the read carries and keeps its native state.
+Nothing is asked of a session. The tick runs with a delivery function that
+throws, so a planner that yielded a send would fail the tick.
+
+Bounds, from the configuration: `investigation_budget_per_tick` cycles (first
+cycles before second, oldest onset first), `recheck_budget_per_tick` rechecks
+that need a read of their own (least recently investigated first; a recheck on
+a source whose read carries native state costs no read and takes no budget), at
+most one investigation per session per tick, at most two cycles per onset (the
+second only after `inconclusive` or `running_claim_unverified`), and one
+source-level investigation when every session of a source fails. Investigations
+happen only inside a tick, so the cadence bounds how often.
+
+The result is the investigation's `close` record: trigger, onset, cycle,
+classification, the age it decided on and what it would surface. Each rung names
+the check it read and the evidence class of that read, taken from the ledger's
+own records: E2 for an authored report, E5 for a relayed one, E1 for native
+state. A decision to surface is recorded and returned from the planner; nothing
+consumes it until the queue exists.
+
+Not reachable yet: a stale owner block is classified `waiting_on_owner` only
+while the owner item holds a declared ask, and the owner queue is not in the
+core, so on the core a stale blocked line is `blocked_unresolved`.
+
 ## Not in the core
 
-Live sources, delivery of anything, the stale investigation (#9280) and the
-queue and outbox (#9284). The seed-handoff origin is not derived: `seed_ref` is
+Live sources, delivery of anything and the queue and outbox (#9284). The seed-handoff origin is not derived: `seed_ref` is
 always null until a source that carries seed scope and write time is added.
