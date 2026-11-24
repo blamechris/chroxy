@@ -10,7 +10,7 @@ import { join, relative } from 'path'
 import {
   SRC, walkSources, walkStylesheets, fullScreenLayers, partialLayers, parseFixedLayers,
   elementsUsingClass, overlayElements, jsxClassElements, parseSource,
-  DYNAMIC_CLASSNAME_OK, inlinePositionSites, inlinePositionsIn, layerLiteralSites,
+  DYNAMIC_CLASSNAME_OK, inlinePositionSites, inlinePositionsIn, layerLiteralSites, layerLiteralSitesIn,
 } from './overlayRoster.testSupport'
 
 const HOOK = join(SRC, 'hooks', 'useModalOverlay.ts')
@@ -227,6 +227,35 @@ describe('a layer class reaches an element only through a spreading one (#9207)'
       expect(live.has(k), `stale allow-list entry ${k}: no such unspread literal remains`).toBe(true)
       expect(why.includes(k.split('::')[1] as string), `${k}: reason must name the class`).toBe(true)
     }
+  })
+})
+
+describe('layerLiteralSitesIn classifies each literal site (#9211)', () => {
+  const L: ReadonlySet<string> = new Set(['modal-overlay'])
+  const head = `
+    import { useModalOverlay } from './useModalOverlay'
+    export function X() {
+      const { overlayProps } = useModalOverlay()
+      return (<>`
+  const wrap = (body: string, tail = '') => `${head}\n${body}\n</>)\n}\n${tail}`
+  const view = (src: string) => layerLiteralSitesIn(src, 'x.tsx', L).map(s => ({ cls: s.cls, spreading: s.spreading }))
+
+  it('a layer class on the className of a spreading element is spreading', () => {
+    expect(view(wrap('<div {...overlayProps} className="modal-overlay" />'))).toEqual([{ cls: 'modal-overlay', spreading: true }])
+  })
+  it('a layer class in an exported constant is reported as not spreading, even beside a spreading use', () => {
+    const src = wrap('<div {...overlayProps} className="modal-overlay" />', "export const OVERLAY = 'modal-overlay'")
+    expect(view(src)).toEqual([{ cls: 'modal-overlay', spreading: true }, { cls: 'modal-overlay', spreading: false }])
+  })
+  it('a layer class on a non-spreading element is not spreading', () => {
+    expect(view(wrap('<div className="modal-overlay" />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
+  })
+  it('a plain string data-testid value is skipped', () => {
+    expect(view(wrap('<div data-testid="modal-overlay" />'))).toEqual([])
+  })
+  it('a template data-testid value is scanned', () => {
+    expect(view(wrap('<div data-testid={`modal-overlay`} />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
+    expect(view(wrap('<div data-testid={`modal-overlay ${id}`} />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
   })
 })
 

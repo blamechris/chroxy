@@ -532,37 +532,38 @@ export interface LayerLiteralSite { file: string; line: number; cls: string; spr
  * selector literal like '.cls' (the token is '.cls', not 'cls').
  */
 export function layerLiteralSites(layerClasses: ReadonlySet<string>, files: string[] = walkSources()): LayerLiteralSite[] {
+  return files.flatMap(f => layerLiteralSitesIn(readFileSync(f, 'utf-8'), relative(SRC, f), layerClasses))
+}
+
+/** The per-source core of layerLiteralSites: one source string, reported under `rel`. Pure, so fixtures can pin it. */
+export function layerLiteralSitesIn(src: string, rel: string, layerClasses: ReadonlySet<string>): LayerLiteralSite[] {
   const out: LayerLiteralSite[] = []
-  for (const f of files) {
-    const rel = relative(SRC, f)
-    const sf = parseSource(readFileSync(f, 'utf-8'), rel)
-    const { names } = overlayBindings(sf)
-    const spreadingClassName = (n: ts.Node): boolean => {
-      for (let cur: ts.Node | undefined = n; cur; cur = cur.parent) {
-        if (ts.isJsxAttribute(cur)) {
-          if (!ts.isIdentifier(cur.name) || cur.name.text !== 'className') return false
-          const el = cur.parent.parent
-          return el.attributes.properties.some(a => ts.isJsxSpreadAttribute(a) && names.has(a.expression.getText(sf)))
-        }
-        if (ts.isJsxOpeningElement(cur) || ts.isJsxSelfClosingElement(cur) || ts.isStatement(cur)) return false
+  const sf = parseSource(src, rel)
+  const { names } = overlayBindings(sf)
+  const spreadingClassName = (n: ts.Node): boolean => {
+    for (let cur: ts.Node | undefined = n; cur; cur = cur.parent) {
+      if (ts.isJsxAttribute(cur)) {
+        if (!ts.isIdentifier(cur.name) || cur.name.text !== 'className') return false
+        const el = cur.parent.parent
+        return el.attributes.properties.some(a => ts.isJsxSpreadAttribute(a) && names.has(a.expression.getText(sf)))
       }
-      return false
+      if (ts.isJsxOpeningElement(cur) || ts.isJsxSelfClosingElement(cur) || ts.isStatement(cur)) return false
     }
-    // A data-testid value is a test hook, never a class position.
-    const isTestId = (n: ts.Node) => ts.isJsxAttribute(n.parent) && ts.isIdentifier(n.parent.name) && n.parent.name.text === 'data-testid'
-    const isTestIdSafe = (n: ts.Node) => ts.isStringLiteral(n) && isTestId(n)
-    const visit = (n: ts.Node) => {
-      if (isTestIdSafe(n)) return
-      if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
-        const line = sf.getLineAndCharacterOfPosition(n.getStart()).line + 1
-        for (const t of n.text.split(/\s+/)) {
-          if (layerClasses.has(t)) out.push({ file: rel, line, cls: t, spreading: spreadingClassName(n) })
-        }
-      }
-      ts.forEachChild(n, visit)
-    }
-    visit(sf)
+    return false
   }
+  // A plain string data-testid value is a test hook, never a class position.
+  const isPlainTestId = (n: ts.Node) => ts.isStringLiteral(n) && ts.isJsxAttribute(n.parent) && ts.isIdentifier(n.parent.name) && n.parent.name.text === 'data-testid'
+  const visit = (n: ts.Node) => {
+    if (isPlainTestId(n)) return
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
+      const line = sf.getLineAndCharacterOfPosition(n.getStart()).line + 1
+      for (const t of n.text.split(/\s+/)) {
+        if (layerClasses.has(t)) out.push({ file: rel, line, cls: t, spreading: spreadingClassName(n) })
+      }
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
   return out
 }
 
