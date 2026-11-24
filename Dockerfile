@@ -171,11 +171,16 @@ RUN npm run build -w @chroxy/dashboard
 
 FROM node:22-slim
 
-# System dependencies (no tmux, no build-essential — CLI headless mode only)
+# System dependencies (no tmux, no build-essential — CLI headless mode only).
+# procps (ps): the orphan reaper's process listing (#9248; on Linux it resolves
+# cwds via /proc, so it needs ps only). lsof: preview-target.js and
+# utils/opened-file-path.js. scripts/docker-image-smoke.sh resolves both in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     ca-certificates \
+    procps \
+    lsof \
   && rm -rf /var/lib/apt/lists/*
 
 # Install cloudflared (multi-arch, pinned version + checksum verification)
