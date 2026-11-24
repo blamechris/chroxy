@@ -70,16 +70,21 @@ const GETTERS = [
 //
 // Keyed `<file>|<literal text>`. Each is a `chroxy-*` string that shares a file
 // with `tmpdir` but is not a tmpdir base. A stale entry fails the roster test.
+// Each entry binds the exemption to its usage site (#9212): `site` is the AST
+// shape from `siteShape` and `count` the number of occurrences at that shape
+// (default 1). Both are enforced, so a second occurrence, or one at a different
+// kind of site (a real `join(tmpdir(), 'chroxy-byok-')`), is reported.
+const ex = (reason, site, count = 1) => ({ reason, site, count })
 const EXEMPT_LITERALS = new Map([
   // `chroxy-pr-body-<random>.md` — a per-call random FILE written and read back
   // inside one request; not a base a daemon validates or sweeps.
-  ['ws-file-ops/git.js|chroxy-pr-body-', 'per-call random temp file, not a daemon base'],
-  ['checkpoint-manager.js|chroxy-checkpoint/', 'git tag name, not a path'],
-  ['checkpoint-manager.js|chroxy-snapshot/', 'git commit message, not a path'],
-  ['docker-byok-session.js|/tmp/.chroxy-post-create-', 'path inside the container, not the host tmpdir'],
-  ['docker-byok-session.js|chroxy-byok-snap:', 'docker image tag'],
-  ['docker-byok-session.js|chroxy-byok-build:', 'docker image tag'],
-  ['docker-byok-session.js|chroxy-byok-', 'compose project name'],
+  ['ws-file-ops/git.js|chroxy-pr-body-', ex('per-call random temp file, not a daemon base', 'TemplateElement>TemplateLiteral>call:join@1>decl:bodyFile>VariableDeclaration')],
+  ['checkpoint-manager.js|chroxy-checkpoint/', ex('git tag name, not a path', 'TemplateElement>TemplateLiteral>decl:tagName>VariableDeclaration')],
+  ['checkpoint-manager.js|chroxy-snapshot/', ex('git commit message, not a path', 'TemplateElement>TemplateLiteral>ArrayExpression>call:execFileAsync@1>AwaitExpression>decl:ObjectPattern>VariableDeclaration')],
+  ['docker-byok-session.js|/tmp/.chroxy-post-create-', ex('path inside the container, not the host tmpdir', 'Literal>decl:POST_CREATE_MARKER_PREFIX>VariableDeclaration')],
+  ['docker-byok-session.js|chroxy-byok-snap:', ex('docker image tag', 'TemplateElement>TemplateLiteral>return')],
+  ['docker-byok-session.js|chroxy-byok-build:', ex('docker image tag', 'TemplateElement>TemplateLiteral>return')],
+  ['docker-byok-session.js|chroxy-byok-', ex('compose project name', 'TemplateElement>TemplateLiteral>assign:_composeProject>ExpressionStatement')],
 ])
 
 const SCAN_EXTS = ['.js', '.mjs', '.cjs']
@@ -119,14 +124,49 @@ const isRequireOs = (n) => n && n.type === 'CallExpression' && n.callee.type ===
 const isImportOs = (n) => n && n.type === 'ImportExpression' && isOsSpecifier(n.source)
 const isAwaitImportOs = (n) => n && n.type === 'AwaitExpression' && isImportOs(n.argument)
 const REASON_FOLLOW = 'tmpdir reached in a form the scan cannot follow'
+
+/**
+ * The shape of the site a string node sits at, as a `>`-joined chain from the
+ * node outwards to its first enclosing statement, e.g.
+ * `TemplateElement>TemplateLiteral>return`. A call contributes its callee name
+ * and the argument position the node is in (`call:join@1`), a declarator its
+ * bound name, an assignment its target, a property its key. Exemptions are
+ * bound to this (#9212) so a literal reused at a different kind of site —
+ * `join(tmpdir(), 'chroxy-byok-')` where the exempt one is a template in a
+ * `const` — does not inherit the exemption.
+ */
+function siteShape (node, ancestors) {
+  const calleeName = (c) => c.type === 'Identifier' ? c.name
+    : (c.type === 'MemberExpression' && !c.computed ? c.property.name : c.type)
+  const parts = [node.type]
+  let child = node
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const a = ancestors[i]
+    if (a.type === 'CallExpression' || a.type === 'NewExpression') {
+      const idx = a.arguments.indexOf(child)
+      parts.push(idx >= 0 ? `call:${calleeName(a.callee)}@${idx}` : 'callee')
+    } else if (a.type === 'VariableDeclarator') parts.push(`decl:${a.id.type === 'Identifier' ? a.id.name : a.id.type}`)
+    else if (a.type === 'AssignmentExpression') {
+      const l = a.left
+      parts.push(`assign:${l.type === 'MemberExpression' && !l.computed ? l.property.name : (l.name || l.type)}`)
+    } else if (a.type === 'Property') parts.push(`prop:${a.key.name ?? a.key.value}`)
+    else if (a.type === 'ReturnStatement') { parts.push('return'); break } else if (/(Statement|Declaration)$/.test(a.type)) { parts.push(a.type); break } else parts.push(a.type)
+    child = a
+  }
+  return parts.join('>')
+}
 const REASON_CLASSIFY = 'chroxy-* string in a file that touches tmpdir, in a shape the scan cannot classify'
 
 /**
- * Pure: classify one file's source. `exempt` is the set of literal texts exempt
- * in this file. Returns { bases, problems, exemptUsed } where each problem is a
- * `line: reason` string. Self-tested below.
+ * Pure: classify one file's source. `exempt` maps each literal text exempt in
+ * this file to `{ site, count }` (#9212): the SHAPE of the usage site the
+ * literal is allowed at (see `siteShape`) and how many times it occurs there.
+ * An exempt literal at any other shape, or more/fewer times than expected, is a
+ * problem, so reusing an exempted literal for a real tmpdir base in the same
+ * file is no longer hidden. Returns { bases, problems, exemptUsed } where each
+ * problem is a `line: reason` string. Self-tested below.
  */
-function scanSourceText (source, { exempt = new Set() } = {}) {
+function scanSourceText (source, { exempt = new Map() } = {}) {
   let ast
   try { ast = parseSource(source) } catch (e) {
     return { bases: [], problems: [`1: unparseable source (${e.message}) — the scan cannot see this file`], exemptUsed: [] }
@@ -242,15 +282,26 @@ function scanSourceText (source, { exempt = new Set() } = {}) {
   // Pass 5: in a file that touches tmpdir, every chroxy-* string is a base,
   // exempt, or reported.
   if (touches) {
-    forEachNode(ast, null, (n) => {
+    const atSite = new Map() // exempt text -> occurrences at its bound site
+    forEachNode(ast, null, (n, parent, ancestors) => {
       const isStr = n.type === 'Literal' && typeof n.value === 'string'
       const isTpl = n.type === 'TemplateElement'
       if (!(isStr || isTpl) || classified.has(n)) return
       const text = isStr ? n.value : (n.value.cooked ?? n.value.raw)
       if (!/chroxy-/.test(text)) return
-      if (exempt.has(text)) exemptUsed.add(text)
-      else problems.push(`${line(n)}: ${REASON_CLASSIFY}: ${JSON.stringify(text)}`)
+      const rule = exempt.get(text)
+      if (!rule) { problems.push(`${line(n)}: ${REASON_CLASSIFY}: ${JSON.stringify(text)}`); return }
+      exemptUsed.add(text)
+      const shape = siteShape(n, ancestors)
+      if (shape === rule.site) atSite.set(text, (atSite.get(text) || 0) + 1)
+      else problems.push(`${line(n)}: exempt literal ${JSON.stringify(text)} at a site other than the exempted one — found ${shape}, expected ${rule.site}; a real tmpdir base reusing an exempted literal is hidden otherwise`)
     })
+    for (const [text, rule] of exempt) {
+      const got = atSite.get(text) || 0
+      if (exemptUsed.has(text) && got !== rule.count) {
+        problems.push(`1: exempt literal ${JSON.stringify(text)} expected ${rule.count} occurrence(s) at ${rule.site}, found ${got}`)
+      }
+    }
   }
   return { bases, problems, exemptUsed: [...exemptUsed] }
 }
@@ -262,7 +313,7 @@ function scanSourceForTmpBases () {
   for (const file of walk(SRC)) {
     // EXEMPT_LITERALS is keyed with '/' (POSIX); on Windows the walk yields '\\'.
     const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
-    const exempt = new Set([...EXEMPT_LITERALS.keys()].filter((k) => k.startsWith(`${rel}|`)).map((k) => k.slice(rel.length + 1)))
+    const exempt = new Map([...EXEMPT_LITERALS].filter(([k]) => k.startsWith(`${rel}|`)).map(([k, v]) => [k.slice(rel.length + 1), v]))
     const { bases, problems, exemptUsed: used } = scanSourceText(readFileSync(file, 'utf8'), { exempt })
     bases.forEach((b) => found.add(b))
     used.forEach((t) => exemptUsed.add(`${rel}|${t}`))
@@ -364,11 +415,42 @@ describe('tmpdir daemon-base roster (#8352)', () => {
     it('a chroxy-* string in a file with no tmpdir is ignored', () => {
       assert.deepEqual(scanSourceText("const n = 'chroxy-claude-tui'").problems, [])
     })
-    it('an exempt literal is accepted and reported as used; an unlisted one is not', () => {
-      const r = scanSourceText(IMPORT + "const n = tmpdir() && 'chroxy-tag:'", { exempt: new Set(['chroxy-tag:']) })
+    it('an exempt literal at its bound site is accepted and reported as used; an unlisted one is not', () => {
+      const body = "const t = tmpdir()\nconst tag = `chroxy-tag:${t}`\n"
+      const exempt = new Map([['chroxy-tag:', ex('image tag', 'TemplateElement>TemplateLiteral>decl:tag>VariableDeclaration')]])
+      const r = scanSourceText(IMPORT + body, { exempt })
       assert.deepEqual(r.problems, [])
       assert.deepEqual(r.exemptUsed, ['chroxy-tag:'])
-      assert.equal(scanSourceText(IMPORT + "const n = tmpdir() && 'chroxy-tag:'").problems.length, 1)
+      assert.equal(scanSourceText(IMPORT + body).problems.length, 1)
+    })
+
+    describe('exemptions bind to the usage site (#9212)', () => {
+      const SITE = 'TemplateElement>TemplateLiteral>decl:tag>VariableDeclaration'
+      const exempt = (count = 1) => new Map([['chroxy-tag:', ex('image tag', SITE, count)]])
+      const EXEMPT_SITE = "const tag = `chroxy-tag:${tmpdir()}`\n"
+      const run = (body, e = exempt()) => scanSourceText(IMPORT + body, { exempt: e }).problems
+
+      it('clean: the exempt site in its exact shape', () => assert.deepEqual(run(EXEMPT_SITE), []))
+      it('reported: the exempted literal reused as a real tmpdir base in the same file', () => {
+        const p = run(EXEMPT_SITE + "const d = mkdtemp(join(tmpdir(), 'chroxy-tag:'))")
+        assert.ok(p.some((x) => /exempt literal "chroxy-tag:" at a site other than the exempted one/.test(x) && x.includes('call:join@1')), p.join('\n'))
+      })
+      it('reported: a second identical occurrence at the same site exceeds the count', () => {
+        const p = run(EXEMPT_SITE + "{ const tag = `chroxy-tag:${1}` }\n")
+        assert.ok(p.some((x) => x.includes('"chroxy-tag:"') && x.includes('expected 1 occurrence(s)') && x.includes('found 2')), p.join('\n'))
+      })
+      it('reported: fewer occurrences than the count (one site vanished, the other remains)', () => {
+        const p = run(EXEMPT_SITE, exempt(2))
+        assert.ok(p.some((x) => x.includes('expected 2 occurrence(s)') && x.includes('found 1')), p.join('\n'))
+      })
+      it('reported: the exempt site changed shape (same literal, different enclosing site)', () => {
+        const p = run("const other = `chroxy-tag:${tmpdir()}`\n")
+        assert.ok(p.some((x) => x.includes('found TemplateElement>TemplateLiteral>decl:other')), p.join('\n'))
+      })
+      it('stale: the exempted literal is gone, so it is not reported as used', () => {
+        const r = scanSourceText(IMPORT + 'const t = tmpdir()', { exempt: exempt() })
+        assert.deepEqual(r.exemptUsed, [])
+      })
     })
     it('comments are not code', () => {
       assert.deepEqual(scanSourceText(IMPORT + "// join(tmpdir(), 'chroxy-in-comment')\nconst x = tmpdir()").bases, [])
