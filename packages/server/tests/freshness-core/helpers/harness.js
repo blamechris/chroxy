@@ -23,6 +23,9 @@ export const STATE_SOURCE = 'chroxy-state-file'
 
 export const REAL = await import(pathToFileURL(path.join(SRC, 'freshness/index.js')).href)
 
+/** The real core and the real transcript sources, merged, as `loadTreeVariant` returns for no edits. */
+export const REAL_TREE = { ...REAL, ...(await import(pathToFileURL(path.join(SRC, 'freshness-sources/index.js')).href)) }
+
 function repoNodeModules() {
   let dir = SRC
   for (let i = 0; i < 6; i++) {
@@ -52,6 +55,35 @@ export async function loadVariant(edits) {
     fs.writeFileSync(p, text.replace(from, () => to))
   }
   return import(pathToFileURL(path.join(tmp, 'src/freshness/index.js')).href)
+}
+
+/**
+ * Load the freshness core and the transcript sources with `edits` applied:
+ * [{ file, from, to }], `file` relative to `src/`. The whole `src` tree is
+ * copied, because the sources import the daemon's transcript locator. Returns
+ * both public surfaces merged.
+ */
+export async function loadTreeVariant(edits) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'freshness-variant-'))
+  variantDirs.push(tmp)
+  fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}')
+  fs.cpSync(SRC, path.join(tmp, 'src'), { recursive: true })
+  fs.symlinkSync(NODE_MODULES, path.join(tmp, 'node_modules'))
+  for (const { file, from, to } of edits) {
+    const p = path.join(tmp, 'src', file)
+    const text = fs.readFileSync(p, 'utf8')
+    const n = text.split(from).length - 1
+    assert.equal(n, 1, `mutant edit for ${file} must match exactly once, matched ${n}: ${from}`)
+    fs.writeFileSync(p, text.replace(from, () => to))
+  }
+  const core = await import(pathToFileURL(path.join(tmp, 'src/freshness/index.js')).href)
+  const sources = await import(pathToFileURL(path.join(tmp, 'src/freshness-sources/index.js')).href)
+  return { ...core, ...sources }
+}
+
+export async function mustKillTree(check, label, edits) {
+  const M = await loadTreeVariant(edits)
+  await assert.rejects(async () => check(M), isAssertion, `the "${label}" mutant survived`)
 }
 
 export function cleanupVariants() {
