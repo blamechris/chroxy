@@ -36,7 +36,7 @@ proves(
     const reports = r.kinds('report')
     assert.equal(reports.length, 1, 'five reads of one report must write one report record')
     assert.equal(reports[0].id, keys.reportKey(S1, T0 - 5 * MIN, H(RUNNING_FIELDS)))
-    assert.equal(r.kinds('check').length, 5, 'each read is still a check')
+    assert.equal(r.kinds('check', (x) => x.body.trigger === 'tick').length, 5, 'each read is still a check')
     assert.equal(r.kinds('system', (x) => x.body.event === 'idempotency_conflict').length, 0)
   },
   {
@@ -144,9 +144,10 @@ proves(
     const r = rig(M)
     r.writeState([entry('s1', { state: 'running', updatedAt: T0 - 10 * MIN })])
     r.ticks([T0, T0 + 30 * MIN, T0 + 60 * MIN, T0 + 90 * MIN])
-    const checks = r.kinds('check').map((c) => c.body)
+    const all = r.kinds('check').map((c) => c.body)
+    const checks = all.filter((c) => c.trigger === 'tick')
     assert.deepEqual(checks.map((c) => c.freshness), ['fresh', 'aging', 'stale', 'stale'])
-    assert.ok(checks.every((c) => c.last_report_at === T0 - 10 * MIN), 'the report time is the report\'s, not the check\'s')
+    assert.ok(all.every((c) => c.last_report_at === T0 - 10 * MIN), 'the report time is the report\'s, not the check\'s')
   },
   { 'a check refreshes the report': [edit('policy.js', 'reportAge: reportAgeMs,', 'reportAge: ({ lastReportAt, checkedAt, previousCheckedAt }) => checkedAt - (previousCheckedAt ?? lastReportAt),')] },
 )

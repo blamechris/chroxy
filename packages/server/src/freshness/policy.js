@@ -490,7 +490,7 @@ export const DEFAULT_POLICY = Object.freeze({
 
   // Budgets: first cycles before second cycles, oldest onset first;
   // rechecks never draw on the cycle budget; a recheck needing its own read
-  // draws on the recheck budget, least recently checked first.
+  // draws on the recheck budget, least recently investigated first.
   // At most one investigation per session per tick: the highest-priority
   // candidate of each session.
   selectInvestigations(candidates, { cycleBudget, recheckBudget }) {
@@ -508,7 +508,7 @@ export const DEFAULT_POLICY = Object.freeze({
     const free = candidates.filter((c) => c.kind === 'recheck' && !c.needsRead)
     const paid = candidates
       .filter((c) => c.kind === 'recheck' && c.needsRead)
-      .sort((a, b) => (a.lastReadAt ?? 0) - (b.lastReadAt ?? 0) || cmpStr(a.key, b.key))
+      .sort((a, b) => (a.lastInvestigatedAt ?? 0) - (b.lastInvestigatedAt ?? 0) || cmpStr(a.key, b.key))
       .slice(0, recheckBudget)
     return [...cycles, ...free, ...paid]
   },

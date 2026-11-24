@@ -227,7 +227,7 @@ proves(
     r.ticks([T0 + 30 * MIN])
     r.ticks([T0 + 60 * MIN])
     assert.equal(r.kinds('report').length, 1)
-    assert.equal(r.kinds('check').length, 3)
+    assert.equal(r.kinds('check', (x) => x.body.trigger === 'tick').length, 3)
     assert.equal(r.kinds('tick').length, 6)
   },
   { 'the index is not rebuilt from the file': [edit('file-ledger.js', 'const ledger = loadLedger({ ledgerId, records })', 'const ledger = loadLedger({ ledgerId, records: [] })')] },

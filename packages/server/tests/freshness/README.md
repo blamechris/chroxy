@@ -11,10 +11,10 @@ turned into records, the derived state and the policy) and the driver
 (`runtime.js`); the files of the same name under `model/` re-export them, so the
 model tests and the reconciler core run one implementation. That includes all of
 `derive.js` and `policy.js`, which also carry the owner-block, surface and
-investigation rules and the fold of their records. The reconciler core does not
-run those rules; they ship as data and functions only. What stays under `tests/`
-and does not ship: the stale-investigation scheduler (`investigation.js`), the
-owner queue (`queue.js`), the model's tick planner and owner actions
+investigation rules and the fold of their records, and `investigation.js`, the
+stale-investigation scheduler, which the reconciler core runs at every tick. The
+owner-block, surface and queue rules it does not run ship as data and functions
+only. What stays under `tests/` and does not ship: the owner queue (`queue.js`), the model's tick planner and owner actions
 (`reconciler.js`), and the helpers. See `docs/guides/freshness-reconciler.md`.
 
 **What it is.** Pure functions over an in-memory, append-only ledger. Time is
@@ -37,7 +37,7 @@ caller.
 | `model/ledger.js` | Append-only ledger with idempotent append |
 | `model/derive.js` | The fold from records to derived state |
 | `model/checks.js` | One read turned into report, activity and check records |
-| `model/investigation.js` | The stale-investigation scheduler |
+| `model/investigation.js` | The stale-investigation scheduler (re-exported from `src/freshness/investigation.js`) |
 | `model/queue.js` | The single-slot owner queue and owner actions |
 | `model/reconciler.js` | The tick, configuration records and the driver |
 | `model/policy.js` | Every rule, in one injectable object (`DEFAULT_POLICY`) |
@@ -389,7 +389,9 @@ onset. At most one investigation per session per tick. The cycle budget per
 tick covers first cycles before second, oldest onset first; a recheck that
 needs its own read draws on a separate budget.
 
-An investigation runs **rungs**, recorded by name in its close record:
+An investigation runs **rungs**, recorded by name in its close record, each
+with the check it read (`read`) and the evidence classes that read supplied
+(`evidence`; `classify` carries the union):
 `re_read` (the same adapter read once more, and one retry if it failed),
 `confirm_gone` (a read confirming a dropped session is really gone),
 `activity_read` (native activity: where the source's read carries it, from
@@ -538,7 +540,11 @@ of the current run); investigation re-reads do not count toward
 
 **reconciler.js.** Configuration records store the full values.
 
-**investigation.js.** A tick killed by a crash is replayed only in its own
+**investigation.js.** Rechecks that need a read of their own are ordered by the
+time of the session's last investigation, not of its last read: every session is
+read at every tick, so the last read never told two apart and the same sessions
+won every tick. Each rung of the close record names its read and its evidence
+classes. A tick killed by a crash is replayed only in its own
 slot. When the process comes back after the slot has passed, the source's
 next tick closes each investigation the crashed tick left open as
 `abandoned` (no rungs, no decision, no cycle), and the next investigation
