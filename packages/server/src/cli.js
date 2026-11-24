@@ -31,6 +31,7 @@ import { registerIdentityCommand } from './cli/identity-cmd.js'
 import { registerTokensCommand } from './cli/tokens-cmd.js'
 import { registerScheduleCommands } from './cli/schedule-cmd.js'
 import { registerAgentControlCommand } from './cli/agent-control-cmd.js'
+import { registerFreshnessCommand } from './cli/freshness-cmd.js'
 import { registerAgentCommand } from './cli/agent-cmd.js'
 
 const require = createRequire(import.meta.url)
@@ -66,5 +67,6 @@ registerTokensCommand(program)
 registerScheduleCommands(program)
 registerAgentControlCommand(program)
 registerAgentCommand(program)
+registerFreshnessCommand(program)
 
 program.parse()
