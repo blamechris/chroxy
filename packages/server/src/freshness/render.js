@@ -32,8 +32,12 @@ export const HEX_ID = new RegExp(`^[0-9a-f]{${KEY_LEN}}$`)
 /** A value put in a text: one line, no control characters, cut to `max` characters. */
 export function clean(value, max) {
   if (value === null || value === undefined) return ''
-  const flat = String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
-  return flat.length > max ? flat.slice(0, Math.max(0, max - 1)) + '…' : flat
+  // Control characters and every Unicode format character (bidi overrides and
+  // isolates, zero-width characters) become a space.
+  const flat = String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim()
+  // Cut by code point, so a surrogate pair is never split.
+  const points = Array.from(flat)
+  return points.length > max ? points.slice(0, Math.max(0, max - 1)).join('') + '…' : flat
 }
 
 function iso(ms) {
@@ -132,6 +136,7 @@ export const ECHO = Object.freeze({
   done: (title) => `Noted: marked done, ${title}. It closes when the next check agrees.`,
   dismiss: (title) => `Noted: dismissed, ${title}.`,
   defer: (title, until) => `Noted: deferred until ${iso(until)}, ${title}.`,
+  capped: (title) => `Further lines about this item were not applied (too many): ${title}.`,
   refused: (title, reason) => `Not applied (${reason}): ${title}.`,
 })
 

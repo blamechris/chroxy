@@ -171,7 +171,7 @@ proves(
   (M) => {
     const r = xrig(M, { exchange: { text_field_max: 30 } })
     r.writeState([
-      entry('s1', { state: 'blocked', blockedOn: 'before \u001b[31mred\u001b[0m after', decision: 'pick one of the following very long options please', updatedAt: T0 - MIN }, { name: 'CANARY-NAME', cwd: '/CANARY/cwd' }),
+      entry('s1', { state: 'blocked', blockedOn: 'before \u001b[31mred\u001b[0m after and then a very long stretch of words', decision: 'pick one of the following very long options please', next: 'a next step that is also much longer than thirty characters', updatedAt: T0 - MIN }, { name: 'CANARY-NAME', cwd: '/CANARY/cwd' }),
     ])
     r.tick(T0)
     const lines = r.outbox()
@@ -187,13 +187,54 @@ proves(
     const text = items(r)[0].text
     assert.ok(!/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text), 'no control character reaches the text')
     assert.match(text, /before \[31mred \[0m after/, 'the declared words are there, the escape character a space')
-    const decision = text.split('\n').find((x) => x.startsWith('Decision: '))
-    assert.ok(decision.length - 'Decision: '.length <= 30, 'each field is cut to the configured length')
-    assert.ok(decision.endsWith('…'))
+    for (const label of ['Blocked on: ', 'Decision: ', 'Next: ']) {
+      const field = text.split('\n').find((x) => x.startsWith(label))
+      assert.ok(field, `${label} is there`)
+      assert.ok(Array.from(field).length - label.length <= 30, `${label} is cut to the configured length`)
+      assert.ok(field.endsWith('…'))
+    }
+    const allowed = /^(session \S+ needs the owner\.|Blocked on: |Decision: |Next: |Reported: \d{4}-)/
+    for (const l of text.split('\n')) assert.match(l, allowed, 'every line is a template line over a declared field')
   },
   {
-    'control characters left in': [edit('render.js', '.replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+/g, \' \')', '')],
-    'fields not cut': [edit('render.js', "return flat.length > max ? flat.slice(0, Math.max(0, max - 1)) + '…' : flat", 'return flat')],
+    'control characters left in': [edit('render.js', '.replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\p{Cf}]+/gu, \' \')', '')],
+    'fields not cut': [edit('render.js', "return points.length > max ? points.slice(0, Math.max(0, max - 1)).join('') + '…' : flat", 'return flat')],
+    'a template names a field outside the declaration': [edit('render.js', "field('Reported', rep ? iso(rep.last_report_at) : null, max)", "field('Reported', rep ? iso(rep.last_report_at) : null, max), field('Name', 'CANARY-NAME', max)")],
+  },
+)
+
+proves(
+  'clean: format characters (bidi overrides and isolates, zero-width) are removed and a cut never splits a surrogate pair',
+  (M) => {
+    assert.equal(M.clean('a\u202eb\u200bc\u2066d\ufeffe', 50), 'a b c d e')
+    assert.equal(M.clean('😀'.repeat(5), 4), '😀😀😀…', 'cut by code point')
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(M.clean('😀'.repeat(5), 4)))
+    assert.equal(M.clean('x'.repeat(5), 5), 'xxxxx', 'exactly the length is not cut')
+  },
+  {
+    'format characters left in': [edit('render.js', '\\u2028\\u2029\\p{Cf}]+/gu', '\\u2028\\u2029]+/gu')],
+    'a cut by code unit': [edit('render.js', 'const points = Array.from(flat)', "const points = flat.split('')")],
+  },
+)
+
+proves(
+  'the outbox writer sees a file a consumer rotated or truncated',
+  (M) => {
+    const dir = tmp()
+    const file = path.join(dir, 'outbox.jsonl')
+    const rec = (n) => M.outboxRecord({ at: T0, rec: String(n).padStart(32, '0'), key: 'k'.repeat(32), op: 'post', cls: 'item', status: 'open', text: 't' })
+    const h = M.openOutbox(file)
+    assert.equal(h.append(rec(1)), 'written')
+    assert.equal(h.append(rec(1)), 'duplicate')
+    fs.writeFileSync(file, '')
+    assert.equal(h.append(rec(1)), 'written', 'after a truncation the file is read again')
+    fs.renameSync(file, file + '.old')
+    fs.writeFileSync(file, JSON.stringify({ rec: 'z'.repeat(32), pad: 'p'.repeat(2000) }) + '\n')
+    assert.equal(h.append(rec(1)), 'written', 'after a rotation to a larger file too')
+  },
+  {
+    'a truncation not seen': [edit('outbox.js', '|| seen.size < known.size)) tail = null', ')) tail = null')],
+    'a rotation not seen': [edit('outbox.js', 'seen.ino !== known.ino ||', '')],
   },
 )
 
@@ -276,7 +317,7 @@ proves(
     const cfg = M.coreConfig()
     assert.equal(cfg.surface.defer_max_minutes, 24 * 60)
     assert.equal(cfg.surface.defer_max_count, 3)
-    assert.deepEqual(cfg.exchange, { max_file_bytes: 1048576, max_line_bytes: 1024, max_new_lines_per_tick: 200, max_rejects_per_tick: 20, text_field_max: 240, digest_max_items: 12 })
+    assert.deepEqual(cfg.exchange, { max_file_bytes: 1048576, max_line_bytes: 1024, max_new_lines_per_tick: 200, max_rejects_per_tick: 20, text_field_max: 240, digest_max_items: 12, max_echoes_per_item_per_tick: 5, max_echoes_per_episode: 50 })
     assert.equal(M.deferLimits(cfg).maxMs, 24 * HOUR)
     assert.equal(M.deferLimits(M.coreConfig({ surface: { defer_max_minutes: 5, defer_max_count: 1 } })).maxMs, 5 * MIN, 'a configured cap is the cap')
     assert.deepEqual(M.deferLimits({}), { maxMs: 24 * HOUR, maxCount: 3 }, 'a configuration stored before the caps existed gets the defaults')

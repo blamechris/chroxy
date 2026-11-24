@@ -44,6 +44,7 @@ export function createState(policy) {
     outbox: new Map(),
     receipts: new Map(),
     contradictions: new Map(),
+    echoCounts: new Map(),
     index: new Map(),
     lastSeq: 0,
   }
@@ -628,6 +629,11 @@ function foldSystem(state, r) {
   if (r.body.event === 'outbox_render' && (d.class === 'item' || d.class === 'digest')) {
     const prev = state.outbox.get(d.key)
     state.outbox.set(d.key, { key: d.key, class: d.class, itemId: d.item_id ?? null, episode: d.episode ?? null, title: prev?.title ?? d.title ?? null, rec: d.ids[0], hash: d.hash })
+  }
+  // Echo items an item has had in an episode (applied and refused lines).
+  if (r.body.event === 'input_line' && (d.disposition === 'applied' || d.disposition === 'refused') && d.item_id) {
+    const k = `${d.item_id}|${d.episode}`
+    state.echoCounts.set(k, (state.echoCounts.get(k) ?? 0) + 1)
   }
   // The first receipt for an outbox record stands; a later one never rewrites it.
   if (r.body.event === 'input_line' && d.disposition === 'receipt' && !state.receipts.has(d.rec)) state.receipts.set(d.rec, d.outcome)

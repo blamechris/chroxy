@@ -93,6 +93,7 @@ function readTail(file) {
 /** An append-only outbox file. `append` returns 'written' or 'duplicate' and throws if it cannot write. */
 export function openOutbox(file) {
   let tail = null
+  let known = null
   return {
     file,
     append(record) {
@@ -103,6 +104,14 @@ export function openOutbox(file) {
       } catch (err) {
         if (err?.code !== 'ENOENT') throw err
       }
+      // A consumer that rotated or truncated the file: what was read of it is stale.
+      let seen = null
+      try {
+        seen = fs.statSync(file)
+      } catch {
+        seen = null
+      }
+      if (tail && (!seen || !known || seen.ino !== known.ino || seen.size < known.size)) tail = null
       tail ??= readTail(file)
       if (tail.recs.has(record.rec)) return 'duplicate'
       const fd = fs.openSync(file, 'a', 0o644)
@@ -114,6 +123,8 @@ export function openOutbox(file) {
       }
       tail.open = false
       tail.recs.add(record.rec)
+      const after = fs.statSync(file)
+      known = { ino: after.ino, size: after.size }
       return 'written'
     },
   }

@@ -55,7 +55,7 @@ export const EXCHANGE_FILES = Object.freeze({ outbox: 'outbox.jsonl', receipts: 
 export function createExchange({ dir }) {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) throw new TypeError('createExchange: dir must be an absolute path')
   const files = Object.fromEntries(Object.entries(EXCHANGE_FILES).map(([k, f]) => [k, path.join(dir, f)]))
-  return { dir, files, outbox: openOutbox(files.outbox), pending: [], pendingKeys: new Set(), now: 0 }
+  return { dir, files, outbox: openOutbox(files.outbox), pending: [], pendingKeys: new Set(), now: 0, tickEchoes: new Map() }
 }
 
 const sys = (event, ids, detail, now) => put({ kind: 'system', id: systemKey(event, ids), body: { event, detail: { ids, ...detail } } }, now)
@@ -88,7 +88,8 @@ function unconfirmedFor(state, item) {
 function* ingest(ctx, ex, { input, parse, handle, tickId, now }) {
   const lim = exchangeLimits(ctx.state.config)
   const { lines, problem } = readInput(ex.files[input], { maxFileBytes: lim.max_file_bytes, maxLineBytes: lim.max_line_bytes })
-  if (problem) yield sys('input_limit', [input, problem, tickId], { input, problem }, now)
+  // Once per file, not once per tick: a rotated file starts a new one.
+  if (problem) yield sys('input_limit', [input, problem, lines[0]?.id ?? ''], { input, problem }, now)
   let fresh = 0
   let rejects = 0
   for (const ln of lines) {
@@ -148,28 +149,49 @@ function* handleAck(ctx, ex, a, lid, now) {
   const lim = exchangeLimits(st.config)
   const line = (disposition, extra) => sys('input_line', ['acks', lid], { input: 'acks', disposition, intent: a.intent, ...extra }, now)
   const att = attemptsByRec(st).get(a.rec)
-  const it = att ? st.items.get(att.itemId) : null
+  const judgedKey = systemKey('input_judged', ['acks', lid])
+  const prior = st.index.get(judgedKey)?.body.detail
+  const it = prior ? st.items.get(prior.item_id) : att ? st.items.get(att.itemId) : null
   let ignored = null
-  if (!att) ignored = 'unknown_message'
+  if (prior) ignored = null
+  else if (!att) ignored = 'unknown_message'
   else if (itemKey(att.itemId, att.body.episode) !== a.key) ignored = 'key_mismatch'
   else if (!it?.open) ignored = 'item_closed'
   else if (att.body.episode !== it.episode) ignored = 'old_episode'
   else if (currentMessage(st, it)?.id !== att.id) ignored = 'not_current_message'
   if (ignored) return yield line('ignored', { reason: ignored })
 
-  const title = headline(it, lim.text_field_max)
-  const applied = st.index.has(ownerAckKey(it.itemId, it.episode, lid, 'ack'))
-  const why = applied ? null : refusalFor(ctx, it, a, now)
-  if (why) {
-    if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[why]), it, now)) return
-    return yield line('refused', { reason: why, item_id: it.itemId })
+  // How many echoes this item may still have: per tick (the rest wait for the
+  // next tick) and per episode (the rest are not judged; one record and one
+  // echo say so, once).
+  let judged = prior
+  const itemKeyStr = `${judged?.item_id ?? it.itemId}|${judged?.episode ?? it.episode}`
+  if (!judged) {
+    if ((st.echoCounts.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_episode) {
+      const id = ['acks', 'echo_cap', it.itemId, it.episode]
+      if (!st.index.has(systemKey('input_limit', id)) && echo(ex, recId('echo_cap', it.itemId, it.episode), ECHO.capped(headline(it, lim.text_field_max)), it, now)) yield sys('input_limit', id, { input: 'acks', problem: 'echo_cap', item_id: it.itemId, episode: it.episode }, now)
+      return
+    }
+    if ((ex.tickEchoes.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_item_per_tick) return
+    // Judge the line once, now, and keep the judgement: a retry after a crash or a
+    // failed echo carries it out and never judges again, with a later time.
+    const why = refusalFor(ctx, it, a, now)
+    judged = { verdict: why ? 'refuse' : 'accept', reason: why, item_id: it.itemId, episode: it.episode }
+    yield sys('input_judged', ['acks', lid], { verdict: judged.verdict, reason: why, item_id: it.itemId, episode: it.episode }, now)
   }
-  if (!applied) {
+  ex.tickEchoes.set(itemKeyStr, (ex.tickEchoes.get(itemKeyStr) ?? 0) + 1)
+  const title = headline(it, lim.text_field_max)
+  const detail = { item_id: judged.item_id, episode: judged.episode }
+  if (judged.verdict === 'refuse') {
+    if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[judged.reason]), it, now)) return
+    return yield line('refused', { reason: judged.reason, ...detail })
+  }
+  if (!st.index.has(ownerAckKey(judged.item_id, judged.episode, lid, 'ack'))) {
     const res = yield* planOwnerEvent(ctx, { itemId: it.itemId, intent: a.intent, ackRef: lid, until: a.until, now })
     if (!res.applied) return yield line('ignored', { reason: 'not_applicable' })
   }
   if (!echo(ex, lid, ECHO[a.intent](title, a.until), it, now)) return
-  return yield line('applied', { item_id: it.itemId, episode: it.episode })
+  return yield line('applied', detail)
 }
 
 // ── outbox ───────────────────────────────────────────────────────────
@@ -250,6 +272,7 @@ function* renderOutbox(ctx, ex, now) {
  */
 export function* planExchange(ctx, ex, { source, tickId, now, signals, tickOpenSeq }) {
   ex.now = now
+  ex.tickEchoes.clear()
   yield* sweepUnknownDeliveries(ctx, now)
   yield* ingest(ctx, ex, { input: 'receipts', parse: parseReceipt, handle: (r, lid) => handleReceipt(ctx, ex, r, lid, now), tickId, now })
   yield* ingest(ctx, ex, { input: 'acks', parse: parseAck, handle: (a, lid) => handleAck(ctx, ex, a, lid, now), tickId, now })

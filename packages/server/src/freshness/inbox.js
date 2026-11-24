@@ -7,8 +7,9 @@
  * Format of both files: UTF-8 text, one JSON object per line, appended by the
  * consumer. A last line with no newline is a write in flight and is not read
  * until its newline arrives. A line is read once ever: its identity is the hash
- * of its text, recorded in the ledger, so a consumer may leave the file as it is
- * or truncate it; neither replays a line.
+ * of its text, recorded in the ledger, so a truncation replays no line. A
+ * consumer should rotate its files: a file past the size bound is read only that
+ * far, and the lines after it are never seen.
  *
  * Pure of the clock; the only I/O is a read-only read of the named file.
  */
@@ -37,7 +38,7 @@ export function lineId(text) {
  * or `oversize` (more than `maxFileBytes`: only the first `maxFileBytes` are
  * read and lines are those wholly inside them). A missing file is no lines.
  */
-export function readInput(file, { maxFileBytes, maxLineBytes }) {
+export function readInput(file, { maxFileBytes, maxLineBytes }, { beforeOpen } = {}) {
   let st
   try {
     st = fs.lstatSync(file)
@@ -49,9 +50,14 @@ export function readInput(file, { maxFileBytes, maxLineBytes }) {
   let fd = null
   let oversize = false
   try {
-    // Where the platform has it, refuse to follow a link swapped in after the check.
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    beforeOpen?.(file)
+    // Where the platform has them: refuse a link swapped in after the check, and
+    // never block on a FIFO swapped in there. (The shared open-nofollow helper is
+    // asynchronous and lives outside this directory, which may import nothing
+    // from the daemon, so the same two flags are used here.)
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0))
     const open = fs.fstatSync(fd)
+    if (!open.isFile()) return { lines: [], problem: 'unsafe' }
     oversize = open.size > maxFileBytes
     const want = Math.min(open.size, maxFileBytes)
     buf = Buffer.alloc(want)

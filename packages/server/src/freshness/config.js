@@ -47,6 +47,10 @@ export const DEFAULT_CONFIG = Object.freeze({
     max_rejects_per_tick: 20,
     text_field_max: 240,
     digest_max_items: 12,
+    // Echo items one item may have per tick and per episode. Past the second,
+    // further lines are not judged: one counted record and one echo say so.
+    max_echoes_per_item_per_tick: 5,
+    max_echoes_per_episode: 50,
   }),
   // What each source's adapter can do. `native_in_read`: the report read also
   // returns native state (busy, prompts, events). `activity_read`: a separate

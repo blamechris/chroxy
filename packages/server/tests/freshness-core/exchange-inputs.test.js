@@ -13,7 +13,8 @@ import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { HOUR, MIN, REAL, T0, cleanupTmp, cleanupVariants, mustKill, xrig } from './helpers/harness.js'
+import { execFileSync } from 'node:child_process'
+import { HOUR, MIN, REAL, T0, cleanupTmp, cleanupVariants, mustKill, tmp, xrig } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
@@ -230,7 +231,7 @@ proves(
     'a cap one too long': [edit('exchange.js', 'if (a.until - now > maxMs)', 'if (a.until - now > maxMs + 24 * 3600 * 1000)')],
     'a time in the past': [edit('exchange.js', "if (a.until <= now) return 'until_not_in_future'", '')],
     'an item not waiting': [edit('exchange.js', "if (effectiveState(it, now) !== 'active') return 'not_active'", '')],
-    'a refusal not echoed': [edit('exchange.js', 'if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[why]), it, now)) return', 'if (false) return')],
+    'a refusal not echoed': [edit('exchange.js', 'if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[judged.reason]), it, now)) return', 'if (false) return')],
   },
 )
 
@@ -266,7 +267,7 @@ proves(
     assert.equal(r.lines('echo').length, 1)
     assert.deepEqual(r.conflicts(), [])
   },
-  { 'an applied line judged again': [edit('exchange.js', 'const applied = st.index.has(ownerAckKey(it.itemId, it.episode, lid, \'ack\'))', 'const applied = false')] },
+  { 'an applied line judged again': [edit('exchange.js', 'let judged = prior', 'let judged = null')] },
 )
 
 // ── untrusted input ───────────────────────────────────────────────────
@@ -393,3 +394,74 @@ proves(
   { 'a link read': [edit('inbox.js', "if (!st.isFile()) return { lines: [], problem: 'unsafe' }", '')] },
   { skip: process.platform === 'win32' && 'links need privileges on Windows' },
 )
+
+proves(
+  'a refusal is judged once: a retry after a failed echo carries the recorded judgement out, however much time has passed',
+  (M) => {
+    const { r, m } = shown(M)
+    // 24h5m away at the first tick (too long), 23h50m at the second (within the maximum)
+    r.add('acks.jsonl', ack(m, 'defer', { until: T0 + 24 * HOUR + 10 * MIN }))
+    fs.renameSync(r.outboxFile, r.outboxFile + '.keep')
+    fs.mkdirSync(r.outboxFile)
+    r.tick(T0 + 5 * MIN)
+    assert.deepEqual(reasons(r, 'acks'), [], 'the echo failed, so the line is not finished')
+    fs.rmSync(r.outboxFile, { recursive: true })
+    fs.renameSync(r.outboxFile + '.keep', r.outboxFile)
+    r.tick(T0 + 20 * MIN)
+    assert.deepEqual(reasons(r, 'acks'), ['refused:too_long'])
+    assert.equal(steps(r, 'deferred').length, 0, 'it was not deferred')
+    assert.equal(r.lines('echo').length, 1)
+    assert.match(r.lines('echo')[0].text, /^Not applied/)
+    assert.deepEqual(r.conflicts(), [])
+  },
+  { 'a line judged again on retry': [edit('exchange.js', 'let judged = prior', 'let judged = null')] },
+)
+
+proves(
+  'echoes are bounded: per item per tick, and per episode, past which one counted record and one echo stand for the rest',
+  (M) => {
+    const { r, m } = shown(M, { exchange: { max_echoes_per_item_per_tick: 2, max_echoes_per_episode: 3 } })
+    r.add('acks.jsonl', ...Array.from({ length: 8 }, (_, i) => ack(m, 'defer', { until: T0 + 30 * HOUR + i })))
+    const counts = []
+    for (const at of [5, 6, 7, 8]) {
+      r.tick(T0 + at * MIN)
+      counts.push([r.dispositions('acks').length, r.lines('echo').length])
+    }
+    assert.deepEqual(counts, [[2, 2], [3, 4], [3, 4], [3, 4]])
+    assert.deepEqual(r.events('input_limit').map((x) => x.body.detail.problem), ['echo_cap'])
+    assert.match(r.lines('echo')[3].text, /too many/)
+  },
+  {
+    'no per-tick bound': [edit('exchange.js', 'if ((ex.tickEchoes.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_item_per_tick) return', '')],
+    'no per-episode bound': [edit('exchange.js', '>= lim.max_echoes_per_episode', '>= 1e9')],
+    'echoes not counted': [edit('derive.js', 'state.echoCounts.set(k, (state.echoCounts.get(k) ?? 0) + 1)', '')],
+  },
+)
+
+proves(
+  'an oversize file is recorded once, not once per tick',
+  (M) => {
+    const { r, m } = shown(M, { exchange: { max_file_bytes: 400 } })
+    r.add('acks.jsonl', ...Array.from({ length: 20 }, (_, i) => ack({ key: m.key, rec: 'd'.repeat(32) }, 'done', { at: i })))
+    for (const at of [5, 6, 7]) r.tick(T0 + at * MIN)
+    assert.deepEqual(r.events('input_limit').map((x) => x.body.detail.problem), ['oversize'])
+  },
+  { 'one record per tick': [edit('exchange.js', "[input, problem, lines[0]?.id ?? '']", '[input, problem, tickId]')] },
+)
+
+describe('an input swapped for a FIFO after the check is refused, not waited on', { skip: process.platform === 'win32' && 'no FIFOs on Windows' }, () => {
+  const check = (M) => {
+    const dir = tmp()
+    const file = path.join(dir, 'acks.jsonl')
+    fs.writeFileSync(file, 'x\n')
+    const out = M.readInput(file, { maxFileBytes: 1024, maxLineBytes: 1024 }, {
+      beforeOpen: (f) => {
+        fs.rmSync(f)
+        execFileSync('mkfifo', [f])
+      },
+    })
+    assert.deepEqual(out, { lines: [], problem: 'unsafe' })
+  }
+  it('holds on the real code', () => check(REAL))
+  it('mutant "the opened file is not checked" fails it', () => mustKill(check, 'the opened file is not checked', [edit('inbox.js', "    if (!open.isFile()) return { lines: [], problem: 'unsafe' }\n", '')]))
+})

@@ -288,7 +288,9 @@ reconciler never changes or removes a line. A consumer reads from the start or
 from where it stopped, ignores a last line without its newline (a write in
 flight) and any line it cannot parse, and may rotate or truncate the file between
 ticks (nothing is re-rendered from the file; its tail is read only to keep a
-line from being written twice after a crash). Each write is one `write` and an
+line from being written twice after a crash, and is read again when the file's
+identity changes or it shrinks). A consumer must dedupe by `rec`: a line rewritten
+after a crash that came after a rotation is written again. Each write is one `write` and an
 `fsync`; a crash can leave a cut-off tail, which the next write starts after
 with a newline.
 
@@ -351,9 +353,12 @@ One JSON object per line:
 known. **Any other outcome is unclear**: the attempt is recorded as "delivery not
 confirmed" (the text of the outcome is never kept), the item's message says so in
 place, and **the attempt is not made again**. The first receipt for a line
-stands; a later one is recorded as ignored. A receipt for a line or key the
-reconciler did not write is ignored. A message whose receipt is `failed` or
-unclear is no longer the item's current message (below).
+stands; a later one is recorded as ignored. Receipts are for item lines only:
+one for an echo, alert, digest or `updated` line, or for a line the reconciler
+did not write, is recorded as ignored. A message whose receipt is `failed` or
+unclear is no longer the item's current message (below), so a failed or unclear
+receipt on a reminder makes the earlier delivered message current again, and an
+acknowledgement naming that earlier message then applies.
 
 ### Acknowledgements and deferrals
 
@@ -383,6 +388,11 @@ the operator answers. This is **operator-stated evidence, not a fact**:
   for an owner block (only seed, issue, attention and gone items can be dismissed).
 - Every `done`, `dismiss`, `defer` and refusal writes an **echo item**.
 
+A line is **judged once**: the verdict (apply or refuse, and the reason) is a ledger
+record under the line's hash, written before anything is done or echoed. A retry
+after a crash or a failed echo carries out the recorded verdict and never judges
+again with a later time, so the echo and the item cannot disagree.
+
 Each line is acted on once ever: its disposition (`applied`, `refused`, `ignored`,
 `rejected`, `receipt`) is a ledger record under the hash of the line, recorded
 after the echo is written, so a tick cut short between the two finishes the line
@@ -400,6 +410,8 @@ on the next tick without applying it twice.
 | `exchange.max_rejects_per_tick` | 20 | rejected lines recorded per input per tick |
 | `exchange.text_field_max` | 240 | characters of any declared value in a text |
 | `exchange.digest_max_items` | 12 | items listed in the digest |
+| `exchange.max_echoes_per_item_per_tick` | 5 | lines about one item judged (and echoed) per tick; the rest wait for the next |
+| `exchange.max_echoes_per_episode` | 50 | lines about one item judged in an episode; past it, one counted `input_limit` record and one echo stand for the rest, which are never judged |
 
 A configuration stored before these keys existed gets the defaults.
 
@@ -415,9 +427,11 @@ tick or close an item. A file that is not a regular file (a link, a directory) i
 not read and the tick records `input_limit: unsafe`; a file over the size bound
 is read to the bound and `input_limit: oversize` is recorded. A consumer should
 rotate its files: the reconciler re-reads them from the start each tick, so a
-file that only grows is read to the size bound and no further. Where the
-platform has `O_NOFOLLOW` the open also refuses a link swapped in after the check
-(that race has no test).
+file that only grows is read to the size bound and no further (the oversize
+`input_limit` is recorded once per file, not once per tick). The open uses
+`O_NOFOLLOW` and `O_NONBLOCK` where the platform has them and refuses anything
+that is not a regular file after the open, so a link or FIFO swapped in after the
+check is refused and never waited on.
 
 ### Not here
 
