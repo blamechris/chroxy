@@ -202,7 +202,7 @@ const EXCLUDED_HARNESSES = [
   'packages/desktop/scripts/__tests__/find-macho.test.mjs',
   'packages/store-core/scripts/__tests__/export-targets.test.mjs',
   // node:test owns this suite's verdict (#9232). The named Scripts Tests job checks
-  // its TAP summary with assert-test-count.mjs (minimum 9 cases).
+  // its TAP summary with assert-test-count.mjs (minimum 15 cases).
   'scripts/__tests__/blocked-report.test.mjs',
   // node:test owns this suite's verdict. The named Scripts Tests job checks
   // its TAP summary with assert-test-count.mjs (minimum 27 cases).

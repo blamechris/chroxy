@@ -1951,7 +1951,7 @@ jobs:
         run: |
           set -o pipefail
           node scripts/__tests__/blocked-report.test.mjs | tee /tmp/chroxy-blocked-report.tap
-          node scripts/lib/assert-test-count.mjs --min 9 cat /tmp/chroxy-blocked-report.tap > /dev/null
+          node scripts/lib/assert-test-count.mjs --min 15 cat /tmp/chroxy-blocked-report.tap > /dev/null
 
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BLOCKED_HEADLINE, blockedReport, describeBlocked } from '../lib/blocked-report.mjs'
+import { BLOCKED_HEADLINE, blockedReport, describeBlocked, holdingBlocked } from '../lib/blocked-report.mjs'
 
 // #9232. No browser: the helper is pure, so every case here runs on plain node.
 
@@ -39,6 +39,7 @@ test('blocked and body failed: message carries BOTH, cause is the original', () 
   assert.ok(err.message.includes(URL_A), 'blocked URL named')
   assert.deepEqual(err.blocked, [URL_A])
   assert.ok(err.message.indexOf('Timeout') < err.message.indexOf(URL_A), 'original failure comes first')
+  assert.equal(err.message, `locator.waitFor: Timeout 10000ms exceeded\n\nThe case also hit blocked attempts, a possible cause. ${BLOCKED_HEADLINE}; 1 blocked:\n  - ${URL_A}`)
 })
 
 test('blocked and a non-Error was thrown: stringified into the message, kept as cause', () => {
@@ -65,4 +66,39 @@ test('the blocked list is copied, so later pushes do not rewrite a reported erro
 
 test('describeBlocked lists one attempt per line', () => {
   assert.equal(describeBlocked([URL_A, WS]), `  - ${URL_A}\n  - ${WS}`)
+})
+
+test('holdingBlocked: body passes, nothing blocked: resolves', async () => {
+  assert.equal(await holdingBlocked([], async () => {}), undefined)
+})
+
+test('holdingBlocked: body throws, nothing blocked: rejects with the SAME error', async () => {
+  const original = new Error('boom')
+  await assert.rejects(holdingBlocked([], async () => { throw original }), (e) => e === original)
+})
+
+test('holdingBlocked: body passes but something was blocked: rejects naming it', async () => {
+  await assert.rejects(holdingBlocked([URL_A, WS], async () => {}), (e) => (
+    e.message.includes(URL_A) && e.message.includes(WS) && e.message.includes(BLOCKED_HEADLINE)
+  ))
+})
+
+test('holdingBlocked: body throws and something was blocked: original as cause, both in the message', async () => {
+  const original = new Error('boom')
+  await assert.rejects(holdingBlocked([URL_A], async () => { throw original }), (e) => (
+    e.cause === original && e.message.includes('boom') && e.message.includes(URL_A)
+  ))
+})
+
+test('holdingBlocked: an attempt recorded DURING the body, before it throws, is reported', async () => {
+  const blocked = []
+  const original = new Error('late failure')
+  await assert.rejects(holdingBlocked(blocked, async () => {
+    blocked.push(URL_A)
+    throw original
+  }), (e) => e.cause === original && e.message.includes(URL_A))
+})
+
+test('holdingBlocked: a thrown undefined is still a failure', async () => {
+  await assert.rejects(holdingBlocked([], async () => { throw undefined }), (e) => e instanceof Error && e.message.includes('the case threw'))
 })

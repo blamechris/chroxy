@@ -37,3 +37,19 @@ export function blockedReport(blocked, failure) {
   err.blocked = [...blocked]
   return err
 }
+
+/**
+ * Run `body`, hold whatever it throws, and throw `blockedReport(blocked, failure)`.
+ * `blocked` is read AFTER the body settles, so attempts recorded while it ran are included.
+ * A null/undefined throw becomes an Error so it cannot be mistaken for a pass.
+ */
+export async function holdingBlocked(blocked, body) {
+  let failure
+  try {
+    await body()
+  } catch (e) {
+    failure = e ?? new Error(`the case threw ${e}`)
+  }
+  const report = blockedReport(blocked, failure)
+  if (report !== undefined) throw report
+}

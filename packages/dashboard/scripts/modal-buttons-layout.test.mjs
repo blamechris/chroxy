@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
 import react from '@vitejs/plugin-react'
 import { chromium } from 'playwright'
-import { blockedReport } from '../../../scripts/lib/blocked-report.mjs'
+import { holdingBlocked } from '../../../scripts/lib/blocked-report.mjs'
 
 // #8779: the shared modal footer buttons rendered 29px high. The REAL New
 // Session modal (Create enabled, and disabled while creating), ConfirmDialog
@@ -217,11 +217,10 @@ describe('modal footer button layout (#8779)', () => {
         // failed route/routeWebSocket/newPage still closes the context.
         try {
           const blocked = []
-          // Whatever fails below (a timeout, an assertion, a setup error) is held, not thrown,
-          // so the blocked attempts that may have caused it are reported with it (#9232).
-          // A blocked attempt still fails a case that would otherwise pass.
-          let failure
-          try {
+          // Whatever fails in the body (a timeout, an assertion, a setup error) is held and
+          // rethrown with the blocked attempts that may have caused it (#9232). A blocked
+          // attempt still fails a case that would otherwise pass.
+          await holdingBlocked(blocked, async () => {
             await context.route(/.*/, (route) => {
               const u = new URL(route.request().url())
               if (u.origin === origin) return route.continue()
@@ -241,11 +240,7 @@ describe('modal footer button layout (#8779)', () => {
             console.log(`# ${caseName} ${vpName}: ${JSON.stringify(m)}`)
             assert.deepEqual(errors, [], 'the fixture page raised no error')
             await fn(m)
-          } catch (e) {
-            failure = e ?? new Error(`the case threw ${e}`)
-          }
-          const report = blockedReport(blocked, failure)
-          if (report !== undefined) throw report
+          })
         } finally {
           await context.close()
         }
