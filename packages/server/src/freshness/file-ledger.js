@@ -312,6 +312,13 @@ function writeAll(fd, buf) {
   while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off)
 }
 
+/** Throw unless `dir` is outside every directory of `keepOutOf`, by lexical and by real path. */
+export function assertKeptOutOf(dir, keepOutOf, what) {
+  for (const p of keepOutOf) {
+    if (inside(dir, p) || inside(realish(dir), realish(p))) throw new TypeError(`openFileLedger: ${what} must be kept outside ${p}`)
+  }
+}
+
 /**
  * Open the ledger in `dir` for writing, holding the writer lock.
  *
@@ -329,9 +336,7 @@ function writeAll(fd, buf) {
  */
 export function openFileLedger({ dir, ledgerId, now, leaseMs = DEFAULT_LEASE_MS, guard = writerGuard, keepOutOf = [], pid, host, isAlive }) {
   if (!dir || !ledgerId) throw new TypeError('openFileLedger: dir and ledgerId are required')
-  for (const p of keepOutOf) {
-    if (inside(dir, p) || inside(realish(dir), realish(p))) throw new TypeError(`openFileLedger: the ledger must be kept outside ${p}`)
-  }
+  assertKeptOutOf(dir, keepOutOf, 'the ledger')
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const file = path.join(dir, LEDGER_FILE)
   const lockPath = path.join(dir, LOCK_FILE)

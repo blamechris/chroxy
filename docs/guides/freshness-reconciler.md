@@ -20,8 +20,9 @@ The model's pure rule modules moved there from `tests/freshness/model/`
 run one implementation. Everything in those files ships, including the parts the
 core does not run: `derive.js` folds the surface, owner and investigation
 records, and `policy.js` holds the owner-block, surface-order and investigation
-rules. What stays under `tests/` and does not ship: the owner queue
-(`queue.js`), the model's tick planner (`reconciler.js`) and the test helpers.
+rules. The owner queue (`queue.js`) moved there too (#9284). What stays under
+`tests/` and does not ship: the model's tick planner (`reconciler.js`) and the
+test helpers.
 
 | File | Role |
 |---|---|
@@ -29,6 +30,8 @@ rules. What stays under `tests/` and does not ship: the owner queue
 | `state-file-adapter.js` | Adapter over the daemon's persisted session-state file |
 | `file-ledger.js` | The durable file ledger and its single-writer guard |
 | `investigation.js` | The bounded, read-only stale investigation |
+| `queue.js` | The single-slot owner queue and owner actions (the model's, unchanged) |
+| `exchange.js`, `outbox.js`, `inbox.js`, `render.js` | The queue's files: outbox, receipts, acknowledgements and the templates (below) |
 | `core.js` | `openReconciler`, `planCoreTick`, `coreConfig` |
 | `index.js` | The public surface |
 
@@ -231,8 +234,9 @@ now)` on the sealed adapter, which has no send or write member, and appends to
 the ledger. A re-read, its retry, the confirmation that a session is gone and a
 separate activity read for a source that has one are all that same `read`; an
 activity read ignores the report the read carries and keeps its native state.
-Nothing is asked of a session. The tick runs with a delivery function that
-throws, so a planner that yielded a send would fail the tick.
+Nothing is asked of a session. A tick with no exchange directory runs with a delivery function that
+throws, so a planner that yielded a send would fail the tick; with one, the only
+delivery is a line written to the outbox file.
 
 Bounds, from the configuration: `investigation_budget_per_tick` cycles (first
 cycles before second, oldest onset first), `recheck_budget_per_tick` rechecks
@@ -247,15 +251,197 @@ The result is the investigation's `close` record: trigger, onset, cycle,
 classification, the age it decided on and what it would surface. Each rung names
 the check it read and the evidence class of that read, taken from the ledger's
 own records: E2 for an authored report, E5 for a relayed one, E1 for native
-state. A decision to surface is recorded and returned from the planner; nothing
-consumes it until the queue exists.
+state. A decision to surface is recorded and returned from the planner. When the
+reconciler is given an exchange directory the owner queue consumes it (below);
+without one nothing does.
 
-Not reachable yet: a stale owner block is classified `waiting_on_owner` only
-while the owner item holds a declared ask, and the owner queue is not in the
-core, so on the core a stale blocked line is `blocked_unresolved`.
+A stale owner block is classified `waiting_on_owner` only while the owner item
+holds a declared ask, which needs the owner queue; so with no exchange directory
+a stale blocked line is `blocked_unresolved`.
+
+## The owner queue and the exchange files (#9284)
+
+`openReconciler({ ..., exchangeDir })` makes each tick run the model's single-slot
+owner queue (`queue.js`) after the investigation: one owner item per session, a
+second item about the same session merged into it, one item holding the slot,
+reminders, deferrals and the acknowledgement check, exactly as the model's README
+states. Without `exchangeDir` the core behaves as before and runs no queue. The
+directory must be absolute and not the ledger directory. The queue is the one
+place the report-age notification rule lives (#8709): the daemon's own stall
+alerts should not duplicate it.
+
+The reconciler **sends nothing and holds no secret**. Its "delivery" is one line
+written to a file; "delivered" in the ledger means *written there*, and the
+consumer's receipt says whether it reached anyone. Three files live in the
+exchange directory:
+
+| File | Written by | Read by |
+|---|---|---|
+| `outbox.jsonl` | the reconciler | any consumer, local or on another machine |
+| `receipts.jsonl` | the consumer | the reconciler |
+| `acks.jsonl` | the consumer, from what the operator said | the reconciler |
+
+### Outbox, schema version 1
+
+UTF-8, one JSON object per line, each ended by `\n`, **append-only**: the
+reconciler never changes or removes a line. A consumer reads from the start or
+from where it stopped, ignores a last line without its newline (a write in
+flight) and any line it cannot parse, and may rotate or truncate the file between
+ticks (nothing is re-rendered from the file; its tail is read only to keep a
+line from being written twice after a crash, and is read again when the file's
+identity changes or it shrinks). A consumer must dedupe by `rec`: a line rewritten
+after a crash that came after a rotation is written again. Each write is one `write` and an
+`fsync`; a crash can leave a cut-off tail, which the next write starts after
+with a newline.
+
+| Field | Meaning |
+|---|---|
+| `v` | `1` |
+| `at` | ISO time the line was written |
+| `rec` | this line's id, 32 hex. A receipt or an acknowledgement names it |
+| `key` | the message the line is about, 32 hex, **stable per item episode**. Every line of one item has the same key, so a consumer edits one message in place |
+| `op` | `post`: the first delivery of the key. `repost`: a further delivery of it (a reminder, a return, a show after a deferral): send it again. `updated`: its content changed: edit the message in place |
+| `class` | `item`, `digest`, `echo` or `alert` |
+| `status` | `open`, `closed` (an `updated` line of an item that has closed) or `info` |
+| `step` | `shown`, `reminded` or `returned` for an item delivery, else `null` |
+| `n` | the item's presentation number, else `null` |
+| `origin` | `owner`, `attention`, `gone`, `outage` or `seed`, else `null` |
+| `source` | the adapter's source name, else `null` |
+| `text` | what to show, at most 2000 characters |
+
+Nothing else is in a line: no path, no working directory, no name, no summary and
+no field of the session record other than the declared status. `text` is made by
+fixed templates (`render.js`), no model: each sentence is fixed, and the only
+values put in one are the declared fields (state, blocked-on, decision, next
+step, report time) and the session's source and id, each stripped of control
+characters and cut to `exchange.text_field_max`. A text names absolute times
+only, so an unchanged item renders the same text and is never "updated". A
+consumer must still treat `text` as untrusted display text: a declared field is
+whatever the session wrote.
+
+What is written, and when:
+
+- **The item currently due** (the one holding the slot) is a `post` when shown,
+  and a `repost` for each reminder and for the return of an acknowledged item the
+  evidence did not close (its text then starts with a fixed line).
+- **A changed item**, or one that closed, is an `updated` line with the same
+  `key`, once per change.
+- **The digest** (`class: digest`, one fixed key): the open items, one line each,
+  at most `exchange.digest_max_items`. `post` the first time, then `updated`
+  when its text changes, including to "No open items."
+- **An echo item** (`class: echo`) for every acknowledgement, deferral and
+  refusal; **an alert item** (`class: alert`) for an acknowledgement the evidence
+  contradicted.
+
+The same item is rendered once per key across restarts: whether a message was
+posted, and what its text was, are records in the ledger, and every line's `rec`
+is derived from what it is made of, so a line written again after a crash is
+found in the file's tail and not written twice. If a crash leaves a show's
+attempt recorded without its outcome, the next tick marks it "delivery not
+confirmed" and it is not made again; if the outbox cannot be written the
+attempt's outcome is `failed`, and it is not made again either.
+
+### Receipts
+
+One JSON object per line:
+
+```json
+{"v":1,"key":"<32 hex>","rec":"<32 hex>","outcome":"delivered"}
+```
+
+`rec` is the outbox line delivered, `key` its key. `delivered` and `failed` are
+known. **Any other outcome is unclear**: the attempt is recorded as "delivery not
+confirmed" (the text of the outcome is never kept), the item's message says so in
+place, and **the attempt is not made again**. The first receipt for a line
+stands; a later one is recorded as ignored. Receipts are for item lines only:
+one for an echo, alert, digest or `updated` line, or for a line the reconciler
+did not write, is recorded as ignored. A message whose receipt is `failed` or
+unclear is no longer the item's current message (below), so a failed or unclear
+receipt on a reminder makes the earlier delivered message current again, and an
+acknowledgement naming that earlier message then applies.
+
+### Acknowledgements and deferrals
+
+One JSON object per line:
+
+```json
+{"v":1,"key":"<32 hex>","rec":"<32 hex>","intent":"done"}
+{"v":1,"key":"<32 hex>","rec":"<32 hex>","intent":"defer","until":1767571200000}
+```
+
+`intent` is `done`, `dismiss` or `defer`; `until` (epoch milliseconds) is required
+for `defer` and refused on the others; `at` (a non-negative integer) is optional
+and only makes two otherwise identical lines different. `rec` is the outbox line
+the operator answers. This is **operator-stated evidence, not a fact**:
+
+- It applies only to the **currently delivered message of an open item**: the
+  item's latest delivered line of its current episode, without a failed or unclear
+  receipt, whose `key` matches. Any other line (an unknown `rec`, a wrong `key`, a
+  closed item, an earlier episode, an earlier message) is **ignored and recorded**,
+  and changes nothing.
+- `done` closes nothing. The item waits as acknowledged, and the **next tick's own
+  evidence** closes it; if the evidence disagrees, the item is returned to the
+  operator (a `repost`), an **alert** item is written and the item stays open.
+- `defer` is refused, recorded and echoed when it is not in the future, is longer
+  than `surface.defer_max_minutes`, is past `surface.defer_max_count` for the item's
+  episode, or the item is not the one waiting for an answer. `dismiss` is refused
+  for an owner block (only seed, issue, attention and gone items can be dismissed).
+- Every `done`, `dismiss`, `defer` and refusal writes an **echo item**.
+
+A line is **judged once**: the verdict (apply or refuse, and the reason) is a ledger
+record under the line's hash, written before anything is done or echoed. A retry
+after a crash or a failed echo carries out the recorded verdict and never judges
+again with a later time, so the echo and the item cannot disagree.
+
+Each line is acted on once ever: its disposition (`applied`, `refused`, `ignored`,
+`rejected`, `receipt`) is a ledger record under the hash of the line, recorded
+after the echo is written, so a tick cut short between the two finishes the line
+on the next tick without applying it twice.
+
+### Defaults (configurable; stored in the ledger's configuration record)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `surface.defer_max_minutes` | 1440 | the longest deferral accepted |
+| `surface.defer_max_count` | 3 | deferrals one item may have in an episode |
+| `exchange.max_file_bytes` | 1 MiB | an input file is read only this far |
+| `exchange.max_line_bytes` | 1024 | a longer line is rejected unparsed |
+| `exchange.max_new_lines_per_tick` | 200 | new lines taken from each input file per tick |
+| `exchange.max_rejects_per_tick` | 20 | rejected lines recorded per input per tick |
+| `exchange.text_field_max` | 240 | characters of any declared value in a text |
+| `exchange.digest_max_items` | 12 | items listed in the digest |
+| `exchange.max_echoes_per_item_per_tick` | 5 | lines about one item judged (and echoed) per tick; the rest wait for the next |
+| `exchange.max_echoes_per_episode` | 50 | lines about one item judged in an episode; past it, one counted `input_limit` record and one echo stand for the rest, which are never judged |
+
+A configuration stored before these keys existed gets the defaults.
+
+### Input files are untrusted
+
+Both input files are read with a size bound, a line bound and a per-tick count
+bound, and only whole lines (ended by a newline). A line is parsed as one JSON
+object with a fixed set of fields (version 1, 32-hex ids, a known intent, an
+integer `until`); any other shape, extra field or wrong type is recorded as
+`rejected` with a fixed reason (`not_json`, `shape`, `too_long`) and ignored, and
+its content is never copied into the ledger. A malformed line cannot crash the
+tick or close an item. A file that is not a regular file (a link, a directory) is
+not read and the tick records `input_limit: unsafe`; a file over the size bound
+is read to the bound and `input_limit: oversize` is recorded. A consumer should
+rotate its files: the reconciler re-reads them from the start each tick, so a
+file that only grows is read to the size bound and no further (the oversize
+`input_limit` is recorded once per file, not once per tick). The open uses
+`O_NOFOLLOW` and `O_NONBLOCK` where the platform has them and refuses anything
+that is not a regular file after the open, so a link or FIFO swapped in after the
+check is refused and never waited on.
+
+### Not here
+
+Delivery to any destination, and starting the exchange from the runner (a later
+step). The consumer is whatever reads `outbox.jsonl` and writes the other two
+files.
 
 ## Not in the core
 
-Live sources other than the transcript readers above, delivery of anything and the
-queue and outbox (#9284). The seed-handoff origin is not derived: `seed_ref` is
-always null until a source that carries seed scope and write time is added.
+Live sources other than the transcript readers above, and delivery of anything
+(the queue and outbox are described above, #9284). The seed-handoff origin is not
+derived: `seed_ref` is always null until a source that carries seed scope and
+write time is added.

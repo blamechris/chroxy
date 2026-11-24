@@ -7,15 +7,17 @@ item at a time to the owner's attention without repeating itself.
 
 It exists to be tested. What ships is exactly the eight modules moved to
 `src/freshness/` (hashing, keys, grading, configuration, the ledger, one read
-turned into records, the derived state and the policy) and the driver
-(`runtime.js`); the files of the same name under `model/` re-export them, so the
-model tests and the reconciler core run one implementation. That includes all of
-`derive.js` and `policy.js`, which also carry the owner-block, surface and
-investigation rules and the fold of their records, and `investigation.js`, the
-stale-investigation scheduler, which the reconciler core runs at every tick. The
-owner-block, surface and queue rules it does not run ship as data and functions
-only. What stays under `tests/` and does not ship: the owner queue (`queue.js`), the model's tick planner and owner actions
-(`reconciler.js`), and the helpers. See `docs/guides/freshness-reconciler.md`.
+turned into records, the derived state and the policy), the driver
+(`runtime.js`) and the owner queue (`queue.js`); the files of the same name under
+`model/` re-export them, so the model tests and the reconciler core run one
+implementation. That includes all of `derive.js` and `policy.js`, which also
+carry the owner-block, surface and investigation rules and the fold of their
+records, `investigation.js`, the stale-investigation scheduler, and `queue.js`,
+the single-slot owner queue and the owner actions, which the reconciler core runs
+at every tick once it is given an exchange directory (`exchange.js`: the outbox,
+receipts and acknowledgement files, which are not part of the model). What stays
+under `tests/` and does not ship: the model's tick planner (`reconciler.js`) and
+the helpers. See `docs/guides/freshness-reconciler.md`.
 
 **What it is.** Pure functions over an in-memory, append-only ledger. Time is
 always an argument; there is no clock, no timer, no I/O, no randomness, no
@@ -31,14 +33,14 @@ caller.
 
 | Path | Contents |
 |---|---|
-| `model/{hash,keys,grade,config,ledger,checks,derive,policy}.js` | Re-exports of `src/freshness/` (the shared implementation) |
+| `model/{hash,keys,grade,config,ledger,checks,derive,policy,investigation,queue}.js` | Re-exports of `src/freshness/` (the shared implementation) |
 | `model/grade.js` | Freshness grading from report age |
 | `model/hash.js`, `model/keys.js` | Canonical hashing; the key of every record kind |
 | `model/ledger.js` | Append-only ledger with idempotent append |
 | `model/derive.js` | The fold from records to derived state |
 | `model/checks.js` | One read turned into report, activity and check records |
 | `model/investigation.js` | The stale-investigation scheduler (re-exported from `src/freshness/investigation.js`) |
-| `model/queue.js` | The single-slot owner queue and owner actions |
+| `model/queue.js` | The single-slot owner queue and owner actions (re-exported from `src/freshness/queue.js`) |
 | `model/reconciler.js` | The tick, configuration records and the driver |
 | `model/policy.js` | Every rule, in one injectable object (`DEFAULT_POLICY`) |
 | `model/config.js` | Starting values and source capabilities |
