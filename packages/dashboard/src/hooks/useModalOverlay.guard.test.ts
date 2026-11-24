@@ -257,6 +257,25 @@ describe('layerLiteralSitesIn classifies each literal site (#9211)', () => {
     expect(view(wrap('<div data-testid={`modal-overlay`} />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
     expect(view(wrap('<div data-testid={`modal-overlay ${id}`} />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
   })
+  it('a layer class in a non-className attribute of a spreading element is not spreading', () => {
+    expect(view(wrap('<div {...overlayProps} title="modal-overlay" />'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
+  })
+  it('a layer class on a child of a spreading element is not spreading', () => {
+    expect(view(wrap('<div {...overlayProps} className="x"><span className="modal-overlay" /></div>'))).toEqual([{ cls: 'modal-overlay', spreading: false }])
+  })
+  it('a layer class in a function-local const beside a spreading element is not spreading', () => {
+    const src = `
+      import { useModalOverlay } from './useModalOverlay'
+      export function C() {
+        const { overlayProps } = useModalOverlay()
+        const cls = 'modal-overlay'
+        return <div {...overlayProps} className={cls} />
+      }`
+    expect(view(src)).toEqual([{ cls: 'modal-overlay', spreading: false }])
+  })
+  it('finds the layer class among other tokens of one literal', () => {
+    expect(view(wrap('<div {...overlayProps} className="foo modal-overlay bar" />'))).toEqual([{ cls: 'modal-overlay', spreading: true }])
+  })
 })
 
 // Inline position: fixed styles are invisible to the stylesheet derivation. Each
