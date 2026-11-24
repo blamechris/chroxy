@@ -19,7 +19,7 @@ import http from 'node:http'
 import https from 'node:https'
 import dgram from 'node:dgram'
 import childProcess from 'node:child_process'
-import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, loadVariant, rig, mustKill } from './helpers/harness.js'
+import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, loadVariant, rig, mustKill, xrig } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
@@ -195,6 +195,39 @@ proves(
       edit('adapter.js', 'export function sealAdapter(adapter) {', "export function sealAdapter(adapter) {\n  try { net.connect(9, '127.0.0.1') } catch {}"),
     ],
     'the state file is written': [edit('state-file-adapter.js', "text = fs.readFileSync(path, 'utf8')", "text = fs.readFileSync(path, 'utf8'); fs.writeFileSync(path, text)")],
+  },
+)
+
+/** The queue and its files in one run: a show, receipts, an acknowledgement, a deferral, junk input, a refusal. */
+function exchangeScenario(M) {
+  const r = xrig(M)
+  r.blocked()
+  const runs = [trapped(() => r.tick(T0))]
+  const m = r.lines('item')[0]
+  r.add('receipts.jsonl', { v: 1, key: m.key, rec: m.rec, outcome: 'delivered' }, 'junk')
+  r.add('acks.jsonl', { v: 1, key: m.key, rec: m.rec, intent: 'defer', until: T0 + 20 * MIN }, { v: 1, key: m.key, rec: m.rec, intent: 'dismiss' }, 'junk')
+  runs.push(trapped(() => r.tick(T0 + 5 * MIN)))
+  r.running(T0 + 30 * MIN)
+  runs.push(trapped(() => r.tick(T0 + 35 * MIN)))
+  return { hits: runs.flatMap((x) => x.hits), paths: runs.flatMap((x) => x.paths), writes: runs.flatMap((x) => x.writes), root: r.root, lines: r.outbox().length }
+}
+
+proves(
+  'dynamic: a run with the queue, its outbox and its input files makes no network call, starts no process and touches only the ledger, the state file and the exchange directory',
+  (M) => {
+    const { hits, paths, writes, root, lines } = exchangeScenario(M)
+    assert.ok(lines >= 3, 'the scenario wrote to the outbox')
+    assert.deepEqual(hits, [], 'no network or process entry point was used')
+    const outside = [...new Set(paths.filter((p) => !(p === root || p.startsWith(root + path.sep))))]
+    assert.deepEqual(outside, [], 'every path touched is under the test root')
+    const exchangeDir = path.join(root, 'exchange')
+    const written = [...new Set(writes.filter((p) => p.startsWith(exchangeDir + path.sep)).map((p) => path.basename(p)))]
+    assert.deepEqual(written, ['outbox.jsonl'], 'the only file written in the exchange directory is the outbox')
+  },
+  {
+    'a fetch is made': [edit('exchange.js', 'ex.now = now', "ex.now = now\n  try { fetch('http://127.0.0.1:9/') } catch {}")],
+    'a file outside is read': [edit('inbox.js', 'let st\n  try {\n    st = fs.lstatSync(file)', "let st\n  try {\n    try { fs.readFileSync('/etc/hosts') } catch {}\n    st = fs.lstatSync(file)")],
+    'an input file is written': [edit('inbox.js', 'const complete = buf.subarray', "try { fs.appendFileSync(file, '') } catch {}\n  const complete = buf.subarray")],
   },
 )
 

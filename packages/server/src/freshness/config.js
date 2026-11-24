@@ -33,6 +33,20 @@ export const DEFAULT_CONFIG = Object.freeze({
     reminder_after_minutes: Object.freeze([60, 180]),
     item_time_limit_hours: 8,
     max_presentations: 3,
+    // An owner's deferral: the longest one accepted, and how many an item
+    // may have in one episode. One past either is refused and recorded.
+    defer_max_minutes: 24 * 60,
+    defer_max_count: 3,
+  }),
+  // The files a consumer exchanges with the reconciler (exchange.js). Every
+  // input is untrusted: these bound what one tick will read from it.
+  exchange: Object.freeze({
+    max_file_bytes: 1024 * 1024,
+    max_line_bytes: 1024,
+    max_new_lines_per_tick: 200,
+    max_rejects_per_tick: 20,
+    text_field_max: 240,
+    digest_max_items: 12,
   }),
   // What each source's adapter can do. `native_in_read`: the report read also
   // returns native state (busy, prompts, events). `activity_read`: a separate
@@ -67,4 +81,14 @@ export function makeConfig(overrides = {}) {
     }
   }
   return base
+}
+
+/** The surface and exchange values of a configuration, with the defaults for a configuration stored before they existed. */
+export function exchangeLimits(config) {
+  return { ...DEFAULT_CONFIG.exchange, ...(config?.exchange ?? {}) }
+}
+
+export function deferLimits(config) {
+  const s = { ...DEFAULT_CONFIG.surface, ...(config?.surface ?? {}) }
+  return { maxMs: s.defer_max_minutes * MIN * 1000, maxCount: s.defer_max_count }
 }

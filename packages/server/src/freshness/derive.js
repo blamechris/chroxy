@@ -39,6 +39,11 @@ export function createState(policy) {
     // handed on by the tick that closed it: "item|episode" -> handover.
     handovers: new Map(),
     attempts: new Map(),
+    // The exchange files (exchange.js): outbox renders by item key, receipts
+    // by outbox record, and the acknowledgements a verification contradicted.
+    outbox: new Map(),
+    receipts: new Map(),
+    contradictions: new Map(),
     index: new Map(),
     lastSeq: 0,
   }
@@ -354,6 +359,7 @@ function newItem(r) {
     lastShowAt: null,
     lastReturnAt: null,
     closable: true,
+    closedAs: null,
     deferrals: 0,
     seed: null,
     condition: null,
@@ -409,7 +415,10 @@ function foldSurface(state, r) {
   it.history.push(b.step + (b.phase && b.phase !== 'none' ? ':' + b.phase : ''))
   if (b.phase === 'outcome') {
     const a = state.attempts.get(b.attempt_id)
-    if (a) a.hasOutcome = true
+    if (a) {
+      a.hasOutcome = true
+      a.outcome = b.outcome
+    }
     // Only when an attempt does not use up its step does the outcome apply it.
     if (!state.policy.attemptUsesOrdinal && a) applyStep(it, a.body, a.at, r.seq, state.policy)
     return
@@ -466,6 +475,7 @@ function applyStep(it, b, at, seq, policy) {
       it.lastShowAt = null
       it.lastReturnAt = null
       it.closable = b.closable !== false
+      it.closedAs = null
       it.deferrals = 0
       it.seed = b.seed ?? null
       it.preemptedBy = null
@@ -560,6 +570,7 @@ function applyStep(it, b, at, seq, policy) {
       }
       it.open = false
       it.state = 'closed'
+      it.closedAs = b.step === 'withdrawn' ? `withdrawn:${b.reason ?? ''}` : 'resolved'
       break
     default:
       break
@@ -575,6 +586,8 @@ function foldOwnerAck(state, r) {
     it.ack = { ackRef: b.ack_ref, seq: r.seq }
   }
   if (b.phase === 'verify') it.verifiedAck = b.ack_ref
+  // An acknowledgement the next tick's evidence did not agree with.
+  if (b.phase === 'verify' && b.verified === false) state.contradictions.set(r.id, { itemId: b.item_id, episode: b.episode, ackRef: b.ack_ref })
 }
 
 function foldTick(state, r) {
@@ -604,10 +617,20 @@ function foldConfig(state, r) {
 }
 
 function foldSystem(state, r) {
+  const d = r.body.detail ?? {}
   if (r.body.event === 'delivery_unknown') {
-    const a = state.attempts.get(r.body.detail.ids[0])
+    const a = state.attempts.get(d.ids[0])
     if (a) a.unknown = true
   }
+  // What the outbox was given, by key: an item or the digest, whose later
+  // changes are edits of the same message. Echo and alert items are posted
+  // once and never edited, so they are not kept.
+  if (r.body.event === 'outbox_render' && (d.class === 'item' || d.class === 'digest')) {
+    const prev = state.outbox.get(d.key)
+    state.outbox.set(d.key, { key: d.key, class: d.class, itemId: d.item_id ?? null, episode: d.episode ?? null, title: prev?.title ?? d.title ?? null, rec: d.ids[0], hash: d.hash })
+  }
+  // The first receipt for an outbox record stands; a later one never rewrites it.
+  if (r.body.event === 'input_line' && d.disposition === 'receipt' && !state.receipts.has(d.rec)) state.receipts.set(d.rec, d.outcome)
 }
 
 /** Fold one record into the derived state. */

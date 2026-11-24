@@ -186,3 +186,43 @@ export function must(fn, what = 'the step') {
   }
 }
 
+
+/**
+ * A rig with an exchange directory: the owner queue runs and its shows go to
+ * an outbox file. `tick` opens a reconciler, runs one tick and closes it, so
+ * every tick is also a restart.
+ */
+export function xrig(M, configOverrides = {}) {
+  const r = rig(M)
+  r.exchangeDir = path.join(r.root, 'exchange')
+  r.outboxFile = path.join(r.exchangeDir, 'outbox.jsonl')
+  r.cfg = M.coreConfig(configOverrides)
+  r.tick = (at, opts = {}) => {
+    let rec
+    try {
+      rec = r.open({ now: at, config: r.cfg, exchangeDir: r.exchangeDir, ...opts })
+      return rec.tick({ source: STATE_SOURCE, slotStart: at, now: at })
+    } catch (err) {
+      if (err instanceof assert.AssertionError) throw err
+      return assert.fail(`a tick threw ${err.name}: ${err.message}`)
+    } finally {
+      rec?.close()
+    }
+  }
+  /** The one session, blocked on the owner with a decision (an owner item). */
+  r.blocked = (extra = {}) => r.writeState([entry('s1', { state: 'blocked', blockedOn: 'the deploy', decision: 'pick one', updatedAt: T0 - MIN, ...extra })])
+  /** The one session, running again with a newer report (the block is over). */
+  r.running = (at) => r.writeState([entry('s1', { state: 'running', next: 'build', updatedAt: at })])
+  r.outbox = () => (fs.existsSync(r.outboxFile) ? fs.readFileSync(r.outboxFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [])
+  r.lines = (cls) => r.outbox().filter((l) => l.class === cls)
+  /** Append lines (objects are written as JSON, strings as they are) to one of the consumer's files. */
+  r.add = (name, ...lines) => {
+    fs.mkdirSync(r.exchangeDir, { recursive: true })
+    fs.appendFileSync(path.join(r.exchangeDir, name), lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l)) + '\n').join(''))
+  }
+  r.dispositions = (input) => r.kinds('system', (x) => x.body.event === 'input_line' && (!input || x.body.detail.input === input)).map((x) => x.body.detail)
+  r.events = (event) => r.kinds('system', (x) => x.body.event === event)
+  r.conflicts = () => r.events('idempotency_conflict')
+  r.attempts = (phase = 'attempt') => r.kinds('surface', (x) => x.body.phase === phase)
+  return r
+}

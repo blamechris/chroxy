@@ -21,6 +21,7 @@
  * record, and every check names the one it was graded under.
  */
 
+import path from 'node:path'
 import { sourceCaps, cadenceSeconds, makeConfig } from './config.js'
 import { deriveState, sessionsOf } from './derive.js'
 import { planRead, put } from './checks.js'
@@ -33,6 +34,7 @@ import { H } from './hash.js'
 import { safeList, safeRead, sealAdapter } from './adapter.js'
 import { STATE_FILE_CAPS, STATE_FILE_SOURCE } from './state-file-adapter.js'
 import { REGISTRY_CAPS, REGISTRY_SOURCE } from './session-registry-adapter.js'
+import { createExchange, writeToOutbox, planExchange } from './exchange.js'
 
 /** The model's configuration with the state-file and session-registry sources' capabilities added. */
 export function coreConfig(overrides = {}) {
@@ -73,9 +75,11 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
     yield* planRead(ctx, { key, trigger: 'tick', session: t.session, read, now, tickId: tid, scope: t.scope })
   }
 
-  // Bounded, read-only investigation of stale sessions. The queue signals it
-  // returns have nowhere to go yet (#9284); the decision is in its close record.
+  // Bounded, read-only investigation of stale sessions. Its signals go to the
+  // owner queue when the reconciler has an exchange (exchange.js); without one
+  // the decision is only in its close record.
   const inv = yield* planInvestigations(ctx, { source, tickId: tid, now, world })
+  if (ctx.exchange) yield* planExchange(ctx, ctx.exchange, { source, tickId: tid, now, signals: inv.signals, tickOpenSeq })
   const closeBody = {
     ...openBody,
     phase: 'close',
@@ -115,14 +119,16 @@ function longestCadenceMs(config) {
  * @param {number} opts.now           time of the open, ms
  * @param {object} [opts.policy]
  * @param {string[]} [opts.keepOutOf] directories the ledger must not be in or under
+ * @param {string} [opts.exchangeDir] absolute directory of the outbox, receipts and acknowledgement files; with it the owner queue runs (exchange.js)
  * @param {object} [opts.guard]       writer guard, for tests
  * @param {number} [opts.leaseMs]     must exceed the longest tick cadence; default is twice it, at least 15 minutes
  */
-export function openReconciler({ dir, ledgerId, config, adapters, now, policy = DEFAULT_POLICY, guard, leaseMs, keepOutOf, pid, host, isAlive }) {
+export function openReconciler({ dir, ledgerId, config, adapters, now, policy = DEFAULT_POLICY, guard, leaseMs, keepOutOf, pid, host, isAlive, exchangeDir }) {
   // The lease must outlast a tick interval, or a holder between ticks looks silent.
   const cadenceMs = longestCadenceMs(config)
   if (leaseMs === undefined) leaseMs = Math.max(DEFAULT_LEASE_MS, 2 * cadenceMs)
   else if (!(leaseMs > cadenceMs)) throw new TypeError(`openReconciler: leaseMs (${leaseMs}) must exceed the longest tick cadence (${cadenceMs} ms)`)
+  if (exchangeDir !== undefined && path.resolve(exchangeDir) === path.resolve(dir)) throw new TypeError('openReconciler: exchangeDir must not be the ledger directory')
   const sealed = new Map()
   for (const a of adapters) {
     const s = sealAdapter(a)
@@ -132,6 +138,8 @@ export function openReconciler({ dir, ledgerId, config, adapters, now, policy = 
   }
   const handle = openFileLedger({ dir, ledgerId, now, guard, leaseMs, keepOutOf, pid, host, isAlive })
   const ctx = { ledger: handle.ledger, state: deriveState(handle.ledger.records, policy), policy }
+  // With an exchange directory the owner queue runs and its shows go to the outbox file there.
+  if (exchangeDir !== undefined) ctx.exchange = createExchange({ dir: exchangeDir })
   const appendRecord = (draft, at) => handle.append(draft, at)
   try {
     // A config record is keyed by the one before it, so the same configuration
@@ -153,7 +161,7 @@ export function openReconciler({ dir, ledgerId, config, adapters, now, policy = 
     tick({ source, slotStart, now: at }) {
       const adapter = sealed.get(source)
       if (!adapter) throw new Error(`no adapter for source ${source}`)
-      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter }), { appendRecord, deliver: refuseDelivery })
+      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter }), { appendRecord, deliver: ctx.exchange ? (effect) => writeToOutbox(ctx, ctx.exchange, effect) : refuseDelivery })
       const reads = [...ctx.state.checks.values()]
         .filter((c) => c.tickId === value.tickId && c.body.trigger === 'tick')
         .map((c) => ({
