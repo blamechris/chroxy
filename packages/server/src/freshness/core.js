@@ -28,7 +28,7 @@ import { planRead, put } from './checks.js'
 import { planInvestigations } from './investigation.js'
 import { DEFAULT_POLICY } from './policy.js'
 import { checkTickKey, systemKey, tickId as makeTickId, tickKey } from './keys.js'
-import { DEFAULT_LEASE_MS, openFileLedger } from './file-ledger.js'
+import { DEFAULT_LEASE_MS, assertKeptOutOf, openFileLedger } from './file-ledger.js'
 import { planConfig, run, trackedSessions } from './runtime.js'
 import { H } from './hash.js'
 import { safeList, safeRead, sealAdapter } from './adapter.js'
@@ -46,7 +46,7 @@ export function coreConfig(overrides = {}) {
  * Plan one tick of one source against a sealed adapter. A generator of
  * operations for `run`, as the model's planners are.
  */
-export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
+export function* planCoreTick(ctx, { source, slotStart, now, adapter, build = null }) {
   const st = ctx.state
   if (!st.config) throw new Error('planCoreTick: no configuration in the ledger')
   if (adapter.source !== source) throw new Error(`planCoreTick: adapter reads ${adapter.source}, not ${source}`)
@@ -55,7 +55,7 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
   const cad = cadenceSeconds(st.config, source) * 1000
   const last = st.lastClosedTick.get(source)
   const missed = last ? Math.max(0, Math.round((slotStart - last.slot) / cad) - 1) : 0
-  const openBody = { tick_id: tid, source, slot_start: slotStart, phase: 'open', cadence_minutes: cad / 60000, config_ref: st.configRef, fence: null, missed_slots: missed }
+  const openBody = { tick_id: tid, source, slot_start: slotStart, phase: 'open', cadence_minutes: cad / 60000, config_ref: st.configRef, fence: null, missed_slots: missed, ...(build === null ? {} : { build }) }
   yield put({ kind: 'tick', id: tickKey(tid, 'open'), refs: { tick: tid }, body: openBody }, now)
   const tickOpenSeq = st.ticks.get(tid).openSeq
 
@@ -128,7 +128,11 @@ export function openReconciler({ dir, ledgerId, config, adapters, now, policy = 
   const cadenceMs = longestCadenceMs(config)
   if (leaseMs === undefined) leaseMs = Math.max(DEFAULT_LEASE_MS, 2 * cadenceMs)
   else if (!(leaseMs > cadenceMs)) throw new TypeError(`openReconciler: leaseMs (${leaseMs}) must exceed the longest tick cadence (${cadenceMs} ms)`)
-  if (exchangeDir !== undefined && path.resolve(exchangeDir) === path.resolve(dir)) throw new TypeError('openReconciler: exchangeDir must not be the ledger directory')
+  if (exchangeDir !== undefined) {
+    if (path.resolve(exchangeDir) === path.resolve(dir)) throw new TypeError('openReconciler: exchangeDir must not be the ledger directory')
+    // The same real-path keep-out as the ledger's: the exchange files may not be in or under the daemon's own directories.
+    assertKeptOutOf(exchangeDir, keepOutOf ?? [], 'the exchange directory')
+  }
   const sealed = new Map()
   for (const a of adapters) {
     const s = sealAdapter(a)
@@ -158,10 +162,10 @@ export function openReconciler({ dir, ledgerId, config, adapters, now, policy = 
      * `reads` has one entry per session checked: the source, the check time,
      * the report time, the state and the graded freshness.
      */
-    tick({ source, slotStart, now: at }) {
+    tick({ source, slotStart, now: at, build }) {
       const adapter = sealed.get(source)
       if (!adapter) throw new Error(`no adapter for source ${source}`)
-      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter }), { appendRecord, deliver: ctx.exchange ? (effect) => writeToOutbox(ctx, ctx.exchange, effect) : refuseDelivery })
+      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter, build }), { appendRecord, deliver: ctx.exchange ? (effect) => writeToOutbox(ctx, ctx.exchange, effect) : refuseDelivery })
       const reads = [...ctx.state.checks.values()]
         .filter((c) => c.tickId === value.tickId && c.body.trigger === 'tick')
         .map((c) => ({

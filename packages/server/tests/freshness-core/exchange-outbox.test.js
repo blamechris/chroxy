@@ -308,7 +308,7 @@ proves(
     assert.throws(() => r.open({ exchangeDir: r.ledgerDir }), /exchangeDir/)
     assert.throws(() => M.createExchange({ dir: 'relative/dir' }), TypeError)
   },
-  { 'the same directory accepted': [edit('core.js', "if (exchangeDir !== undefined && path.resolve(exchangeDir) === path.resolve(dir)) throw", 'if (false) throw')] },
+  { 'the same directory accepted': [edit('core.js', 'if (path.resolve(exchangeDir) === path.resolve(dir)) throw', 'if (false) throw')] },
 )
 
 proves(
@@ -332,3 +332,34 @@ proves(
 )
 
 void STATE_SOURCE
+
+proves(
+  'the exchange directory is kept out of the directories the ledger is kept out of, by real path',
+  (M) => {
+    const r = rig(M)
+    r.writeState([])
+    const daemon = path.join(r.root, 'daemon')
+    fs.mkdirSync(daemon)
+    const refused = (exchangeDir) => assert.throws(() => r.open({ exchangeDir, keepOutOf: [daemon] }), /kept outside/)
+    refused(path.join(daemon, 'exchange'))
+    refused(daemon)
+    refused(path.join(r.root, 'x', '..', 'daemon', 'exchange'))
+    assert.equal(fs.existsSync(path.join(daemon, 'exchange')), false)
+    r.open({ exchangeDir: path.join(r.root, 'elsewhere'), keepOutOf: [daemon] }).close()
+  },
+  { 'the exchange directory not checked': [edit('core.js', "assertKeptOutOf(exchangeDir, keepOutOf ?? [], 'the exchange directory')", '')] },
+)
+
+describe('the exchange directory is kept out by real path: a link to a kept-out directory is refused', { skip: process.platform === 'win32' && 'links need privileges on Windows' }, () => {
+  const check = (M) => {
+    const r = rig(M)
+    r.writeState([])
+    const daemon = path.join(r.root, 'daemon')
+    fs.mkdirSync(daemon)
+    const link = path.join(r.root, 'link')
+    fs.symlinkSync(daemon, link, 'dir')
+    assert.throws(() => r.open({ exchangeDir: path.join(link, 'exchange'), keepOutOf: [daemon] }), /kept outside/)
+  }
+  it('holds on the real code', () => check(REAL))
+  it('mutant "the check is lexical" fails it', () => mustKill(check, 'the check is lexical', [edit('file-ledger.js', 'if (inside(dir, p) || inside(realish(dir), realish(p))) throw', 'if (inside(dir, p)) throw')]))
+})
