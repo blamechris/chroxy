@@ -44,8 +44,8 @@ export function checkTimerExamples(text) {
   assert.equal(cadence(plistArgs), cadence(serviceArgs), 'both examples use one cadence')
   const minutes = cadence(plistArgs)
   assert.ok(Number.isFinite(minutes) && minutes > 0)
-  assert.equal(Number(plist.match(/StartInterval<\/key><integer>(\d+)</)[1]), minutes * 60, 'launchd fires once per cadence')
-  assert.equal(timer.match(/^OnUnitActiveSec=(\d+)min$/m)?.[1], String(minutes), 'systemd fires once per cadence')
+  assert.equal(Number(plist.match(/StartInterval<\/key><integer>(\d+)</)[1]), (minutes * 60) / 2, 'launchd fires at half the cadence')
+  assert.equal(timer.match(/^OnUnitActiveSec=(\d+)min$/m)?.[1], String(minutes / 2), 'systemd fires at half the cadence')
   assert.match(service, /Type=oneshot/, 'the service runs once and exits')
 }
 
@@ -61,8 +61,8 @@ describe('the timer examples in the runner guide', () => {
     'the service runs a checkout': edit('COMMIT/node_modules/@chroxy/server/src/freshness-runner/cli.js tick', 'chroxy/packages/server/src/freshness-runner/cli.js tick'),
     'the plist ledger is in the daemon state directory': edit('/Users/example/.local/state/chroxy-freshness/ledger</string>', '/Users/example/.chroxy/freshness</string>'),
     'the service ledger is in the daemon state directory': edit('--ledger-dir %h/.local/state/chroxy-freshness/ledger', '--ledger-dir %h/.chroxy/freshness'),
-    'launchd fires faster than the cadence': edit('<integer>1800</integer>', '<integer>600</integer>'),
-    'systemd fires slower than the cadence': edit('OnUnitActiveSec=30min', 'OnUnitActiveSec=60min'),
+    'launchd fires once per cadence': edit('<integer>900</integer>', '<integer>1800</integer>'),
+    'systemd fires once per cadence': edit('OnUnitActiveSec=15min', 'OnUnitActiveSec=30min'),
     'the service stays running': edit('Type=oneshot', 'Type=simple'),
     'the plist allows a checkout': edit('<string>--cadence-minutes</string>', '<string>--allow-dev-checkout</string>\n    <string>--cadence-minutes</string>'),
     'the cadences differ': edit('--cadence-minutes 30', '--cadence-minutes 45'),

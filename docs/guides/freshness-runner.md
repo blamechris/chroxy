@@ -24,7 +24,7 @@ overridden; use the overrides to point a run at copies.
 ```text
 freshness tick --ledger-dir <dir> [--state-file <file>] [--registry-dir <dir>] [--projects-dir <dir>]
                [--cadence-minutes <n>] [--lease-minutes <n>] [--ledger-id <id>] [--mode read-only] [--allow-dev-checkout]
-freshness stamp --commit <40-hex sha> [--package-dir <dir>]
+freshness stamp --commit <40-hex sha> [--package-dir <dir>] [--force]
 ```
 
 Run it from a pinned install, directly, without starting the daemon:
@@ -41,17 +41,22 @@ count of sessions by freshness; no session text).
 |---|---|
 | 0 | every source ticked |
 | 1 | a source's tick failed; the others ran (see `failed` in the output) |
-| 2 | refused before any read: bad arguments, a build that is not a stamped pinned install, a ledger inside the daemon's state directory, a lease that does not exceed the cadence |
-| 3 | the ledger is held by another reconciler; nothing was read or written |
+| 2 | refused: bad arguments (including a missing `--ledger-dir`, also through `chroxy freshness`), a build that is not a stamped pinned install, a ledger inside the daemon's state directory or inside a source directory or Claude's config dir (real paths are compared, so a symlink does not get around it), a lease that does not exceed the cadence, a ledger that is corrupt or was fenced |
+| 3 | the ledger is held by another reconciler; no source was ticked |
 
 - **`--ledger-dir` has no default.** It must sit outside the daemon's state
-  directory (`CHROXY_CONFIG_DIR`, `~/.chroxy` by default) and outside the state
-  file's directory; the core refuses it otherwise. A path such as
+  directory (`CHROXY_CONFIG_DIR`, `~/.chroxy` by default), the state file's
+  directory, the registry and projects directories and Claude's config dir; the
+  core refuses it otherwise, comparing real paths. A path such as
   `~/.local/state/chroxy-freshness/ledger` works.
 - **The cadence** (`--cadence-minutes`, default 30) is how often a tick is due.
-  Set the timer's period to the same number. A timer that fires more often than
-  the cadence finds the slot's tick already closed and does nothing; one that
-  fires less often records the slots it missed.
+  A tick is due once per slot of that length, and the slot is the wall-clock
+  interval the run falls in. Set the timer's period to **half the cadence** (15
+  minutes for 30): a timer whose period equals the cadence drifts, fires twice
+  in one slot and then skips the next, which records a missed slot. With the
+  half period each slot is ticked once and the second firing finds the tick
+  closed and does nothing (`skipped: closed`). A timer that fires less often
+  than the cadence records the slots it missed.
 - **The lease** (`--lease-minutes`) defaults to twice the cadence, at least 15
   minutes, and must exceed the cadence. The runner is one-shot: it holds the
   ledger's writer lock only while a tick runs, so a second run that overlaps the
@@ -77,9 +82,11 @@ A pinned install is a copy of the daemon package under a `node_modules`
 directory, stamped with the commit it was built from. Switching branches in a
 development checkout does not change it, because nothing in it points at the
 checkout. The runner refuses to run from anywhere else (a path without a
-`node_modules` directory in its real path, which includes an npm workspace link
-into a checkout) unless `--allow-dev-checkout` is given, and refuses an install
-that has not been stamped.
+real path ending in `node_modules/@chroxy/server` with no `.git` entry at or
+above it, which includes an npm workspace link into a checkout) unless
+`--allow-dev-checkout` is given, and refuses an install that has not been
+stamped. Keep the pin directory out of any git working tree. `stamp` refuses to
+replace a different existing stamp unless `--force`.
 
 Build it from a commit, not from a working tree:
 
@@ -111,12 +118,15 @@ loads is the one at the same commit, not whatever is published.
 To move to another build, make a new pin directory the same way and change the
 timer's path; the old directory stays, so going back is a path change. The
 ledger is shared across builds, and each record names the build that wrote it.
-Reinstalling over a pin directory removes the stamp: stamp again.
+Reinstalling over a pin directory removes the stamp: stamp again. A second run
+in the same slot by a different build, or after the state file's schema version
+changed, writes a different tick record under the same key, which the ledger
+records as an `idempotency_conflict` rather than a duplicate.
 
 ## Timer definitions
 
 These are examples. Nothing here is installed by the code; copy, adjust the
-paths and the node binary, and load them yourself. Both run once per cadence.
+paths and the node binary, and load them yourself. Both fire at half the cadence, so each slot is ticked once.
 
 ### macOS: launchd
 
@@ -139,7 +149,7 @@ Save as `~/Library/LaunchAgents/local.chroxy.freshness-tick.plist`, then
     <string>--cadence-minutes</string>
     <string>30</string>
   </array>
-  <key>StartInterval</key><integer>1800</integer>
+  <key>StartInterval</key><integer>900</integer>
   <key>RunAtLoad</key><false/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardErrorPath</key><string>/Users/example/.local/state/chroxy-freshness/tick.err</string>
@@ -164,11 +174,11 @@ ExecStart=/usr/bin/node %h/.local/share/chroxy-freshness/COMMIT/node_modules/@ch
 
 ```ini
 [Unit]
-Description=Run the Chroxy session freshness tick every 30 minutes
+Description=Run the Chroxy session freshness tick every 15 minutes (half the 30-minute cadence)
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=30min
+OnUnitActiveSec=15min
 
 [Install]
 WantedBy=timers.target

@@ -6,12 +6,14 @@
  * records the commit of a pinned install. Both delegate to the runner, which
  * a timer can also start directly without this CLI (docs/guides/freshness-runner.md).
  */
+/* Usage errors are the runner's to report (exit 2), so the options here are not
+ * required and unknown ones are passed through to its strict parser. */
 export function registerFreshnessCommand(program) {
   const freshness = program.command('freshness').description('Session freshness reconciler: run one read-only tick, or stamp a pinned install')
   freshness
     .command('tick')
     .description('Run one read-only tick and exit')
-    .requiredOption('--ledger-dir <dir>', 'ledger directory; must be outside the daemon state directory')
+    .option('--ledger-dir <dir>', 'ledger directory; must be outside the daemon state directory (required)')
     .option('--state-file <file>', "the daemon's session-state file (default: <config dir>/session-state.json)")
     .option('--registry-dir <dir>', 'Claude Code session registry (default: <claude config dir>/sessions)')
     .option('--projects-dir <dir>', 'Claude transcripts root (default: <claude config dir>/projects)')
@@ -20,18 +22,23 @@ export function registerFreshnessCommand(program) {
     .option('--ledger-id <id>', 'ledger identity')
     .option('--mode <mode>', 'read-only is the only mode')
     .option('--allow-dev-checkout', 'run from a development checkout (not for a timer)')
-    .action(async (options) => {
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(async (options, cmd) => {
       const { main } = await import('../freshness-runner/cli.js')
-      process.exitCode = main(['tick', ...toArgs(options)])
+      process.exitCode = main(['tick', ...toArgs(options), ...cmd.args])
     })
   freshness
     .command('stamp')
     .description('Record the commit of a pinned install in its package directory')
-    .requiredOption('--commit <sha>', 'full 40-character commit id the install was built from')
+    .option('--commit <sha>', 'full 40-character commit id the install was built from (required)')
     .option('--package-dir <dir>', 'installed daemon package directory (default: this package)')
-    .action(async (options) => {
+    .option('--force', 'replace a different existing stamp')
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(async (options, cmd) => {
       const { main } = await import('../freshness-runner/cli.js')
-      process.exitCode = main(['stamp', ...toArgs(options)])
+      process.exitCode = main(['stamp', ...toArgs(options), ...cmd.args])
     })
 }
 

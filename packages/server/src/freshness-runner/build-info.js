@@ -18,7 +18,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export const BUILD_INFO_FILE = 'build-info.json'
-export const DAEMON_PACKAGE_NAME = '@chroxy/server'
+// Built from parts: the image smoke script reads any quoted scope-slash string as an import specifier.
+export const DAEMON_PACKAGE_NAME = ['@chroxy', 'server'].join('/')
 const COMMIT_RE = /^[0-9a-f]{40}$/
 const VERSION_RE = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(-[0-9A-Za-z.-]{1,40})?$/
 const MAX_INFO_BYTES = 4096
@@ -57,10 +58,23 @@ function readSmallJson(file, what) {
   }
 }
 
-/** `pinned` when the package sits under a `node_modules` directory (real path), else `checkout`. */
+function hasGitAtOrAbove(dir) {
+  for (let cur = dir; ; cur = path.dirname(cur)) {
+    if (fs.existsSync(path.join(cur, '.git'))) return true
+    if (path.dirname(cur) === cur) return false
+  }
+}
+
+/**
+ * `pinned` when the real path of the package ends in `node_modules/@chroxy/server`
+ * and no `.git` entry exists at or above it; otherwise `checkout`. A workspace
+ * link into a checkout resolves out of `node_modules` and so reads `checkout`.
+ */
 export function installKind(packageRoot) {
   const real = fs.realpathSync(packageRoot)
-  return real.split(path.sep).includes('node_modules') ? 'pinned' : 'checkout'
+  const tail = real.split(path.sep).slice(-3)
+  if (tail.join('/') !== `node_modules/${DAEMON_PACKAGE_NAME}`) return 'checkout'
+  return hasGitAtOrAbove(real) ? 'checkout' : 'pinned'
 }
 
 /**

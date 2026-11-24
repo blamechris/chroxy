@@ -8,13 +8,14 @@ import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { SKIP_NO_SYMLINK } from '../helpers/symlink-support.js'
 import { MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
 
-const proves = (name, check, mutants = {}) =>
-  describe(name, () => {
+const proves = (name, check, mutants = {}, opts = {}) =>
+  describe(name, opts, () => {
     it('holds on the real code', async () => {
       await check(REAL)
     })
@@ -198,7 +199,27 @@ proves(
     const ok = M.openFileLedger({ dir: path.join(r.root, 'daemon-ledger'), ledgerId: 'x', now: T0, keepOutOf: [path.join(r.root, 'daemon')] })
     ok.close()
   },
-  { 'the check is skipped': [edit('file-ledger.js', 'if (inside(dir, p)) throw', 'if (false) throw')] },
+  { 'the check is skipped': [edit('file-ledger.js', 'if (inside(dir, p) || inside(realish(dir), realish(p))) throw', 'if (false) throw')] },
+)
+
+proves(
+  'the keep-out check compares real paths: a link to the directory, or a directory that is itself a link, is refused',
+  (M) => {
+    const r = rig(M)
+    const real = path.join(r.root, 'daemon')
+    fs.mkdirSync(real)
+    const link = path.join(r.root, 'link')
+    fs.symlinkSync(real, link, 'dir')
+    const refused = (dir, keep) => assert.throws(() => M.openFileLedger({ dir, ledgerId: 'x', now: T0, keepOutOf: [keep] }), TypeError)
+    refused(path.join(link, 'ledger'), real) // the ledger is named through a link to the directory
+    refused(path.join(real, 'ledger'), link) // the directory is named through a link
+    refused(path.join(link, 'a', 'b', 'ledger'), real) // nothing below the link exists yet
+    assert.equal(fs.existsSync(path.join(real, 'ledger')), false)
+    const ok = M.openFileLedger({ dir: path.join(r.root, 'elsewhere'), ledgerId: 'x', now: T0, keepOutOf: [link] })
+    ok.close()
+  },
+  { 'the check is lexical': [edit('file-ledger.js', 'if (inside(dir, p) || inside(realish(dir), realish(p))) throw', 'if (inside(dir, p)) throw')] },
+  { skip: SKIP_NO_SYMLINK },
 )
 
 // ── durability ─────────────────────────────────────────────────────────

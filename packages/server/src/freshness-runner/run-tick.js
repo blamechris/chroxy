@@ -58,7 +58,7 @@ function requireAbsolute(name, value) {
  * @param {number} [opts.leaseMinutes]   must exceed the cadence (the core enforces it)
  * @param {string} [opts.mode]           only `read-only`
  * @param {number} [opts.now]            ms
- * @param {string[]} [opts.keepOutOf]    added to the daemon's config dir and the state file's directory
+ * @param {string[]} [opts.keepOutOf]    added to the daemon's config dir, the state file's directory, both source directories and Claude's config dir
  * @param {object[]} [opts.adapters]     replaces the three live adapters; a test seam
  */
 export function runTick({ ledgerDir, build, stateFile, registryDir, projectsDir, ledgerId = DEFAULT_LEDGER_ID, cadenceMinutes = DEFAULT_CADENCE_MINUTES, leaseMinutes, mode = 'read-only', now = Date.now(), keepOutOf = [], adapters: adaptersOverride }) {
@@ -88,7 +88,7 @@ export function runTick({ ledgerDir, build, stateFile, registryDir, projectsDir,
     adapters,
     now,
     leaseMs: leaseMinutes === undefined ? undefined : leaseMinutes * 60_000,
-    keepOutOf: [configDir(), path.dirname(paths.stateFile), ...keepOutOf],
+    keepOutOf: [configDir(), path.dirname(paths.stateFile), paths.registryDir, paths.projectsDir, claudeConfigDir(), ...keepOutOf],
   })
   const sources = []
   try {
@@ -99,7 +99,7 @@ export function runTick({ ledgerDir, build, stateFile, registryDir, projectsDir,
         for (const r of res.reads) byFreshness[r.freshness] = (byFreshness[r.freshness] ?? 0) + 1
         sources.push({ source, ok: true, tick_id: res.tickId, skipped: res.skipped ?? null, sessions: res.reads.length, by_freshness: byFreshness })
       } catch (err) {
-        sources.push({ source, ok: false, error: err?.name ?? 'Error' })
+        sources.push({ source, ok: false, error: err?.name ?? 'Error', code: typeof err?.code === 'string' ? err.code : null })
       }
     }
   } finally {

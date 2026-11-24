@@ -9,14 +9,15 @@ import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { SKIP_NO_SYMLINK } from '../helpers/symlink-support.js'
 import { cleanupTmp } from '../freshness-core/helpers/harness.js'
 import { COMMIT, REAL_RUNNER, cleanupVariants, install, must, mustKillRunner, tmp } from './helpers/runner-harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
 
-const proves = (name, check, mutants = {}) =>
-  describe(name, () => {
+const proves = (name, check, mutants = {}, opts = {}) =>
+  describe(name, opts, () => {
     it('holds on the real code', async () => {
       await check(REAL_RUNNER)
     })
@@ -60,7 +61,7 @@ proves(
   },
   {
     'a checkout is accepted': [edit(B, "if (install === 'checkout' && !allowCheckout) {", 'if (false) {')],
-    'a checkout is told from an install by its name': [edit(B, "real.split(path.sep).includes('node_modules') ? 'pinned' : 'checkout'", "'pinned'")],
+    'a checkout is told from an install by its name': [edit(B, "if (tail.join('/') !== `node_modules/${DAEMON_PACKAGE_NAME}`) return 'checkout'", '')],
   },
 )
 
@@ -100,7 +101,6 @@ proves(
 proves(
   'a link from node_modules to a checkout is a checkout',
   (M) => {
-    if (process.platform === 'win32') return
     const i = install({ stamp: COMMIT })
     fs.writeFileSync(path.join(i.checkout, 'build-info.json'), JSON.stringify({ commit: COMMIT }))
     const linked = path.join(i.root, 'linked', 'node_modules', '@chroxy', 'server')
@@ -109,6 +109,52 @@ proves(
     assert.equal(codeOf(() => M.readBuild(linked)), 'development_checkout')
   },
   { 'the link is not resolved': [edit(B, 'const real = fs.realpathSync(packageRoot)', 'const real = packageRoot')] },
+  { skip: SKIP_NO_SYMLINK },
+)
+
+proves(
+  'only a path ending in node_modules/@chroxy/server, with no .git at or above it, is a pinned install',
+  (M) => {
+    const i = install()
+    // A checkout that happens to live below a node_modules directory.
+    const cached = path.join(i.root, 'node_modules', '.cache', 'clone', 'packages', 'server')
+    fs.mkdirSync(cached, { recursive: true })
+    fs.writeFileSync(path.join(cached, 'package.json'), JSON.stringify({ name: '@chroxy/server', version: '0.11.10' }))
+    fs.writeFileSync(path.join(cached, 'build-info.json'), JSON.stringify({ commit: COMMIT }))
+    assert.equal(codeOf(() => M.readBuild(cached)), 'development_checkout')
+    assert.equal(must(() => M.readBuild(i.pkg)).install, 'pinned')
+    // A git entry above the install makes it a checkout.
+    fs.mkdirSync(path.join(i.root, '.git'))
+    assert.equal(codeOf(() => M.readBuild(i.pkg)), 'development_checkout')
+    assert.equal(must(() => M.readBuild(i.pkg, { allowCheckout: true })).install, 'checkout')
+  },
+  {
+    'any node_modules segment will do': [edit(B, "if (tail.join('/') !== `node_modules/${DAEMON_PACKAGE_NAME}`) return 'checkout'", "if (!real.split(path.sep).includes('node_modules')) return 'checkout'")],
+    'a git entry above is ignored': [edit(B, "return hasGitAtOrAbove(real) ? 'checkout' : 'pinned'", "return 'pinned'")],
+    'a git entry is only looked for at the package': [edit(B, 'if (path.dirname(cur) === cur) return false', 'return false')],
+  },
+)
+
+proves(
+  'a different existing stamp is replaced only with force, the same one is left alone',
+  (M) => {
+    const i = install({ stamp: false })
+    const other = 'b'.repeat(40)
+    must(() => M.stampBuild(i.pkg, COMMIT))
+    must(() => M.stampBuild(i.pkg, COMMIT)) // the same commit again is not a change
+    assert.equal(codeOf(() => M.stampBuild(i.pkg, other)), 'already_stamped')
+    assert.equal(must(() => M.readBuild(i.pkg)).commit, COMMIT)
+    must(() => M.stampBuild(i.pkg, other, { force: true }))
+    assert.equal(must(() => M.readBuild(i.pkg)).commit, other)
+    fs.writeFileSync(path.join(i.pkg, 'build-info.json'), '{ nope')
+    assert.equal(codeOf(() => M.stampBuild(i.pkg, COMMIT)), 'already_stamped')
+    assert.deepEqual(fs.readdirSync(i.pkg).sort(), ['build-info.json', 'package.json'], 'no temp file is left')
+  },
+  {
+    'a different stamp is overwritten': [edit(S, 'if (!force) throw', 'if (false) throw')],
+    'force is ignored': [edit(S, "{ force = false } = {}", '{ force = true } = {}')],
+    'the same commit is refused': [edit(S, 'if (existing === commit) return file', '')],
+  },
 )
 
 proves(

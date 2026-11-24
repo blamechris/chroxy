@@ -32,7 +32,7 @@ const proves = (name, check, mutants = {}) =>
 
 const edit = (file, from, to) => ({ file, from, to })
 const R = 'freshness-runner/run-tick.js'
-const ALLOWED_BUILTINS = ['node:fs', 'node:path', 'node:util', 'node:url']
+const ALLOWED_BUILTINS = ['node:fs', 'node:path', 'node:util', 'node:url', 'node:crypto']
 const ALLOWED_RELATIVE = ['freshness-runner', 'freshness/index.js', 'freshness-sources/index.js', 'config-dir.js', 'utils/claude-config-dir.js', 'utils/is-entry-point.js']
 const FORBIDDEN_WORDS = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|child_process|keychain|keytar|libsecret|dpapi|credential|credentials|password|passwd|apikey|api_key|webhook|discord)\b/i
 
@@ -138,9 +138,11 @@ proves(
     const run = must(() => M.runTick({ ledgerDir: w2.ledgerDir, build: { install: 'pinned', commit: 'a'.repeat(40), daemon_version: '0.11.10' }, stateFile: w2.stateFile, registryDir: w2.registryDir, projectsDir: w2.projectsDir, now: T0, adapters: [M.createStateFileAdapter({ path: w2.stateFile })] }))
     assert.deepEqual(run.failed, ['claude-session-registry', 'claude-transcript'])
     assert.deepEqual(run.sources.filter((s) => s.ok).map((s) => s.source), ['chroxy-state-file'])
+    assert.deepEqual(run.sources.filter((s) => !s.ok).map((s) => [s.error, s.code]), [['Error', null], ['Error', null]])
   },
   {
-    'a failing source stops the run': [edit(R, "sources.push({ source, ok: false, error: err?.name ?? 'Error' })", 'throw err')],
+    'a failing source stops the run': [edit(R, "sources.push({ source, ok: false, error: err?.name ?? 'Error', code: typeof err?.code === 'string' ? err.code : null })", 'throw err')],
+    'the failure code is not reported': [edit(R, "code: typeof err?.code === 'string' ? err.code : null", 'code: undefined')],
     'a failing source is counted as ok': [edit(R, 'failed: sources.filter((s) => !s.ok).map((s) => s.source)', 'failed: []')],
   },
 )
@@ -148,7 +150,7 @@ proves(
 proves(
   'default paths resolve as the daemon resolves them, and each can be overridden',
   (M) => {
-    const root = fs.realpathSync(world().root)
+    const root = fs.realpathSync.native(world().root)
     const cfg = path.join(root, 'chroxy-home')
     const claude = path.join(root, 'claude-home')
     fs.mkdirSync(claude)

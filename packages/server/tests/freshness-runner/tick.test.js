@@ -11,14 +11,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { SKIP_NO_SYMLINK } from '../helpers/symlink-support.js'
 import { cleanupTmp } from '../freshness-core/helpers/harness.js'
 import { COMMIT, REAL_RUNNER, T0, cleanupVariants, install, ledgerRecords, mustKillRunner, runMain, tickArgs, withEnv, world } from './helpers/runner-harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
 
-const proves = (name, check, mutants = {}) =>
-  describe(name, () => {
+const proves = (name, check, mutants = {}, opts = {}) =>
+  describe(name, opts, () => {
     it('holds on the real code', async () => {
       await check(REAL_RUNNER)
     })
@@ -27,6 +28,7 @@ const proves = (name, check, mutants = {}) =>
 
 const edit = (file, from, to) => ({ file, from, to })
 const R = 'freshness-runner/run-tick.js'
+const KEEP = 'keepOutOf: [configDir(), path.dirname(paths.stateFile), paths.registryDir, paths.projectsDir, claudeConfigDir(), ...keepOutOf]'
 const SOURCES = ['chroxy-state-file', 'claude-session-registry', 'claude-transcript']
 
 const tick = (M, w, i, extra = [], opts = {}) => runMain(M, tickArgs(w, extra), { packageRoot: i.pkg, now: w.now, ...opts })
@@ -129,8 +131,8 @@ proves(
     assert.equal(c.code, 0, c.err)
   },
   {
-    "the daemon's config dir is not kept out of": [edit(R, 'keepOutOf: [configDir(), path.dirname(paths.stateFile), ...keepOutOf]', 'keepOutOf: [path.dirname(paths.stateFile), ...keepOutOf]')],
-    "the state file's directory is not kept out of": [edit(R, 'keepOutOf: [configDir(), path.dirname(paths.stateFile), ...keepOutOf]', 'keepOutOf: [configDir(), ...keepOutOf]')],
+    "the daemon's config dir is not kept out of": [edit(R, KEEP, KEEP.replace('configDir(), ', ''))],
+    "the state file's directory is not kept out of": [edit(R, KEEP, KEEP.replace(' path.dirname(paths.stateFile),', ''))],
   },
 )
 
@@ -191,4 +193,53 @@ proves(
     assert.equal(fs.existsSync(w.ledgerDir), false)
   },
   { 'the entry guard never fires': [edit('freshness-runner/cli.js', 'if (isEntryPoint(import.meta.url)) {', 'if (false) {')] },
+)
+
+proves(
+  'a ledger inside a source directory or Claude config dir is refused',
+  (M) => {
+    const i = install()
+    const w = world()
+    const refuse = (dir, env = {}) => {
+      const res = withEnv(env, () => runMain(M, tickArgs({ ...w, ledgerDir: dir }), { packageRoot: i.pkg, now: T0 }))
+      assert.equal(res.code, 2, `${dir}: ${res.err}`)
+      assert.equal(fs.existsSync(dir), false, dir)
+    }
+    refuse(path.join(w.registryDir, 'ledger'))
+    refuse(path.join(w.projectsDir, 'ledger'))
+    refuse(path.join(w.root, 'claude', 'ledger'), { CLAUDE_CONFIG_DIR: path.join(w.root, 'claude') })
+    assert.equal(runMain(M, tickArgs(w), { packageRoot: i.pkg, now: T0 }).code, 0)
+  },
+  {
+    'the registry directory is not kept out of': [edit(R, KEEP, KEEP.replace(' paths.registryDir,', ''))],
+    'the projects directory is not kept out of': [edit(R, KEEP, KEEP.replace(' paths.projectsDir,', ''))],
+    "Claude's config dir is not kept out of": [edit(R, KEEP, KEEP.replace(' claudeConfigDir(),', ''))],
+  },
+)
+
+proves(
+  'a ledger named through a symlink to the daemon state directory is refused',
+  (M) => {
+    const i = install()
+    const w = world()
+    const link = path.join(w.root, 'link')
+    fs.symlinkSync(w.stateDir, link, 'dir')
+    const cfg = path.join(w.root, 'cfg-real')
+    fs.mkdirSync(cfg)
+    const cfgLink = path.join(w.root, 'cfg-link')
+    fs.symlinkSync(cfg, cfgLink, 'dir')
+    // The ledger is spelled through a link to the config dir.
+    const a = withEnv({ CHROXY_CONFIG_DIR: cfg }, () => runMain(M, tickArgs({ ...w, ledgerDir: path.join(cfgLink, 'ledger') }), { packageRoot: i.pkg, now: T0 }))
+    assert.equal(a.code, 2, a.err)
+    // The config dir is spelled through a link and the ledger by its real path.
+    const b = withEnv({ CHROXY_CONFIG_DIR: cfgLink }, () => runMain(M, tickArgs({ ...w, ledgerDir: path.join(cfg, 'ledger') }), { packageRoot: i.pkg, now: T0 }))
+    assert.equal(b.code, 2, b.err)
+    // The state file's directory, reached through a link.
+    const c = runMain(M, tickArgs({ ...w, ledgerDir: path.join(link, 'ledger') }), { packageRoot: i.pkg, now: T0 })
+    assert.equal(c.code, 2, c.err)
+    assert.equal(fs.existsSync(path.join(cfg, 'ledger')), false)
+    assert.equal(fs.existsSync(path.join(w.stateDir, 'ledger')), false)
+  },
+  { 'the check is lexical': [edit('freshness/file-ledger.js', 'if (inside(dir, p) || inside(realish(dir), realish(p))) throw', 'if (inside(dir, p)) throw')] },
+  { skip: SKIP_NO_SYMLINK },
 )

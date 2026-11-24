@@ -42,7 +42,8 @@ const variantDirs = []
 async function importRunner(srcRoot) {
   const url = (f) => pathToFileURL(path.join(srcRoot, 'freshness-runner', f)).href
   const core = await import(pathToFileURL(path.join(srcRoot, 'freshness', 'index.js')).href)
-  return { SRC_ROOT: srcRoot, ...core, ...(await import(url('build-info.js'))), ...(await import(url('stamp.js'))), ...(await import(url('run-tick.js'))), ...(await import(url('cli.js'))) }
+  const cmd = await import(pathToFileURL(path.join(srcRoot, 'cli', 'freshness-cmd.js')).href)
+  return { SRC_ROOT: srcRoot, ...cmd, ...core, ...(await import(url('build-info.js'))), ...(await import(url('stamp.js'))), ...(await import(url('run-tick.js'))), ...(await import(url('cli.js'))) }
 }
 
 export const REAL_RUNNER = await importRunner(SRC)
@@ -89,7 +90,7 @@ export function must(fn, what = 'the step') {
  * (no node_modules in its path) holding the same package.
  */
 export function install({ version = '0.11.10', stamp = COMMIT, name = '@chroxy/server' } = {}) {
-  const root = fs.realpathSync(tmp())
+  const root = fs.realpathSync.native(tmp())
   const pkg = path.join(root, 'node_modules', '@chroxy', 'server')
   fs.mkdirSync(pkg, { recursive: true })
   fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name, version }))
@@ -104,7 +105,7 @@ const DECLARED = { state: 'running', next: 'build the thing', updatedAt: T0 - MI
 
 /** A state file, a registry, a transcript store and a ledger directory, all invented. */
 export function world({ stateVersion = 1 } = {}) {
-  const root = fs.realpathSync(tmp())
+  const root = fs.realpathSync.native(tmp())
   const stateDir = path.join(root, 'chroxy-config')
   fs.mkdirSync(stateDir)
   const stateFile = path.join(stateDir, 'session-state.json')

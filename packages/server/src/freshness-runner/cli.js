@@ -7,9 +7,9 @@
  *   node <install>/node_modules/@chroxy/server/src/freshness-runner/cli.js stamp --commit <sha>
  *
  * It starts no daemon and loads no daemon command. Exit codes: 0 ticked,
- * 1 a source's tick failed (the others ran), 2 refused before any read
- * (usage, build not pinned or not stamped, ledger inside the daemon's state
- * directory), 3 the ledger is held by another reconciler.
+ * 1 a source's tick failed (the others ran), 2 refused (usage, build not
+ * pinned or not stamped, ledger inside the daemon's state directory or a
+ * source, ledger corrupt or fenced), 3 the ledger is held by another reconciler.
  */
 
 import { parseArgs } from 'node:util'
@@ -24,7 +24,7 @@ import { isEntryPoint } from '../utils/is-entry-point.js'
 export const USAGE = [
   'usage: freshness tick --ledger-dir <dir> [--state-file <file>] [--registry-dir <dir>] [--projects-dir <dir>]',
   '                      [--cadence-minutes <n>] [--lease-minutes <n>] [--ledger-id <id>] [--mode read-only] [--allow-dev-checkout]',
-  '       freshness stamp --commit <40-hex sha> [--package-dir <dir>]',
+  '       freshness stamp --commit <40-hex sha> [--package-dir <dir>] [--force]',
 ].join('\n')
 
 /** The daemon package directory this file belongs to. */
@@ -42,6 +42,7 @@ const OPTIONS = {
   'allow-dev-checkout': { type: 'boolean' },
   commit: { type: 'string' },
   'package-dir': { type: 'string' },
+  force: { type: 'boolean' },
 }
 
 function num(name, v) {
@@ -69,7 +70,7 @@ export function main(argv, { out = (s) => process.stdout.write(s + '\n'), err = 
   try {
     if (cmd === 'stamp') {
       if (values.commit === undefined) throw new TypeError('--commit is required')
-      const file = stampBuild(values['package-dir'] ? path.resolve(values['package-dir']) : packageRoot, values.commit)
+      const file = stampBuild(values['package-dir'] ? path.resolve(values['package-dir']) : packageRoot, values.commit, { force: values.force === true })
       out(JSON.stringify({ stamped: file }))
       return 0
     }
@@ -91,7 +92,7 @@ export function main(argv, { out = (s) => process.stdout.write(s + '\n'), err = 
     return summary.failed.length === 0 ? 0 : 1
   } catch (e) {
     if (e instanceof LedgerHeldError) {
-      err('the ledger is held by another reconciler; nothing was read or written')
+      err('the ledger is held by another reconciler; no source was ticked')
       return 3
     }
     err(e instanceof BuildError || e instanceof TypeError ? `refused: ${e.message}` : `refused: ${e?.name ?? 'Error'}: ${e?.message}`)
