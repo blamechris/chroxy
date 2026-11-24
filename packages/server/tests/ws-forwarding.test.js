@@ -1,6 +1,11 @@
 import { describe, it, afterEach, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { sendSessionInfo } from '../src/ws-history.js'
@@ -13,7 +18,7 @@ import { registerProviderRegistry, getRegistryForProvider, updateModels, resetMo
 // but the direct import documents why the parity tests below see the real
 // registry rather than an empty one.
 import '../src/providers.js'
-import { getProvider, getRegisteredProviderNames, DEFAULT_PROVIDER } from '../src/providers.js'
+import { getProvider, getRegisteredProviderNames, DEFAULT_PROVIDER, registerProvider } from '../src/providers.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -1037,6 +1042,45 @@ describe('setupForwarding', () => {
 
       assert.equal(broadcastSessionList.mock.callCount(), 1, 'exactly one list')
       assert.deepEqual(seenDestroyed, [true], 'the list was built after the destroy, so it omits the session')
+    })
+
+    it('omits the failed session from the list a REAL SessionManager builds after a create failure (#8988)', async () => {
+      // The registry is process-global and files run in parallel: unique name.
+      class RejectingStart8988 extends EventEmitter {
+        constructor(opts) { super(); this.cwd = opts.cwd; this.isRunning = false }
+        static get capabilities() { return {} }
+        async start() { throw new Error('refused at start') }
+        destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
+      }
+      declareUnknownCustomization(RejectingStart8988)
+      registerProvider('test-create-failure-list-8988', RejectingStart8988)
+
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-8988-'))
+      const sm = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: join(dir, 'session-state.json') })
+      try {
+        const listsSent = []
+        let failedId = null
+        const broadcastSessionList = mock.fn(() => {
+          // What the real ws-server broadcast builds: the manager's list at fire time.
+          listsSent.push(sm.listSessions().map((r) => r.sessionId))
+        })
+        const ctx = makeCtx({ sessionManager: sm, broadcastSessionList })
+        setupForwarding(ctx)
+        sm.on('session_create_failed', (e) => { failedId = e.sessionId })
+
+        const id = sm.createSession({ cwd: dir, name: 'Doomed', provider: 'test-create-failure-list-8988' })
+        assert.ok(sm.listSessions().some((r) => r.sessionId === id), 'listed while its start is pending')
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        assert.equal(failedId, id, 'the start rejection surfaced as session_create_failed')
+        assert.equal(broadcastSessionList.mock.callCount(), 0, 'not synchronously, inside the emit')
+        await nextLoopTurn()
+
+        assert.equal(listsSent.length, 1, 'exactly one list')
+        assert.ok(!listsSent[0].includes(id), 'the list built when the queued turn fires omits the failed session')
+      } finally {
+        sm.destroyAll()
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
 
     it('ignores a session_create_failed with no sessionId', () => {
