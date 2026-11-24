@@ -128,7 +128,7 @@ const REASON_FOLLOW = 'tmpdir reached in a form the scan cannot follow'
 /**
  * The shape of the site a string node sits at, as a `>`-joined chain from the
  * node outwards to its first enclosing statement, e.g.
- * `TemplateElement>TemplateLiteral>return`. A call contributes its callee name
+ * `TemplateElement>TemplateLiteral[1]>return`. A call contributes its callee name
  * and the argument position the node is in (`call:join@1`), a declarator its
  * bound name, an assignment its target, a property its key. Exemptions are
  * bound to this (#9212) so a literal reused at a different kind of site —
