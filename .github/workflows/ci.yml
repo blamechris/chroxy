@@ -1943,6 +1943,16 @@ jobs:
           node scripts/__tests__/report-coverage.test.mjs | tee /tmp/chroxy-report-coverage.tap
           node scripts/lib/assert-test-count.mjs --min 27 cat /tmp/chroxy-report-coverage.tap > /dev/null
 
+      - name: Run blocked-report.mjs tests
+        # #9232 — the browser layout cases fold the requests they blocked into
+        # their failure. The helper is pure, so it is proven here without a
+        # browser. Direct invocation satisfies the workflow registration guard;
+        # the saved TAP gets a case-count floor.
+        run: |
+          set -o pipefail
+          node scripts/__tests__/blocked-report.test.mjs | tee /tmp/chroxy-blocked-report.tap
+          node scripts/lib/assert-test-count.mjs --min 9 cat /tmp/chroxy-blocked-report.tap > /dev/null
+
       - name: Run no-test-force-exit.mjs tests
         # #7400 — `--test-force-exit` made the runner report 154-192 of
         # base-session.test.js's 192 tests, exit 0, and print `# fail 0`. Both
