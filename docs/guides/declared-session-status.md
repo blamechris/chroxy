@@ -105,3 +105,5 @@ session viewers. The session list includes optional server-authored
 last clear fence). Reconnect uses those original times to restore or clear only
 the decision, preserving permissions and other activity. Status write callers
 cannot supply this metadata. Older servers omitting it leave local activity alone.
+
+A reconciler outside the daemon grades the age of each session's declared status and keeps a file ledger of what it saw; see [session freshness reconciler](freshness-reconciler.md).

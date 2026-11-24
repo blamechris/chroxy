@@ -13,96 +13,14 @@
  */
 
 import { cadenceSeconds } from './config.js'
-import { canonical, H } from './hash.js'
-import { deriveState, foldRecord, sessionsOf } from './derive.js'
+import { sessionsOf } from './derive.js'
 import { put, planRead } from './checks.js'
 import { planInvestigations } from './investigation.js'
-import { append, createLedger, loadLedger } from './ledger.js'
-import { DEFAULT_POLICY } from './policy.js'
+import { createModel, planConfig, restoreModel, run, trackedSessions } from '../../../src/freshness/runtime.js'
 import { planOwnerEvent, planQueue, sweepUnknownDeliveries } from './queue.js'
-import { checkTickKey, configKey, sessionKey, tickId as makeTickId, tickKey } from './keys.js'
+import { checkTickKey, tickId as makeTickId, tickKey } from './keys.js'
 
-export { planOwnerEvent }
-
-/** A fresh model context. */
-export function createModel({ ledgerId, policy = DEFAULT_POLICY }) {
-  const ledger = createLedger({ ledgerId })
-  return { ledger, state: deriveState([], policy), policy }
-}
-
-/**
- * Rebuild a context from ledger records alone, as after a crash: the
- * ledger's index and every derived value are recomputed; nothing survives
- * from the previous process.
- */
-export function restoreModel({ ledgerId, records, policy = DEFAULT_POLICY }) {
-  const ledger = loadLedger({ ledgerId, records: records.slice() })
-  return { ledger, state: deriveState(ledger.records, policy), policy }
-}
-
-/**
- * Execute a planner against a context. `deliver(effect)` performs a send
- * and returns 'delivered' or 'failed'. Returns { sends, value }.
- */
-export function run(ctx, gen, { deliver = () => 'delivered' } = {}) {
-  const sends = []
-  let res = gen.next()
-  while (!res.done) {
-    const op = res.value
-    let reply
-    if (op.op === 'append') {
-      reply = append(ctx.ledger, op.record, op.at)
-      if (reply.record) foldRecord(ctx.state, reply.record)
-    } else if (op.op === 'send') {
-      sends.push(op.effect)
-      reply = deliver(op.effect)
-    } else {
-      throw new Error(`run: unknown op ${op.op}`)
-    }
-    res = gen.next(reply)
-  }
-  return { sends, value: res.value }
-}
-
-/** Plan a configuration record. The full values are stored (the DESIGN-GAP note below). */
-export function* planConfig(ctx, { config, now }) {
-  const st = ctx.state
-  const configHash = H(config)
-  const previous = st.lastConfigId
-  const id = configKey(previous, configHash)
-  if (st.index.has(id)) return { configRef: st.configRef }
-  const configRef = 'cfg_' + configHash.slice(0, 12)
-  const prevValues = st.config
-  const changed = prevValues ? Object.keys(config).filter((k) => canonical(config[k]) !== canonical(prevValues[k])) : Object.keys(config)
-  yield put(
-    {
-      kind: 'config',
-      id,
-      body: {
-        config_ref: configRef,
-        previous_config_ref: st.configRef,
-        config_hash: configHash,
-        changed_fields: changed,
-        // DESIGN-GAP: the `config` body carries only a hash and the names of
-        // the changed fields, so the thresholds a check was graded under are
-        // not derivable from the ledger alone. The model stores the values.
-        values: config,
-      },
-    },
-    now,
-  )
-  return { configRef }
-}
-
-function trackedSessions(ctx, source, world) {
-  const listed = world.list(source)
-  const out = new Map()
-  for (const s of sessionsOf(ctx.state, source)) out.set(s.sk, { session: s.session, scope: s.scope, listed: listed == null ? null : false })
-  if (listed) {
-    for (const e of listed) out.set(sessionKey(e.session), { session: e.session, scope: e.scope ?? null, listed: true })
-  }
-  return [...out.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([, v]) => v)
-}
+export { createModel, planConfig, planOwnerEvent, restoreModel, run }
 
 /**
  * Plan one tick of one source.
