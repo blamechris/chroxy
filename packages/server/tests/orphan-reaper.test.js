@@ -161,6 +161,30 @@ describe('sweepOrphans predicate (#7606)', () => {
     assert.match(r.error, /running as root/)
   })
 
+  it('refuses to sweep as pid 1: a live direct child has ppid 1 too (#9248)', () => {
+    const calls = []
+    const deps = {
+      listProcesses: () => { calls.push('list'); return table(leaked().rows) },
+      cwdOf: () => { calls.push('cwd'); return new Map() },
+      kill: () => { calls.push('kill') },
+      uid: UID, selfPid: 1, platform: 'darwin', realpath: (p) => p,
+    }
+    const r = sweepOrphans({ worktreeBase: BASE, deps })
+    assert.equal(r.errorCode, 'PID_ONE')
+    assert.ok(/pid 1/.test(r.error) && /--init/.test(r.error), r.error)
+    assert.deepEqual(calls, [], 'nothing listed, resolved or signalled')
+  })
+
+  it('as pid 1 a live-child-shaped row is NOT killed; the same row with another selfPid is (#9248)', () => {
+    const live = seams(leaked({ selfPid: 1 }))
+    const r1 = sweepOrphans({ worktreeBase: BASE, deps: live.deps })
+    assert.deepEqual(live.killed, [])
+    assert.equal(r1.reaped.length, 0)
+    const ctl = seams(leaked({ selfPid: SELF }))
+    sweepOrphans({ worktreeBase: BASE, deps: ctl.deps })
+    assert.deepEqual(ctl.killed, [[11839, 'SIGKILL']], 'control: the row is reapable when not pid 1')
+  })
+
   it('compares against the REAL path of the base (lsof/procfs report resolved paths)', () => {
     // Base is a symlink `/tmp/wt` -> `/private/tmp/wt`; the process cwd is the real path.
     const { killed, deps } = seams(leaked({ cwds: { 11839: '/private/tmp/wt/abc' } }))
@@ -322,6 +346,17 @@ describe('maybeReapOrphans / startPeriodicOrphanReap (#7606)', () => {
     killed.length = 0
     maybeReapOrphans({ orphanReap: { minAgeMs: 'soon' } }, makeLogger(), deps)
     assert.deepEqual(killed, [], `bad value → default ${DEFAULT_MIN_AGE_MS}ms → not reaped`)
+  })
+
+  it('as pid 1: warns once across two sweeps and kills nothing (#9248)', () => {
+    const log = makeLogger()
+    const killed = []
+    const deps = { ...leakDeps(killed), selfPid: 1 }
+    maybeReapOrphans({}, log, deps)
+    maybeReapOrphans({}, log, deps)
+    assert.deepEqual(killed, [])
+    assert.equal(log._warn.length, 1, JSON.stringify(log._warn))
+    assert.ok(/pid 1/.test(log._warn[0]) && /--init/.test(log._warn[0]), log._warn[0])
   })
 
   it('warns (and reaps nothing) when the sweep cannot check', () => {

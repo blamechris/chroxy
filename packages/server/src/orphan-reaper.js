@@ -249,6 +249,17 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   // pid 1 is a live entrypoint whose children are owned, not orphaned — the
   // remaining cwd check would be the only guard. Refuse rather than widen.
   if (uid === 0) { report.error = 'running as root: the uid predicate cannot distinguish orphans'; report.errorStage = 'list'; return report }
+  // As pid 1 (a container run without `--init`, e.g. `CHROXY_TUNNEL=none`
+  // makes the daemon its own entrypoint) every direct child of the daemon has
+  // ppid 1, so a LIVE session child satisfies the whole orphan predicate and
+  // the re-verification (still ppid 1) would pass it. Refuse rather than kill
+  // live children (#9248).
+  if (selfPid === 1) {
+    report.error = 'running as pid 1: every direct child has ppid 1, so orphans cannot be told apart from live children (run the container with --init, or compose `init: true`)'
+    report.errorCode = 'PID_ONE'
+    report.errorStage = 'list'
+    return report
+  }
   // lsof and /proc report REAL paths; compare against the real base, or a
   // symlink anywhere in the chain (/tmp → /private/tmp, a linked $HOME) makes
   // every comparison fail and the sweep a permanent silent no-op.

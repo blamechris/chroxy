@@ -234,28 +234,38 @@ assert_no_pty_failure_signature() {
 docker version >/dev/null 2>&1 || fail "cannot reach Docker (no docker CLI on PATH, or no daemon running)"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "no such image: $IMAGE (build it first)"
 
-# --- 7. #9248: the orphan reaper's tools exist in the image, and a sweep works ---
+# --- 7. #9248: ps and lsof exist in the image, and the in-image ps listing works ---
 # The runtime stage once installed only curl/git/ca-certificates, so the boot
 # sweep logged `process listing failed: spawnSync ps ENOENT` and the reaper
 # never reaped anything in Docker. Asserted by RESOLVING the tools inside the
 # built image, not by reading the Dockerfile (which would only assert its
 # spelling). One container per tool so the failure names the missing one.
+# ps (procps) is the orphan reaper's process listing; on Linux the reaper reads
+# cwds from /proc, so lsof is NOT its dependency here — lsof is used by
+# preview-target.js and utils/opened-file-path.js.
 for tool in ps lsof; do
+  case "$tool" in
+    ps) WHY="the orphan reaper's process listing needs ps (procps)" ;;
+    *) WHY="preview-target.js and utils/opened-file-path.js need lsof" ;;
+  esac
   set +e
   TOOL_OUT="$(run_with_timeout 30 docker run --rm --init --name "$NAME-tools" --entrypoint sh "$IMAGE" -c 'command -v "$1"' _ "$tool" 2>&1)"
   tool_rc=$?
   set -e
   [ "$tool_rc" -ne 124 ] || fail "checking for '$tool' timed out after 30s inside $IMAGE"
+  # The non-empty clause is kept: `command -v` printing nothing with rc 0 must
+  # not read as "found" (an empty path resolves nothing).
   [ "$tool_rc" -eq 0 ] && [ -n "$TOOL_OUT" ] \
-    || fail "'$tool' is not installed in $IMAGE (exit $tool_rc) — the orphan reaper needs ps (procps) and lsof (#9248): $TOOL_OUT"
+    || fail "'$tool' is not installed in $IMAGE (exit $tool_rc) — $WHY (#9248): $TOOL_OUT"
 done
 echo "== Image tools OK: ps and lsof resolve inside $IMAGE"
 
-# One REAL sweep inside the image, with every signal stubbed out: `kill` throws,
-# so nothing is ever signalled (a failed kill is recorded as skipped). Passes
-# only when the sweep ran to completion with no error — in particular no
-# `process listing failed`. The container runs as the image's non-root user,
-# which the reaper requires (it refuses uid 0).
+# One sweep inside the image, with `kill` stubbed to throw. A fresh container
+# has no orphan candidates, so this proves exactly one thing: the in-image `ps`
+# listing works (no `process listing failed`, acceptance item 2) and lists at
+# least one process. `cwdOf` and `kill` are not reached. The container runs as
+# the image's non-root user (the reaper refuses uid 0) and with `--init`, so
+# node is not pid 1 (the reaper refuses pid 1 too, #9248).
 set +e
 SWEEP_OUT="$(run_with_timeout 60 docker run --rm --init --name "$NAME-sweep" --entrypoint node "$IMAGE" --input-type=module -e '
   const { sweepOrphans } = await import("/app/packages/server/src/orphan-reaper.js")

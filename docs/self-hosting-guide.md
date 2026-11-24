@@ -70,7 +70,7 @@ login shell, which a container doesn't have.
 ```bash
 docker build -t chroxy .
 
-docker run -d --name chroxy \
+docker run -d --init --name chroxy \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e CHROXY_TUNNEL=none \
   -e CHROXY_CWD=/workspace \
@@ -79,6 +79,8 @@ docker run -d --name chroxy \
   -v "$(pwd)":/workspace \
   chroxy start
 ```
+
+`--init` matters too: the orphan reaper refuses to run when the daemon is pid 1 (every direct child would look orphaned), and `--init` (or `init: true` in `docker-compose.yml`, already set there) gives the container a real pid 1 so it runs.
 
 `-e CHROXY_CWD=/workspace` matters: without it, new sessions default to
 `$HOME` (`/home/chroxy` in this image), NOT the bind-mounted project

@@ -172,8 +172,9 @@ RUN npm run build -w @chroxy/dashboard
 FROM node:22-slim
 
 # System dependencies (no tmux, no build-essential — CLI headless mode only).
-# procps (ps) and lsof are the orphan reaper's process listing / cwd tools (#9248);
-# scripts/docker-image-smoke.sh resolves both inside the built image.
+# procps (ps): the orphan reaper's process listing (#9248; on Linux it resolves
+# cwds via /proc, so it needs ps only). lsof: preview-target.js and
+# utils/opened-file-path.js. scripts/docker-image-smoke.sh resolves both in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
