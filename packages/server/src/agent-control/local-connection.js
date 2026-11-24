@@ -168,15 +168,17 @@ function loopbackPortFromUrl(url) {
  * without ever including the token in a thrown message, log, or returned
  * diagnostic field beyond the dedicated `token` property.
  *
- * @param {object} [deps] - injection seam for tests
- * @param {function} [deps.readConnectionInfo]
- * A record whose pid is proven gone resolves `not_running`. A record whose liveness
- * could not be verified (`_livenessUnverified`, #9074) resolves
- * `liveness_unverified` BEFORE the token is read, so this resolver never hands out the
- * primary bearer on an unverified record. A verified-alive pid is not proof of the
- * daemon's identity either (see utils/pid-liveness.js); the existing auth and
+ * A record whose pid is proven gone resolves `not_running`, as does no record at all.
+ * A record whose liveness could not be verified (`_livenessUnverified`, #9074) resolves
+ * `liveness_unverified`. Both refusals happen before a credential-bearing connection
+ * is returned: the result carries no `token`, so this resolver never hands out the
+ * primary bearer on an unverified record. (The record, token included, has already
+ * been parsed by then; it is simply not returned.) A verified-alive pid is not proof
+ * of the daemon's identity either (see utils/pid-liveness.js); the existing auth and
  * transport checks still apply to whatever is dialed.
  *
+ * @param {object} [deps] - injection seam for tests
+ * @param {function} [deps.readConnectionInfo]
  * @returns {{ ok: true, url: string, token: string|null, port: number } | { ok: false, reason: 'not_running'|'liveness_unverified' }}
  */
 export function resolveLocalConnection(deps = {}) {

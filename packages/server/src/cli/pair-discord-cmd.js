@@ -13,6 +13,8 @@
  * webhook not configured, post failed) with a legible reason.
  */
 
+import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+
 function portFromUrl(url) {
   if (typeof url !== 'string') return null
   const m = url.match(/:(\d+)(?:\/|$)/)
@@ -26,17 +28,14 @@ function portFromUrl(url) {
  * @param {function} [deps.fetchFn]
  * @param {number}   [deps.defaultPort]
  * @returns {Promise<{ ok: true, expiresInSeconds: number }
- *                  | { ok: false, reason: 'not_running'|'no_token'|'not_configured'|'post_failed'|'unavailable', message?: string }>}
+ *                  | { ok: false, reason: 'not_running'|'liveness_unverified'|'no_token'|'not_configured'|'post_failed'|'unavailable', message?: string }>}
  */
 export async function postPairDiscord(deps = {}) {
-  const readConnectionInfo =
-    deps.readConnectionInfo ||
-    (await import('../connection-info.js')).readConnectionInfo
   const fetchFn = deps.fetchFn || globalThis.fetch
   const defaultPort = deps.defaultPort || 8765
 
-  const info = readConnectionInfo()
-  if (!info) return { ok: false, reason: 'not_running' }
+  const { info, ...state } = await readCliConnectionState(deps)
+  if (!info) return { ok: false, reason: withheldReason(state) }
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
 
   const port = portFromUrl(info.httpUrl) || portFromUrl(info.wsUrl) || defaultPort
@@ -77,6 +76,8 @@ export async function runPairDiscordCmd(_options = {}, deps = {}) {
   }
   if (result.reason === 'not_running') {
     writeErr('Chroxy server is not running. Start it with `chroxy start`.')
+  } else if (result.reason === 'liveness_unverified') {
+    writeErr(LIVENESS_UNVERIFIED_MESSAGE)
   } else if (result.reason === 'no_token') {
     writeErr('Server is running without an auth token — pairing is unavailable.')
   } else if (result.reason === 'not_configured') {

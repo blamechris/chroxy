@@ -25,9 +25,9 @@ const err = (s) => process.stderr.write(`${s}\n`)
 async function connectToLocalDaemon(deps = {}) {
   const resolveLocalConnection = deps.resolveLocalConnection || (await import('../agent-control/local-connection.js')).resolveLocalConnection
   const conn = resolveLocalConnection()
-  // #9074: keep "could not verify" distinct from "not running"; both refuse before
-  // any token is used.
-  if (!conn.ok) return { ok: false, reason: conn.reason === 'liveness_unverified' ? 'liveness_unverified' : 'not_running' }
+  // #9074/#9229: report the resolver's reason as it is. Every refusal happens before a
+  // credential-bearing connection is returned, so no token is used on any of them.
+  if (!conn.ok) return { ok: false, reason: conn.reason }
   if (!conn.token) return { ok: false, reason: 'no_token' }
   const { AgentControlClient } = deps.AgentControlClient ? { AgentControlClient: deps.AgentControlClient } : await import('../agent-control/client.js')
   const client = new AgentControlClient({ url: conn.url, token: conn.token, silent: true, deviceName: 'chroxy-agent-cli' })

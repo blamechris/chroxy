@@ -16,7 +16,7 @@ const originalConfigDir = process.env.CHROXY_CONFIG_DIR
 const testDir = mkdtempSync(join(tmpdir(), 'chroxy-liveness-fail-closed-'))
 process.env.CHROXY_CONFIG_DIR = testDir
 
-const { writeConnectionInfo, readConnectionInfo, getConnectionInfoPath } = await import('../src/connection-info.js')
+const { writeConnectionInfo, readConnectionInfo, readConnectionState, getConnectionInfoPath } = await import('../src/connection-info.js')
 const { probePidLiveness } = await import('../src/utils/pid-liveness.js')
 const { collectStatus } = await import('../src/cli/status-cmd.js')
 const { fetchPairingCode } = await import('../src/cli/pair-code-cmd.js')
@@ -35,6 +35,10 @@ const TOKEN = 'primary-bearer-that-must-not-be-sent'
 const errno = (code) => Object.assign(new Error(code), { code })
 /** The real reader, with the pid probe's `kill` mocked to fail with `code`. */
 const readerWith = (code) => () => readConnectionInfo({
+  probePidLiveness: (pid) => probePidLiveness(pid, { kill: () => { if (code) throw errno(code) } }),
+})
+/** The real state reader (`{ info, reason }`), with the probe's `kill` mocked. */
+const stateWith = (code) => () => readConnectionState({
   probePidLiveness: (pid) => probePidLiveness(pid, { kill: () => { if (code) throw errno(code) } }),
 })
 const unverifiedReader = readerWith('EPERM')
@@ -151,5 +155,159 @@ describe('chroxy agent: an unverified record is refused before any client exists
     assert.equal(result.reason, 'not_running')
     assert.equal(counter.n, 0)
     assert.ok(lines.some((l) => /not running\. Start it/.test(l)))
+  })
+})
+
+// #9229: the CLIs word "could not verify" differently from "not running", through the
+// real reader's `{ info, reason }`, and still fail closed. Same mocked probe, same
+// temp CONFIG_DIR, recording fetch. The unverified wording is pinned verbatim.
+describe('an unverified record is worded as unverified, and still fails closed (#9229)', () => {
+  const UNVERIFIED = /Could not verify that the Chroxy daemon in connection\.json is running/
+  const NOT_RUNNING = /Chroxy server is not running\. Start it/
+  const unverifiedState = stateWith('EPERM')
+  const deadState = stateWith('ESRCH')
+
+  const clis = [
+    ['pair-code', async (deps, lines) => {
+      const r = await fetchPairingCode(deps)
+      const { runPairCodeCmd } = await import('../src/cli/pair-code-cmd.js')
+      await runPairCodeCmd({}, { ...deps, write: () => {}, writeErr: (l) => lines.push(l) })
+      return r
+    }],
+    ['pair-discord', async (deps, lines) => {
+      const r = await postPairDiscord(deps)
+      const { runPairDiscordCmd } = await import('../src/cli/pair-discord-cmd.js')
+      await runPairDiscordCmd({}, { ...deps, write: () => {}, writeErr: (l) => lines.push(l) })
+      return r
+    }],
+    ['pages list', async (deps, lines) => runPagesListCmd({}, { ...deps, write: () => {}, writeErr: (l) => lines.push(l) })],
+    ['shell list', async (deps, lines) => runShellListCmd({}, { ...deps, readShellApprovalInfo: () => ({ port: 47124 }), out: () => {}, err: (l) => lines.push(l) })],
+  ]
+
+  for (const [name, run] of clis) {
+    it(`${name}: unverified says so, makes no request, keeps the record`, async () => {
+      // Mutation: map unverified back to not_running (withheldReason) -> NOT_RUNNING is
+      // printed and the UNVERIFIED assertion goes red. Mutation: hand out the record when
+      // unverified -> calls.length > 0 goes red.
+      const { fetchFn, calls } = recordingFetch()
+      const lines = []
+      const result = await run({ readConnectionState: unverifiedState, fetchFn }, lines)
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'liveness_unverified')
+      assert.equal(calls.length, 0, 'no request, so the bearer was never sent')
+      assert.ok(lines.some((l) => UNVERIFIED.test(l)), `unverified wording printed: ${lines.join(' | ')}`)
+      assert.equal(lines.some((l) => NOT_RUNNING.test(l)), false)
+      assert.ok(existsSync(getConnectionInfoPath()), 'the record file is untouched')
+    })
+  }
+
+  it('control: a dead pid is still "not running" (and its record is still removed)', async () => {
+    const { fetchFn, calls } = recordingFetch()
+    const lines = []
+    const result = await runPagesListCmd({}, { readConnectionState: deadState, fetchFn, write: () => {}, writeErr: (l) => lines.push(l) })
+    assert.equal(result.reason, 'not_running')
+    assert.equal(calls.length, 0)
+    assert.ok(lines.some((l) => NOT_RUNNING.test(l)))
+    assert.equal(existsSync(getConnectionInfoPath()), false, 'ESRCH cleanup unchanged')
+  })
+
+  it('control: no record at all is "not running"', async () => {
+    rmSync(getConnectionInfoPath(), { force: true })
+    const { fetchFn, calls } = recordingFetch()
+    const result = await fetchPairingCode({ readConnectionState: unverifiedState, fetchFn })
+    assert.equal(result.reason, 'not_running')
+    assert.equal(calls.length, 0)
+  })
+
+  it('a state that claims a record but not "alive" is withheld (fail closed)', async () => {
+    const { fetchFn, calls } = recordingFetch()
+    const result = await fetchPairingCode({
+      readConnectionState: () => ({ info: { pid: 1, apiToken: TOKEN, port: 47123 }, reason: 'liveness_unverified' }),
+      fetchFn,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'liveness_unverified')
+    assert.equal(calls.length, 0)
+  })
+
+  it('positive control: a verified-alive state reaches fetch with the bearer', async () => {
+    const { fetchFn, calls } = recordingFetch()
+    await fetchPairingCode({ readConnectionState: stateWith(null), fetchFn })
+    assert.equal(sentBearer(calls), true)
+  })
+
+  it('status: not running + unverified is reported as could-not-verify, JSON and human, with no bearer', async () => {
+    const { runStatusCmd } = await import('../src/cli/status-cmd.js')
+    const failingFetch = async () => { throw new Error('unreachable') }
+    const humanOut = []
+    const status = await runStatusCmd({}, { readConnectionState: unverifiedState, fetchFn: failingFetch, write: (s) => humanOut.push(s), defaultPort: 47999 })
+    assert.equal(status.running, false)
+    assert.equal(status.livenessUnverified, true)
+    assert.ok(UNVERIFIED.test(humanOut.join('\n')))
+    assert.ok(/Could not verify/.test(humanOut.join('\n')))
+    assert.equal(/Status:\s+Not running/.test(humanOut.join('\n')), false)
+    const jsonOut = []
+    await runStatusCmd({ json: true }, { readConnectionState: unverifiedState, fetchFn: failingFetch, write: (s) => jsonOut.push(s), defaultPort: 47999 })
+    assert.equal(JSON.parse(jsonOut[0]).livenessUnverified, true)
+    assert.ok(existsSync(getConnectionInfoPath()))
+  })
+
+  it('status control: a dead pid reads "Not running", not unverified', async () => {
+    writeConnectionInfo({ pid: 4242, port: 47123, apiToken: TOKEN })
+    const { runStatusCmd } = await import('../src/cli/status-cmd.js')
+    const out = []
+    const status = await runStatusCmd({}, { readConnectionState: deadState, fetchFn: async () => { throw new Error('x') }, write: (s) => out.push(s), defaultPort: 47999 })
+    assert.equal(status.livenessUnverified, false)
+    assert.ok(/Status:\s+Not running/.test(out.join('\n')))
+  })
+})
+
+describe('chroxy agent reports each resolver reason accurately (#9229)', () => {
+  async function withStderr(fn) {
+    const lines = []
+    const original = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (s) => { lines.push(String(s)); return true }
+    try { return { result: await fn(), lines } } finally { process.stderr.write = original }
+  }
+  const cases = [
+    ['not_running', /Chroxy server is not running\. Start it/],
+    ['liveness_unverified', /Could not verify that the Chroxy daemon in connection\.json is running/],
+    // any reason the resolver may grow is reported as itself, never as "not running"
+    ['some_future_reason', /Could not reach the daemon: some_future_reason/],
+  ]
+  for (const [reason, pattern] of cases) {
+    it(`${reason}: reported as itself, no client constructed`, async () => {
+      let constructed = 0
+      const deps = {
+        resolveLocalConnection: () => ({ ok: false, reason }),
+        AgentControlClient: class { constructor () { constructed++ } },
+        out: () => {},
+        err: () => {},
+      }
+      const { result, lines } = await withStderr(() => runAgentList({}, deps))
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, reason)
+      assert.equal(constructed, 0)
+      assert.ok(lines.some((l) => pattern.test(l)), lines.join(' | '))
+      if (reason !== 'not_running') assert.equal(lines.some((l) => /is not running\. Start it/.test(l)), false)
+    })
+  }
+
+  it('end to end through the real resolver: an EPERM record gives liveness_unverified, not not_running', async () => {
+    const { resolveLocalConnection, readConnectionInfoNonMutating } = await import('../src/agent-control/local-connection.js')
+    writeConnectionInfo({ pid: 4242, port: 47123, apiToken: TOKEN })
+    let constructed = 0
+    const deps = {
+      resolveLocalConnection: () => resolveLocalConnection({
+        readConnectionInfo: () => readConnectionInfoNonMutating({ probePidLiveness: (pid) => probePidLiveness(pid, { kill: () => { throw errno('EPERM') } }) }),
+      }),
+      AgentControlClient: class { constructor () { constructed++ } },
+      out: () => {},
+      err: () => {},
+    }
+    const { result } = await withStderr(() => runAgentList({}, deps))
+    assert.equal(result.reason, 'liveness_unverified')
+    assert.equal(constructed, 0)
+    assert.ok(existsSync(getConnectionInfoPath()))
   })
 })
