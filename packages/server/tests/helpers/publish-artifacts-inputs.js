@@ -12,6 +12,29 @@ const FS_READS = ['readFile', 'readFileSync', 'createReadStream']
 // up to today's call counts: any additional call is refused, never ignored.
 // existsSync with a literal repo path is still discovered as an input.
 const VERIFIER_FS_CALLS = { mkdtempSync: 1, rmSync: 1, writeFileSync: 1, existsSync: 3 }
+// Child processes whose first literal script argument is followed as an input.
+// Flags are refuse-by-default PER interpreter: only the listed ones may precede
+// the script, because `-e` is inline code for node but errexit for a shell, and
+// any other flag (`--import=x`, `-r./h.cjs`, `--env-file=x`) can change what runs.
+const INTERPRETER_KIND = { node: 'node', nodejs: 'node', bash: 'shell', sh: 'shell', zsh: 'shell', python: 'python', python3: 'python' }
+const INTERPRETER_FLAGS = {
+  node: { allowed: ['--', '--no-warnings', '--input-type=module', '--input-type=commonjs'], inline: ['-e', '-p', '-pe', '--eval', '--print'], refused: [] },
+  shell: { allowed: ['--', '-e', '-u', '-x'], inline: [], refused: ['-c'] },
+  python: { allowed: ['-u', '-B'], inline: [], refused: ['-c', '-m'] },
+}
+const CHILD_PROCESS_FNS = new Set(['exec', 'execSync', 'execFile', 'execFileSync', 'spawn', 'spawnSync', 'fork'])
+// Options a followed script may be started with. `env` contents are NOT analysed.
+// Refused on EVERY child-process call: each can change which program or code runs.
+const DANGEROUS_OPTION_KEYS = new Set(['shell', 'execArgv', 'execPath', 'argv0'])
+// The only literal keys a recognised wrapper's own forwarding call may carry.
+const FORWARDING_OPTION_KEYS = new Set(['encoding', 'stdio', 'timeout', 'maxBuffer'])
+const SPAWN_OPTION_KEYS = new Set(['cwd', 'stdio', 'encoding', 'timeout', 'maxBuffer', 'input', 'env'])
+// A literal argument with one of these extensions to an unknown program is a script we cannot follow.
+const SCRIPT_ARGUMENT = /\.(?:js|mjs|cjs|ts|mts|cts|sh|zsh|py|rb|pl|php|ps1|bat|cmd)$/
+const GLOBAL_OBJECTS = new Set(['globalThis', 'global'])
+const SHELL_STRING_FNS = new Set(['exec', 'execSync'])
+const FORBIDDEN_MODULE = /^(?:node:)?(?:vm|worker_threads|cluster|inspector|test)$/
+const SCRIPT_MODULE = /\.(?:mjs|cjs|js)$/
 
 function walk(node, visit, parent = null) {
   if (!node || typeof node.type !== 'string') return
@@ -105,9 +128,44 @@ export function extractPackedPackages(src, file = VERIFY_SCRIPT) {
  * Const path aliases, dirname and fileURLToPath cover the verifier's ROOT.
  *
  * The verifier's existing package-manifest read is explicitly recognized below.
- * Other computed content reads/imports, require(), module URL queries/fragments,
- * absolute/escaping paths and ambiguous bindings fail with a location. This is
- * not a general JS evaluator or a shell/runtime-output dependency analysis.
+ *
+ * Child processes (refuse-by-default). A call to a child_process function, or to
+ * a local wrapper that forwards its first two parameters as the call's first two
+ * arguments (resolved transitively), is examined:
+ *  - FOLLOWED: a literal script after an interpreter (node/nodejs, bash/sh/zsh,
+ *    python/python3, named by literal, process.execPath or a const bound once),
+ *    fork(path), or a relative direct-executable path. A JS script is parsed like
+ *    any module; any other script is recorded as an input and must exist.
+ *    Options must be a literal object with only cwd (the repo root), stdio,
+ *    encoding, timeout, maxBuffer, input, env.
+ *  - REFUSED: flags outside the per-interpreter allowlist, shell/python inline
+ *    code (-c, -m), exec/execSync command strings, a computed script, computed or
+ *    spread arguments, a literal script-looking argument (.js .mjs .cjs .ts .mts
+ *    .cts .sh .py .rb .pl) to any other program, a child_process binding that is
+ *    aliased, destructured or passed on, a non-forwarding local wrapper, dynamic
+ *    import of child_process, vm, worker_threads, cluster, inspector and test;
+ *    a spread in a call's program/argument position; options that are not a
+ *    literal object or that carry shell/execArgv/execPath/argv0; an interpreter
+ *    given no script and an `input` option (its program comes from stdin); and
+ *    a child-process call whose program is unknown and whose arguments are not
+ *    a literal array, unless it is the forwarding call of a RECOGNISED wrapper
+ *    (declared once, not exported; a declaration or a const-bound function; params
+ *    0 and 1 plain and used only as forwarding args 0 and 1; at most ONE later
+ *    param, with a trivial default, used only as the spread in the forwarding
+ *    options; forwarding options are a literal holding only that spread and
+ *    encoding/stdio/timeout/maxBuffer literals). Refused at the spawn, so no caller works.
+ *  - NOT ANALYSED (known limits): inline node -e/-p code; the children of a
+ *    followed non-JS script; env / NODE_OPTIONS contents; `npm run <script>`;
+ *    (()=>{}).constructor(...); a computed (non-literal) argument list passed to a literal
+ *    non-interpreter program (the verifier's run('npm', args)); a computed program name (the verifier's installed bin);
+ *    an extensionless relative script passed to an unknown program.
+ *
+ * Code loaders are refused, never ignored: require(), eval, any bare Function,
+ * process.binding/getBuiltinModule/dlopen/mainModule/execve, process, globalThis or
+ * global used as a bare value (including globalThis.process), a computed
+ * globalThis[...] member, and any non-node: scheme import (data:, file:, https:). Other computed content reads/imports, module URL
+ * queries/fragments, absolute/escaping paths and ambiguous bindings fail with a
+ * location. This is not a general JS evaluator or a shell/runtime-output analysis.
  */
 export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
   const sources = new Map()
@@ -178,7 +236,7 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
     // invalidates a static const, including parameters/patterns in other scopes.
     // Built-in import aliases must not be shadowed and silently stop matching.
     for (const [name, imp] of imports) {
-      if (['fs', 'fs/promises', 'path', 'url'].includes(imp.source) && declarations.get(name) !== 1) {
+      if (['fs', 'fs/promises', 'path', 'url', 'child_process'].includes(imp.source) && declarations.get(name) !== 1) {
         unsupported(file, imp.node, `shadowed built-in binding '${name}' requires explicit discovery support`)
       }
     }
@@ -241,9 +299,11 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (/^\.{1,2}\//.test(value)) {
         const target = localInput(value, node, true)
         inputs.add(target)
-        if (!/\.(?:mjs|cjs|js)$/.test(target)) unsupported(file, node, 'local module imports must have a .js/.mjs/.cjs extension')
+        if (!SCRIPT_MODULE.test(target)) unsupported(file, node, 'local module imports must have a .js/.mjs/.cjs extension')
         visit(target)
       } else if (/^(?:[/.]|file:)/.test(value)) unsupported(file, node, 'absolute or file URL imports are not supported')
+      else if (/^[a-z][a-z0-9+.-]*:/i.test(value) && !/^node:/.test(value)) unsupported(file, node, `'${value}' is not a node: builtin or a local path; scheme imports (data:, file:, https:) cannot be followed`)
+      else if (FORBIDDEN_MODULE.test(value)) unsupported(file, node, `'${value}' runs code or threads discovery cannot see and needs explicit support`)
       else if (/^(?:node:)?module$/.test(value)) unsupported(file, node, "'node:module' (createRequire) lets a CommonJS dependency escape discovery")
     }
     function fsFnName(node) {
@@ -277,6 +337,208 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (base?.source === 'fs' && property(node) === 'promises') return { source: 'fs/promises', defaultExport: false }
       return null
     }
+    // Child processes. A call is a child-process call when its callee is a
+    // child_process function (named, aliased or through a namespace) or a local
+    // function whose body forwards to one, as the verifier's own `run` does.
+    function childProcessFn(callee) {
+      if (callee?.type === 'Identifier') {
+        const imp = imports.get(callee.name)
+        return imp?.source === 'child_process' && imp.name !== '*' ? imp.name : null
+      }
+      if (callee?.type === 'MemberExpression' && callee.object.type === 'Identifier') {
+        const imp = imports.get(callee.object.name)
+        return imp?.source === 'child_process' && imp.name === '*' ? property(callee) ?? null : null
+      }
+      return null
+    }
+    const localFunctions = new Map()
+    walk(ast, (node, parent) => {
+      if (node.type === 'FunctionDeclaration' && node.id) localFunctions.set(node.id.name, { fn: node, bound: true })
+      if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && ['ArrowFunctionExpression', 'FunctionExpression'].includes(node.init?.type)) {
+        localFunctions.set(node.id.name, { fn: node.init, bound: parent?.kind === 'const' })
+      }
+    })
+    const exportedNames = new Set()
+    walk(ast, node => {
+      if (node.type === 'ExportNamedDeclaration') {
+        const d = node.declaration
+        if (d?.id) exportedNames.add(d.id.name)
+        for (const declarator of d?.declarations ?? []) patternNames(declarator.id).forEach(n => exportedNames.add(n))
+        if (!node.source) for (const spec of node.specifiers) exportedNames.add(spec.local.name)
+      }
+      if (node.type === 'ExportDefaultDeclaration') {
+        if (node.declaration.type === 'Identifier') exportedNames.add(node.declaration.name)
+        if (node.declaration.id) exportedNames.add(node.declaration.id.name)
+      }
+    })
+    // The invariant: a child-process call whose program is unknown and whose
+    // arguments are not a literal array is accepted ONLY as the forwarding call
+    // of a RECOGNISED wrapper. A wrapper is recognised when its function is
+    // declared once, never exported, a declaration or const-bound function,
+    // and forwards its own params 0 and 1 (plain, never reassigned or shadowed)
+    // as that call's arguments 0 and 1. Every other such call is refused where
+    // it is spawned, so no caller spelling can reach it.
+    const callerKinds = new Map()
+    const forwardingCalls = new WeakSet()
+    const callReasons = new WeakMap()
+    const staticLiteral = node => node?.type === 'Literal' || (node?.type === 'TemplateLiteral' && node.expressions.length === 0)
+    // A later param may carry only a trivial default (the verifier's `opts = {}`).
+    const trivialParam = param => param.type === 'Identifier' ||
+      (param.type === 'AssignmentPattern' && param.left.type === 'Identifier' &&
+        (staticLiteral(param.right) || (['ObjectExpression', 'ArrayExpression'].includes(param.right.type) && (param.right.properties ?? param.right.elements).length === 0)))
+    // The fixed set of reasons a function that reaches a child process is not a
+    // recognised wrapper; null means recognised.
+    function wrapperVerdict(name, fn, bound, forwarding) {
+      if (exportedNames.has(name)) return 'exported'
+      if (declarations.get(name) !== 1) return 'declared more than once'
+      if (!bound) return 'not a function declaration or const-bound function'
+      if (forwarding.length === 0 || forwarding.some(call => callerKinds.get(call.callee.name) === 'opaque')) return 'params 0/1 not forwarded in order'
+      const [p0, p1, ...later] = fn.params
+      if (later.length > 1) return 'more than one options param'
+      if (!later.every(trivialParam)) return 'default or destructured param'
+      const optionsParam = later[0]?.type === 'AssignmentPattern' ? later[0].left : later[0]
+      // Params 0 and 1 may appear ONLY as args 0 and 1 of the forwarding calls; the
+      // options param ONLY as its own declaration and as the spread in the forwarding options.
+      const spreads = forwarding.flatMap(call => call.arguments[2]?.type === 'ObjectExpression'
+        ? call.arguments[2].properties.filter(prop => prop.type === 'SpreadElement').map(prop => prop.argument) : [])
+      const guarded = [p0.name, p1.name, ...(optionsParam ? [optionsParam.name] : [])]
+      const allowed = new Set([p0, p1, ...(optionsParam ? [optionsParam, ...spreads] : []), ...forwarding.flatMap(call => [call.arguments[0], call.arguments[1]])])
+      let referenced = false
+      walk(fn, (inner, parent) => {
+        if (inner.type !== 'Identifier' || !guarded.includes(inner.name) || allowed.has(inner)) return
+        if (parent?.type === 'MemberExpression' && parent.property === inner && !parent.computed) return
+        if (parent?.type === 'Property' && parent.key === inner && !parent.computed && !parent.shorthand) return
+        referenced = true
+      })
+      if (referenced) return 'param referenced outside the forwarding call'
+      const ownLater = new Set(optionsParam ? [optionsParam.name] : [])
+      for (const call of forwarding) {
+        const options = call.arguments[2]
+        if (options === undefined) continue
+        const literalKeys = options.type === 'ObjectExpression' && options.properties.every(prop => prop.type === 'SpreadElement'
+          ? prop.argument.type === 'Identifier' && ownLater.has(prop.argument.name)
+          : prop.type === 'Property' && !prop.computed && !prop.method && prop.kind === 'init' && FORWARDING_OPTION_KEYS.has(prop.key.name ?? prop.key.value) && staticLiteral(prop.value))
+        if (!literalKeys) return 'non-literal forwarding options'
+      }
+      return null
+    }
+    for (let changed = true; changed;) {
+      changed = false
+      for (const [name, { fn, bound }] of localFunctions) {
+        if (callerKinds.has(name)) continue
+        let reaches = false
+        const forwarding = []
+        const calls = []
+        const [p0, p1] = fn.params
+        walk(fn.body, inner => {
+          if (inner.type !== 'CallExpression') return
+          const known = childProcessFn(inner.callee) !== null || (inner.callee.type === 'Identifier' && callerKinds.has(inner.callee.name))
+          if (!known) return
+          reaches = true
+          calls.push(inner)
+          if (p0?.type === 'Identifier' && p1?.type === 'Identifier' &&
+            inner.arguments[0]?.type === 'Identifier' && inner.arguments[0].name === p0.name &&
+            inner.arguments[1]?.type === 'Identifier' && inner.arguments[1].name === p1.name) forwarding.push(inner)
+        })
+        if (!reaches) continue
+        const reason = wrapperVerdict(name, fn, bound, forwarding)
+        if (reason !== null) calls.forEach(call => callReasons.set(call, reason))
+        if (declarations.get(name) !== 1) continue
+        if (reason === null) forwarding.forEach(call => forwardingCalls.add(call))
+        callerKinds.set(name, reason === null ? 'wrapper' : 'opaque')
+        changed = true
+      }
+    }
+    const plainObject = node => node?.type === 'ObjectExpression' && node.properties.every(p => p.type === 'Property' && !p.computed && !p.method && p.kind === 'init')
+    // Where a call's options live: (cmd, args, opts), (cmd, opts) or (cmd, computedArgs, opts).
+    const optionsOf = (second, third) => second?.type === 'ArrayExpression' ? third : second?.type === 'ObjectExpression' ? second : third
+    function spawnedScript(node, label, scriptNode, optionsNode) {
+      const what = `child process '${label}'`
+      const script = text(scriptNode)
+      if (script === null) unsupported(file, node, `${what} needs a literal script path: a computed one cannot be followed`)
+      if (optionsNode !== undefined) {
+        if (!plainObject(optionsNode)) unsupported(file, node, `${what} runs '${script}' with options discovery cannot resolve: they must be a literal object`)
+        for (const p of optionsNode.properties) {
+          const key = p.key.name ?? p.key.value
+          if (!SPAWN_OPTION_KEYS.has(key)) unsupported(file, node, `${what} runs '${script}' with option '${key}', which can change what runs and is not understood`)
+          if (key === 'cwd' && staticPath(p.value) !== REPO) unsupported(file, node, `${what} runs '${script}' with a cwd that is not the repo root`)
+        }
+      }
+      const target = localInput(script, node, false)
+      inputs.add(target)
+      if (SCRIPT_MODULE.test(target)) visit(target)
+      else read(target)
+    }
+    // The program a call names: a literal, process.execPath (node), or a const
+    // bound once to a literal. Anything else is unknown (null).
+    function commandName(node) {
+      const literal = text(node)
+      if (literal !== null) return literal
+      if (node?.type === 'MemberExpression' && isProcess(node.object) && property(node) === 'execPath') return 'node'
+      if (node?.type === 'Identifier') return text(visibleBinding(node))
+      return null
+    }
+    function spawned(node, name, label) {
+      if (name !== 'wrapper' && !CHILD_PROCESS_FNS.has(name)) unsupported(file, node, `child process '${name}' is not understood by input discovery`)
+      if (SHELL_STRING_FNS.has(name)) unsupported(file, node, `child process '${name}' runs a shell command string that discovery cannot follow`)
+      const [first, second, third] = node.arguments
+      const forwardingCall = forwardingCalls.has(node)
+      if (node.arguments.slice(0, 2).some(arg => arg?.type === 'SpreadElement')) {
+        unsupported(file, node, `child process '${label}' is called with a spread argument: its program and arguments cannot be followed`)
+      }
+      const command = name === 'fork' ? null : commandName(first)
+      if (name !== 'fork' && command === null && !forwardingCall && second?.type !== 'ArrayExpression') {
+        unsupported(file, node, `child process '${label}' runs a computed program with computed arguments: only a recognised forwarding wrapper may${callReasons.has(node) ? ` (this function is not one: ${callReasons.get(node)})` : ''}`)
+      }
+      const options = optionsOf(second, third)
+      if (!forwardingCall && options !== undefined) {
+        if (!plainObject(options)) unsupported(file, node, `child process '${label}' has options discovery cannot resolve: they must be a literal object`)
+        for (const p of options.properties) {
+          const key = p.key.name ?? p.key.value
+          if (DANGEROUS_OPTION_KEYS.has(key)) unsupported(file, node, `child process '${label}' passes option '${key}', which can change what runs and is not understood`)
+        }
+      }
+      if (name === 'fork') {
+        if (second !== undefined && options === undefined) unsupported(file, node, `child process '${label}' has options or arguments discovery cannot resolve: they must be a literal array or object`)
+        return spawnedScript(node, label, first, options)
+      }
+      const kind = command === null || !Object.hasOwn(INTERPRETER_KIND, path.basename(command)) ? undefined : INTERPRETER_KIND[path.basename(command)]
+      if (kind === undefined) {
+        if (command !== null && command.includes('/') && !path.isAbsolute(command)) return spawnedScript(node, label, first, options)
+        // Unknown program: refuse a literal or const-bound script-looking argument, never ignore it.
+        const program = command === null ? 'a computed program' : `program '${command}'`
+        for (const el of second?.type === 'ArrayExpression' ? second.elements : []) {
+          const arg = el?.type === 'SpreadElement' ? null : commandName(el)
+          if (arg !== null && SCRIPT_ARGUMENT.test(arg)) unsupported(file, node, `child process '${label}' runs ${program} with script argument '${arg}': discovery cannot follow it`)
+        }
+        return
+      }
+      // An interpreter that is given no script reads its program from stdin.
+      const noScript = () => {
+        if (options?.properties.some(p => (p.key.name ?? p.key.value) === 'input')) {
+          unsupported(file, node, `child process '${label}' runs interpreter '${command}' with no script and an 'input' option: its program comes from stdin`)
+        }
+      }
+      if (second === undefined || (second.type === 'ObjectExpression' && second === options)) return noScript()
+      if (second.type !== 'ArrayExpression' || second.elements.some(el => !el || el.type === 'SpreadElement')) {
+        unsupported(file, node, `child process '${label}' runs interpreter '${command}' with computed arguments: its script cannot be followed`)
+      }
+      const flags = INTERPRETER_FLAGS[kind]
+      for (const el of second.elements) {
+        const arg = text(el)
+        if (arg === null) unsupported(file, node, `child process '${label}' runs interpreter '${command}' with a computed argument: its script cannot be followed`)
+        // Inline node code is not analysed (documented limit).
+        if (flags.inline.includes(arg) || /^--(?:eval|print)=/.test(arg) && kind === 'node') return
+        if (flags.refused.includes(arg)) unsupported(file, node, `child process '${label}' passes '${arg}' to '${command}': inline code or a command string cannot be followed`)
+        if (flags.allowed.includes(arg)) continue
+        if (arg.startsWith('-')) unsupported(file, node, `child process '${label}' passes flag '${arg}' to '${command}': only ${flags.allowed.concat(flags.inline).join(' ')} are understood`)
+        return spawnedScript(node, label, el, options)
+      }
+      noScript()
+    }
+    const isGlobalObject = node => node?.type === 'Identifier' && GLOBAL_OBJECTS.has(node.name)
+    const isProcess = node => (node?.type === 'Identifier' && (node.name === 'process' || imports.get(node.name)?.source === 'process')) ||
+      (node?.type === 'MemberExpression' && property(node) === 'process' && isGlobalObject(node.object))
     const fsCalls = new Map()
     walk(ast, (node, parent) => {
       const importedBinding = ['ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier'].includes(parent?.type)
@@ -300,6 +562,9 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
           }
         }
       }
+      if (['ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source && /^(?:node:)?child_process$/.test(text(node.source) ?? '')) {
+        unsupported(file, node, 'child_process re-exports require explicit discovery support')
+      }
       if (['ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source && /^(?:node:)?fs(?:\/promises)?$/.test(text(node.source) ?? '')) {
         unsupported(file, node, 'filesystem re-exports require explicit discovery support')
       }
@@ -311,11 +576,66 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       }
       if (['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source) imported(node, node.source)
       if (node.type === 'ImportExpression') {
+        if (/^(?:node:)?child_process$/.test(text(node.source) ?? '')) unsupported(file, node, 'dynamic child_process bindings require explicit discovery support')
         if (/^(?:node:)?fs(?:\/promises)?$/.test(text(node.source) ?? '')) unsupported(file, node, 'dynamic filesystem bindings require explicit discovery support')
         imported(node, node.source)
       }
+      // Forms that load or run code discovery cannot see. Refused wherever they
+      // appear, including aliased or optional-chained, never silently ignored.
+      if (node.type === 'MemberExpression' && isProcess(node.object)) {
+        const member = property(node)
+        if (member === null || member === undefined) unsupported(file, node, 'a computed process[...] member needs explicit discovery support')
+        if (['getBuiltinModule', 'binding', 'dlopen', 'mainModule', 'execve'].includes(member)) unsupported(file, node, `process.${member} loads or runs code discovery cannot follow and needs explicit support`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && node.computed && text(node.property) === null) {
+        unsupported(file, node, `a computed ${node.object.name}[...] member can name eval, Function or process and needs explicit discovery support`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && property(node) === 'process' && !(parent?.type === 'MemberExpression' && parent.object === node)) {
+        unsupported(file, node, `'${node.object.name}.process' used as a bare value can leak members discovery cannot see; use its members directly`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && ['eval', 'Function'].includes(property(node))) {
+        unsupported(file, node, `${property(node) === 'eval' ? 'eval()' : 'new Function()'} runs code discovery cannot see and needs explicit support`)
+      }
+      if (node.type === 'Identifier' && node.name === 'eval' && !memberProperty && !(parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand)) {
+        unsupported(file, node, 'eval() runs code discovery cannot see and needs explicit support')
+      }
+      const objectKey = parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand
+      if (node.type === 'Identifier' && node.name === 'Function' && !memberProperty && !objectKey && !importedBinding) {
+        unsupported(file, node, 'new Function() runs code discovery cannot see and needs explicit support')
+      }
+      // process/globalThis/global are only ever read through a member, so the
+      // forms above can see what is used. A bare value would let it escape.
+      if (node.type === 'Identifier' && !importedBinding && !memberProperty && !objectKey && !(parent?.type === 'MemberExpression' && parent.object === node) &&
+        (node.name === 'process' || GLOBAL_OBJECTS.has(node.name) || imports.get(node.name)?.source === 'process')) {
+        unsupported(file, node, `'${node.name}' used as a bare value can leak members discovery cannot see; use its members directly`)
+      }
+      if (node.type === 'ImportDeclaration' && /^(?:node:)?process$/.test(text(node.source) ?? '')) {
+        for (const spec of node.specifiers) {
+          if (spec.type === 'ImportSpecifier' && ['getBuiltinModule', 'binding', 'dlopen'].includes(spec.imported.name ?? spec.imported.value)) {
+            unsupported(file, spec, `importing '${spec.imported.name ?? spec.imported.value}' from process loads code discovery cannot follow`)
+          }
+        }
+      }
+      // Child-process bindings are only understood directly in callee position.
+      if (node.type === 'Identifier' && !importedBinding && !memberProperty && !objectKey) {
+        const imp = imports.get(node.name)
+        const callee = parent?.type === 'CallExpression' && parent.callee === node
+        if (imp?.source === 'child_process') {
+          const viaNamespace = imp.name === '*' && parent?.type === 'MemberExpression' && parent.object === node && property(parent) !== null &&
+            property(parent) !== undefined && parents.get(parent)?.type === 'CallExpression' && parents.get(parent).callee === parent
+          if (!(imp.name === '*' ? viaNamespace : callee)) unsupported(file, node, `child_process binding '${node.name}' may only be called directly, not aliased, destructured or passed on`)
+        }
+        const kind = callerKinds.get(node.name)
+        const declaration = (parent?.type === 'VariableDeclarator' && parent.id === node) || (parent?.type === 'FunctionDeclaration' && parent.id === node)
+        if (kind && !declaration && declarations.get(node.name) === 1) {
+          if (kind === 'opaque') unsupported(file, node, `local function '${node.name}' reaches a child process without forwarding its first two parameters, so its callers cannot be followed`)
+          if (!callee) unsupported(file, node, `child process wrapper '${node.name}' may only be called directly, not aliased or passed on`)
+        }
+      }
       if (node.type !== 'CallExpression') return
       if (node.callee.type === 'Identifier' && node.callee.name === 'require') unsupported(file, node, 'require() needs explicit discovery support')
+      const childFn = childProcessFn(node.callee) ?? (node.callee.type === 'Identifier' && callerKinds.get(node.callee.name) === 'wrapper' ? 'wrapper' : null)
+      if (childFn !== null) spawned(node, childFn, childFn === 'wrapper' ? node.callee.name : childFn)
       if (!fsRead(node.callee)) return
       const arg = node.arguments[0]
       let value = staticPath(arg)
@@ -349,7 +669,7 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
         let enclosingFunction = parents.get(node)
         while (enclosingFunction && !['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(enclosingFunction.type)) enclosingFunction = parents.get(enclosingFunction)
         const uses = []
-        let rosterBounded = true
+        let rosterDrift = null
         let rosterUses = 0
         walk(ast, (candidate, parent) => {
           if (candidate.type !== 'Identifier') return
@@ -363,13 +683,31 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
           const packLoop = parent?.type === 'ForOfStatement' && parent.right === candidate && sameSyntax(parent, expectedPackLoop)
           const filterCall = parent?.type === 'MemberExpression' && parent.object === candidate && sameSyntax(parents.get(parent), expectedBuildFilter) && sameSyntax(parents.get(parents.get(parent)), expectedBuildLoop)
           const entryFilter = parent?.type === 'MemberExpression' && parent.object === candidate && sameSyntax(parents.get(parents.get(parents.get(parent))), expectedUse)
-          if (!declaration && !packLoop && !filterCall && !entryFilter) rosterBounded = false
+          if (!declaration && !packLoop && !filterCall && !entryFilter && rosterDrift === null) {
+            const call = parent?.type === 'MemberExpression' && parent.object === candidate ? parents.get(parent) : null
+            if (parent?.type === 'ForOfStatement' && parent.right === candidate) rosterDrift = 'the PACKAGES pack loop drifted'
+            else if (call && (sameSyntax(call, expectedBuildFilter) || parents.get(call)?.type === 'ForOfStatement')) rosterDrift = 'the PACKAGES.filter((p) => p.build) build loop drifted'
+            else rosterDrift = 'PACKAGES is used outside its declaration, pack loop, build loop and entryPointsFor filter'
+          }
         })
-        const coveredManifest = file === VERIFY_SCRIPT && fn === enclosingFunction && sameSyntax(fn, expectedFunction) &&
-          uses.length === 1 && sameSyntax(uses[0], expectedUse) && rosterBounded && rosterUses === 4 && declarations.get('PACKAGES') === 1 &&
-          builtin({ type: 'Identifier', name: 'join' }, 'path', 'join') && staticPath(bindings.get('ROOT')?.init) === REPO
-        if (coveredManifest) return
-        unsupported(file, node, 'filesystem content reads require a static repo path (or proven package-only manifest use)')
+        // Each coupled snippet is named, in a fixed order, so a legitimate edit to
+        // one fails with the snippet that drifted instead of one generic message.
+        // The conjunction is exactly the old single boolean: nothing newly passes.
+        const drift = file !== VERIFY_SCRIPT ? null : [
+          [fn !== null, 'entryPointsFor must be declared exactly once'],
+          [fn === enclosingFunction, 'this dynamic read is not inside entryPointsFor'],
+          [sameSyntax(fn, expectedFunction), 'entryPointsFor no longer matches the expected function'],
+          [uses.length === 1 && sameSyntax(uses[0], expectedUse), 'the PACKAGES.filter(...).flatMap(entryPointsFor) use drifted'],
+          [rosterDrift === null, rosterDrift],
+          [rosterUses === 4, `PACKAGES has ${rosterUses} uses, expected its declaration plus the pack loop, build loop and entryPointsFor filter`],
+          // Defence in depth: an earlier condition (the declaration shape in the roster check) always pre-empts this one.
+          [declarations.get('PACKAGES') === 1, 'PACKAGES must be declared exactly once'],
+          [builtin({ type: 'Identifier', name: 'join' }, 'path', 'join'), "'join' is no longer imported from node:path"],
+          [staticPath(bindings.get('ROOT')?.init) === REPO, 'ROOT no longer resolves to the repo root'],
+        ].find(([ok]) => !ok)
+        if (file === VERIFY_SCRIPT && !drift) return
+        const detail = drift ? `: ${drift[1]}` : ''
+        unsupported(file, node, `filesystem content reads require a static repo path (or proven package-only manifest use)${detail}`)
       }
       // Absolute strings authored by a source are not repo-relative. Only
       // values derived from import.meta.url/ROOT may use our virtual / root.
