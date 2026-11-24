@@ -9,6 +9,7 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { REAL_TREE, SRC, cleanupTmp, cleanupVariants, mustKillTree, rig } from '../freshness-core/helpers/harness.js'
@@ -24,6 +25,24 @@ const proves = (name, check, mutants = {}) =>
     })
     for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKillTree(check, label, edits))
   })
+
+// Mode 000 hides a directory only off win32 and for a user the mode binds (not root).
+const canHideDir = (() => {
+  if (process.platform === 'win32') return false
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hide-probe-'))
+  try {
+    fs.chmodSync(d, 0)
+    try {
+      fs.readdirSync(d)
+      return false
+    } catch {
+      return true
+    }
+  } finally {
+    fs.chmodSync(d, 0o755)
+    fs.rmSync(d, { recursive: true, force: true })
+  }
+})()
 
 const edit = (file, from, to) => ({ file, from, to })
 const A = 'freshness-sources/claude-transcript-adapter.js'
@@ -351,15 +370,11 @@ proves(
     st.write('s1', jsonl([assistant(block(), T0 - MIN)]), '-one')
     st.write('s2', jsonl([assistant(block(), T0 - MIN)]), '-two')
     assert.deepEqual(adapterOf(M, st).list().map((e) => e.session.native_id).sort(), ['s1', 's2'])
-    if (process.platform !== 'win32') {
+    if (canHideDir) {
       const hidden = path.dirname(st.file('s2', '-two'))
       const a = adapterOf(M, st)
       fs.chmodSync(hidden, 0)
       try {
-        // running as a user that can list it anyway cannot show the difference
-        let listable = true
-        try { fs.readdirSync(hidden) } catch { listable = false }
-        if (listable) return
         assert.equal(a.list(), null)
         assert.deepEqual(a.read(sid('s1')), { outcome: 'error', error_code: 'source_missing' })
       } finally {
@@ -374,7 +389,7 @@ proves(
     assert.equal(r.kinds('system', (x) => x.body.event === 'source_unreadable').length, 1)
   },
   {
-    'a directory that cannot be listed is skipped': [edit(A, '      // A directory that cannot be listed is not an empty one: a partial listing would read as sessions gone.\n      return null', '      continue')],
+    ...(canHideDir ? { 'a directory that cannot be listed is skipped': [edit(A, '      // A directory that cannot be listed is not an empty one: a partial listing would read as sessions gone.\n      return null', '      continue')] } : {}),
     'an unacceptable name is skipped': [edit(A, 'if (!safeId(id)) return null', 'if (!safeId(id)) continue')],
   },
 )
