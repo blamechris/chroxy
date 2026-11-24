@@ -38,7 +38,7 @@
  * module, and it uses only the checks above.
  */
 
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, readdirSync } from 'node:fs'
 import { AdapterContractError, validSourceName } from '../freshness/adapter.js'
 import { reportFromText } from '../freshness/state-file-adapter.js'
@@ -80,12 +80,14 @@ function scanProjects(projectsDir, maxSessions) {
     try {
       files = readdirSync(join(projectsDir, d.name), { withFileTypes: true })
     } catch {
-      continue
+      // A directory that cannot be listed is not an empty one: a partial listing would read as sessions gone.
+      return null
     }
     for (const f of files) {
       if (!f.isFile() || !f.name.endsWith('.jsonl')) continue
       const id = f.name.slice(0, -'.jsonl'.length)
-      if (!safeId(id)) continue
+      // A name the reader would not accept is an unexpected store, not an absent session.
+      if (!safeId(id)) return null
       byId.set(id, byId.has(id) ? AMBIGUOUS : `${d.name}/${f.name}`)
       if (byId.size > maxSessions) return null
     }
@@ -171,7 +173,7 @@ function readTail(fd, expectedIdentity, maxTailBytes) {
  * @param {Function} [opts.resolve]      locator (default `resolveTranscriptSource`); for tests
  */
 export function createClaudeTranscriptAdapter({ projectsDir, source = CLAUDE_TRANSCRIPT_SOURCE, maxTailBytes = DEFAULT_MAX_TAIL_BYTES, maxSessions = DEFAULT_MAX_SESSIONS, resolve = resolveTranscriptSource }) {
-  if (typeof projectsDir !== 'string' || projectsDir === '') throw new TypeError('createClaudeTranscriptAdapter: projectsDir is required')
+  if (typeof projectsDir !== 'string' || !isAbsolute(projectsDir)) throw new TypeError('createClaudeTranscriptAdapter: projectsDir must be an absolute path')
   if (!validSourceName(source)) throw new AdapterContractError('adapter.source must be a short lowercase name')
   if (!Number.isSafeInteger(maxTailBytes) || maxTailBytes < 1024) throw new TypeError('createClaudeTranscriptAdapter: maxTailBytes must be an integer of at least 1024')
   let snapshot = null

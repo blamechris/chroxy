@@ -135,7 +135,7 @@ places).
 - Location is the closed-conversation locator, `resolveTranscriptSource`, with
   its containment on real paths. The listing takes only regular files in real
   project directories (a link is not listed); a link swapped in afterwards is
-  refused. The file is opened read-only, and refused unless it is the
+  refused. A project directory that cannot be listed, or a `*.jsonl` name the reader would not accept, makes the whole listing unreadable (`null`) rather than shorter, so a read error is never taken for a session that is gone. `projectsDir` must be absolute. The file is opened read-only, and refused unless it is the
   object the locator resolved and a regular file. A conversation id found in
   two project directories is an `error` (`ambiguous_id`).
 - Bounded: at most `maxTailBytes` (4 MiB by default) are read, from the end. A

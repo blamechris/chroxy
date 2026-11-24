@@ -344,6 +344,50 @@ proves(
   },
 )
 
+proves(
+  'location: a project directory that cannot be listed, or a name the reader would not accept, makes the listing unreadable, not shorter',
+  (M) => {
+    const st = store()
+    st.write('s1', jsonl([assistant(block(), T0 - MIN)]), '-one')
+    st.write('s2', jsonl([assistant(block(), T0 - MIN)]), '-two')
+    assert.deepEqual(adapterOf(M, st).list().map((e) => e.session.native_id).sort(), ['s1', 's2'])
+    if (process.platform !== 'win32') {
+      const hidden = path.dirname(st.file('s2', '-two'))
+      const a = adapterOf(M, st)
+      fs.chmodSync(hidden, 0)
+      try {
+        // running as a user that can list it anyway cannot show the difference
+        let listable = true
+        try { fs.readdirSync(hidden) } catch { listable = false }
+        if (listable) return
+        assert.equal(a.list(), null)
+        assert.deepEqual(a.read(sid('s1')), { outcome: 'error', error_code: 'source_missing' })
+      } finally {
+        fs.chmodSync(hidden, 0o755)
+      }
+    }
+    const odd = store()
+    odd.write('s1', jsonl([assistant(block(), T0 - MIN)]), '-one')
+    odd.write('.hidden', '', '-one')
+    assert.equal(adapterOf(M, odd).list(), null)
+    const r = runTicks(M, odd)
+    assert.equal(r.kinds('system', (x) => x.body.event === 'source_unreadable').length, 1)
+  },
+  {
+    'a directory that cannot be listed is skipped': [edit(A, '      // A directory that cannot be listed is not an empty one: a partial listing would read as sessions gone.\n      return null', '      continue')],
+    'an unacceptable name is skipped': [edit(A, 'if (!safeId(id)) return null', 'if (!safeId(id)) continue')],
+  },
+)
+
+proves(
+  'contract: a relative store path is refused',
+  (M) => {
+    for (const bad of ['', 'projects', './projects', undefined]) assert.throws(() => M.createClaudeTranscriptAdapter({ projectsDir: bad }), TypeError, String(bad))
+    assert.doesNotThrow(() => M.createClaudeTranscriptAdapter({ projectsDir: path.join(store().root, 'p') }))
+  },
+  { 'a relative path is accepted': [edit(A, "typeof projectsDir !== 'string' || !isAbsolute(projectsDir)", "typeof projectsDir !== 'string' || projectsDir === ''")] },
+)
+
 // ── read-only, and the contract ────────────────────────────────────────
 proves(
   'read-only: ticks leave every file and directory as it was, and the adapter has no member but list and read',
