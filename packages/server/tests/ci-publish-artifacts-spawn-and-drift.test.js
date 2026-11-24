@@ -561,3 +561,45 @@ describe('unknown programs: const-bound and more script extensions (#9150 round 
     assert.throws(() => discover(`${CP}const go = (c, a) => spawnSync(c, a)\ngo(x, ['scripts/x.sh'])`), /child process 'go' runs a computed program with script argument/)
   })
 })
+
+describe('a recognised wrapper may use params 0 and 1 only as the forwarding arguments (#9150 round 3)', () => {
+  const why = reason => new RegExp(`only a recognised forwarding wrapper may \\(this function is not one: ${reason}\\)`)
+  const REF = why('param referenced outside the forwarding call')
+  for (const [label, source, message] of [
+    ['a catch param named like the program', `${CP}const run = (c, a) => { try {} catch (c) {} return execFileSync(c, a) }`, REF],
+    ['a for-of left binding the program', `${CP}function run(c, a) { for (c of list) {} return execFileSync(c, a) }`, REF],
+    ['a nested class named like the program', `${CP}function run(c, a) { { class c {} } return execFileSync(c, a) }`, REF],
+    ['a nested function named like the program', `${CP}function run(c, a) { { function c() {} } return execFileSync(c, a) }`, REF],
+    ['a destructuring assignment to the program', `${CP}function run(c, a) { [c] = x; return execFileSync(c, a) }`, REF],
+    ['a push onto the arguments', `${CP}function run(c, a) { a.push('--import=./h.mjs'); return execFileSync(c, a) }`, REF],
+    ['an unshift onto the arguments', `${CP}function run(c, a) { a.unshift('--import=./h.mjs'); return execFileSync(c, a) }`, REF],
+    ['an element write into the arguments', `${CP}function run(c, a) { a[0] = '-e'; return execFileSync(c, a) }`, REF],
+    ['a length write on the arguments', `${CP}function run(c, a) { a.length = 0; return execFileSync(c, a) }`, REF],
+    ['the arguments passed to a helper', `${CP}function run(c, a) { helper(a); return execFileSync(c, a) }`, REF],
+    ['a later param default touching the arguments', `${CP}const run = (c, a, o = (a = ['x'], 1)) => execFileSync(c, a)`, why('default or destructured param')],
+    ['a later destructured param', `${CP}const run = (c, a, { o }) => execFileSync(c, a)`, why('default or destructured param')],
+    ['a later param with a computed default', `${CP}const run = (c, a, o = compute()) => execFileSync(c, a)`, why('default or destructured param')],
+    ['forwarding options with shell: true', `${CP}const run = (c, a) => execFileSync(c, a, { shell: true })`, why('non-literal forwarding options')],
+    ['forwarding options spreading a param then shell', `${CP}const run = (c, a, opts) => execFileSync(c, a, { ...opts, shell: true })`, why('non-literal forwarding options')],
+    ['forwarding options with a shell string', `${CP}const run = (c, a) => execFileSync(c, a, { shell: '/bin/sh' })`, why('non-literal forwarding options')],
+    ['forwarding options that are an identifier', `${CP}const run = (c, a, opts) => execFileSync(c, a, opts)`, why('non-literal forwarding options')],
+    ['forwarding options that are a call', `${CP}const run = (c, a) => execFileSync(c, a, build())`, why('non-literal forwarding options')],
+    ['forwarding options spreading a non-param', `${CP}const run = (c, a) => execFileSync(c, a, { ...outer })`, why('non-literal forwarding options')],
+    ['forwarding options with a computed value', `${CP}const run = (c, a) => execFileSync(c, a, { encoding: pick() })`, why('non-literal forwarding options')],
+    ['an exported wrapper names its reason', `${CP}export const run = (c, a) => execFileSync(c, a)`, why('exported')],
+    ['a duplicate wrapper names its reason', `${CP}const run = (c, a) => execFileSync(c, a)\n{ const run = 1 }`, why('declared more than once')],
+    ['a var wrapper names its reason', `${CP}var run = (c, a) => execFileSync(c, a)`, why('not a function declaration or const-bound function')],
+    ['a wrapper that does not forward names its reason', `${CP}const run = (c, a) => execFileSync(a, c)`, why('params 0/1 not forwarded in order')],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source, { 'scripts/x.mjs': '' }), message))
+  }
+
+  it('accepts the verifier-shaped forwarding call: { encoding, ...opts } with a trivially defaulted opts', () => {
+    const source = `${CP}const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', ...opts })\nrun(bin, ['--version'], { env: {} })`
+    assert.deepEqual(discover(source).inputs, [])
+  })
+  it('accepts a wrapper whose params are spelled as non-computed member names and object keys', () => {
+    const source = `${CP}const run = (cmd, args) => { const o = { cmd: 1, args: 2 }; return execFileSync(cmd, args, { timeout: 5 }) + o.cmd + o.args }\nrun(bin, ['--version'])`
+    assert.deepEqual(discover(source).inputs, [])
+  })
+})

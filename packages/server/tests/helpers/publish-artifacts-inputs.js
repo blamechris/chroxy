@@ -148,10 +148,13 @@ export function extractPackedPackages(src, file = VERIFY_SCRIPT) {
  *    a child-process call whose program is unknown and whose arguments are not
  *    a literal array, unless it is the forwarding call of a RECOGNISED wrapper
  *    (declared once, never exported, a declaration or const function, forwarding
- *    its own unmodified params 0 and 1). Refused at the spawn, so no caller works.
+ *    its own params 0 and 1, which appear nowhere else in the function; later params
+ *    are plain or trivially defaulted; forwarding options are literal or a spread of
+ *    its own later param). Refused at the spawn, so no caller works.
  *  - NOT ANALYSED (known limits): inline node -e/-p code; the children of a
  *    followed non-JS script; env / NODE_OPTIONS contents; `npm run <script>`;
- *    (()=>{}).constructor(...); a computed program name (the verifier's installed bin);
+ *    (()=>{}).constructor(...); a computed (non-literal) argument list passed to a literal
+ *    non-interpreter program (the verifier's run('npm', args)); a computed program name (the verifier's installed bin);
  *    an extensionless relative script passed to an unknown program.
  *
  * Code loaders are refused, never ignored: require(), eval, any bare Function,
@@ -374,45 +377,66 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
     // it is spawned, so no caller spelling can reach it.
     const callerKinds = new Map()
     const forwardingCalls = new WeakSet()
-    const paramsRebound = (fn, names) => {
-      let rebound = false
-      walk(fn.body, inner => {
-        const names2 = []
-        if (inner.type === 'AssignmentExpression') names2.push(...patternNames(inner.left))
-        if (inner.type === 'UpdateExpression') names2.push(...patternNames(inner.argument))
-        if (['ForInStatement', 'ForOfStatement'].includes(inner.type) && inner.left.type !== 'VariableDeclaration') names2.push(...patternNames(inner.left))
-        if (inner.type === 'VariableDeclarator') names2.push(...patternNames(inner.id))
-        if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(inner.type)) {
-          if (inner.id) names2.push(inner.id.name)
-          for (const param of inner.params) names2.push(...patternNames(param))
-        }
-        if (inner.type === 'CatchClause' && inner.param) names2.push(...patternNames(inner.param))
-        if (['ClassDeclaration', 'ClassExpression'].includes(inner.type) && inner.id) names2.push(inner.id.name)
-        if (names2.some(n => names.includes(n))) rebound = true
+    const callReasons = new WeakMap()
+    const staticLiteral = node => node?.type === 'Literal' || (node?.type === 'TemplateLiteral' && node.expressions.length === 0)
+    // A later param may carry only a trivial default (the verifier's `opts = {}`).
+    const trivialParam = param => param.type === 'Identifier' ||
+      (param.type === 'AssignmentPattern' && param.left.type === 'Identifier' &&
+        (staticLiteral(param.right) || (['ObjectExpression', 'ArrayExpression'].includes(param.right.type) && (param.right.properties ?? param.right.elements).length === 0)))
+    // The fixed set of reasons a function that reaches a child process is not a
+    // recognised wrapper; null means recognised.
+    function wrapperVerdict(name, fn, bound, forwarding) {
+      if (exportedNames.has(name)) return 'exported'
+      if (declarations.get(name) !== 1) return 'declared more than once'
+      if (!bound) return 'not a function declaration or const-bound function'
+      if (forwarding.length === 0 || forwarding.some(call => callerKinds.get(call.callee.name) === 'opaque')) return 'params 0/1 not forwarded in order'
+      const [p0, p1, ...later] = fn.params
+      if (!later.every(trivialParam)) return 'default or destructured param'
+      // Params 0 and 1 may appear ONLY as args 0 and 1 of the forwarding calls.
+      const allowed = new Set([p0, p1, ...forwarding.flatMap(call => [call.arguments[0], call.arguments[1]])])
+      let referenced = false
+      walk(fn, (inner, parent) => {
+        if (inner.type !== 'Identifier' || ![p0.name, p1.name].includes(inner.name) || allowed.has(inner)) return
+        if (parent?.type === 'MemberExpression' && parent.property === inner && !parent.computed) return
+        if (parent?.type === 'Property' && parent.key === inner && !parent.computed && !parent.shorthand) return
+        referenced = true
       })
-      return rebound
+      if (referenced) return 'param referenced outside the forwarding call'
+      const ownLater = new Set(later.map(param => param.type === 'Identifier' ? param.name : param.left.name))
+      for (const call of forwarding) {
+        const options = call.arguments[2]
+        if (options === undefined) continue
+        const literalKeys = options.type === 'ObjectExpression' && options.properties.every(prop => prop.type === 'SpreadElement'
+          ? prop.argument.type === 'Identifier' && ownLater.has(prop.argument.name)
+          : prop.type === 'Property' && !prop.computed && !prop.method && prop.kind === 'init' && SPAWN_OPTION_KEYS.has(prop.key.name ?? prop.key.value) && staticLiteral(prop.value))
+        if (!literalKeys) return 'non-literal forwarding options'
+      }
+      return null
     }
     for (let changed = true; changed;) {
       changed = false
       for (const [name, { fn, bound }] of localFunctions) {
-        if (callerKinds.has(name) || declarations.get(name) !== 1) continue
+        if (callerKinds.has(name)) continue
         let reaches = false
         const forwarding = []
+        const calls = []
         const [p0, p1] = fn.params
         walk(fn.body, inner => {
           if (inner.type !== 'CallExpression') return
           const known = childProcessFn(inner.callee) !== null || (inner.callee.type === 'Identifier' && callerKinds.has(inner.callee.name))
           if (!known) return
           reaches = true
+          calls.push(inner)
           if (p0?.type === 'Identifier' && p1?.type === 'Identifier' &&
             inner.arguments[0]?.type === 'Identifier' && inner.arguments[0].name === p0.name &&
             inner.arguments[1]?.type === 'Identifier' && inner.arguments[1].name === p1.name) forwarding.push(inner)
         })
         if (!reaches) continue
-        const recognised = bound && !exportedNames.has(name) && forwarding.length > 0 && !paramsRebound(fn, [p0.name, p1.name]) &&
-          forwarding.every(call => callerKinds.get(call.callee.name) !== 'opaque')
-        if (recognised) forwarding.forEach(call => forwardingCalls.add(call))
-        callerKinds.set(name, recognised ? 'wrapper' : 'opaque')
+        const reason = wrapperVerdict(name, fn, bound, forwarding)
+        if (reason !== null) calls.forEach(call => callReasons.set(call, reason))
+        if (declarations.get(name) !== 1) continue
+        if (reason === null) forwarding.forEach(call => forwardingCalls.add(call))
+        callerKinds.set(name, reason === null ? 'wrapper' : 'opaque')
         changed = true
       }
     }
@@ -453,6 +477,10 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (node.arguments.slice(0, 2).some(arg => arg?.type === 'SpreadElement')) {
         unsupported(file, node, `child process '${label}' is called with a spread argument: its program and arguments cannot be followed`)
       }
+      const command = name === 'fork' ? null : commandName(first)
+      if (name !== 'fork' && command === null && !forwardingCall && second?.type !== 'ArrayExpression') {
+        unsupported(file, node, `child process '${label}' runs a computed program with computed arguments: only a recognised forwarding wrapper may${callReasons.has(node) ? ` (this function is not one: ${callReasons.get(node)})` : ''}`)
+      }
       const options = optionsOf(second, third)
       if (!forwardingCall && options !== undefined) {
         if (!plainObject(options)) unsupported(file, node, `child process '${label}' has options discovery cannot resolve: they must be a literal object`)
@@ -464,10 +492,6 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (name === 'fork') {
         if (second !== undefined && options === undefined) unsupported(file, node, `child process '${label}' has options or arguments discovery cannot resolve: they must be a literal array or object`)
         return spawnedScript(node, label, first, options)
-      }
-      const command = commandName(first)
-      if (command === null && !forwardingCall && second?.type !== 'ArrayExpression') {
-        unsupported(file, node, `child process '${label}' runs a computed program with computed arguments: only a recognised forwarding wrapper may`)
       }
       const kind = command === null || !Object.hasOwn(INTERPRETER_KIND, path.basename(command)) ? undefined : INTERPRETER_KIND[path.basename(command)]
       if (kind === undefined) {
