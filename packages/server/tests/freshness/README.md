@@ -5,8 +5,17 @@ worker sessions from their status lines: how old each session's latest report
 is, when an old "running" line is worth investigating, and how to bring one
 item at a time to the owner's attention without repeating itself.
 
-It exists to be tested, not to run. It lives under `tests/` so that it does
-not ship in the published package.
+It exists to be tested. What ships is exactly the eight modules moved to
+`src/freshness/` (hashing, keys, grading, configuration, the ledger, one read
+turned into records, the derived state and the policy) and the driver
+(`runtime.js`); the files of the same name under `model/` re-export them, so the
+model tests and the reconciler core run one implementation. That includes all of
+`derive.js` and `policy.js`, which also carry the owner-block, surface and
+investigation rules and the fold of their records. The reconciler core does not
+run those rules; they ship as data and functions only. What stays under `tests/`
+and does not ship: the stale-investigation scheduler (`investigation.js`), the
+owner queue (`queue.js`), the model's tick planner and owner actions
+(`reconciler.js`), and the helpers. See `docs/guides/freshness-reconciler.md`.
 
 **What it is.** Pure functions over an in-memory, append-only ledger. Time is
 always an argument; there is no clock, no timer, no I/O, no randomness, no
@@ -22,6 +31,7 @@ caller.
 
 | Path | Contents |
 |---|---|
+| `model/{hash,keys,grade,config,ledger,checks,derive,policy}.js` | Re-exports of `src/freshness/` (the shared implementation) |
 | `model/grade.js` | Freshness grading from report age |
 | `model/hash.js`, `model/keys.js` | Canonical hashing; the key of every record kind |
 | `model/ledger.js` | Append-only ledger with idempotent append |
