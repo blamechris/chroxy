@@ -115,6 +115,61 @@ The four-slot status block is parsed by the daemon's own `extractDeclaredStatus`
 (`declared-status.js`); `reportFromText` maps its result to a report for sources
 that hold message text.
 
+## Transcript readers (`src/freshness-sources/`)
+
+Live sources are kept out of `src/freshness/`: that directory's isolation test
+allows no import of the daemon's transcript locator. They ship in the package
+with the rest of `src`, and like the core nothing imports them yet (#9282).
+Register the capabilities each exports (`CLAUDE_TRANSCRIPT_CAPS`,
+`CODEX_TRANSCRIPT_CAPS`) in the reconciler's configuration under the adapter's
+source name.
+
+**Claude** (`createClaudeTranscriptAdapter({ projectsDir })`). Finds the last
+status block the assistant authored in a session's JSONL transcript, and its
+time, and keeps nothing else: every other line is parsed, looked at and
+dropped. Prompts, tool input and output, thinking, earlier blocks, prose, titles
+and working directories never leave the module, so planted content outside the
+block leaves no trace in the ledger (tested with canaries in each of those
+places).
+
+- Location is the closed-conversation locator, `resolveTranscriptSource`, with
+  its containment on real paths. The listing takes only regular files in real
+  project directories (a link is not listed); a link swapped in afterwards is
+  refused. A project directory that cannot be listed, or a `*.jsonl` name the reader would not accept, makes the whole listing unreadable (`null`) rather than shorter, so a read error is never taken for a session that is gone. `projectsDir` must be absolute. The file is opened read-only, and refused unless it is the
+  object the locator resolved and a regular file. A conversation id found in
+  two project directories is an `error` (`ambiguous_id`).
+- Bounded: at most `maxTailBytes` (4 MiB by default) are read, from the end. A
+  line the window starts inside is dropped; an unterminated last line (a write
+  in flight) is ignored; a bad line before it is `error` (`corrupt`). A block
+  further back than the window is not seen, so a long session whose last block
+  is older than the window reads as no status; raise the limit if that
+  matters. A window with no complete line is `error` (`tail_too_small`).
+- Authored means a top-level assistant entry. User entries, tool results and
+  subagent (`isSidechain`) entries are skipped, so a quoted block is not
+  read as the session's own. The block is parsed by the daemon's
+  `extractDeclaredStatus`, so a block in a code fence or a quote is not one.
+  The report is timed with the entry's `timestamp` (`authored_at`) and carries
+  `later_unfootered_messages` when a later assistant text message has no block.
+- A changed format is `error`, never no status, never a state: an entry
+  with no `type`, an assistant entry whose `message.content` is not a list of
+  typed blocks, or a block whose entry has no readable `timestamp`
+  (`shape_changed`, `bad_timestamp`).
+
+The format was built and tested from synthetic fixtures only. **Before the
+first run against real transcripts, make one recorded sample read** (read-only,
+of a single known session) and check that the entry types, `message.content`
+blocks, `timestamp` and top-level `isSidechain` flag are what the reader
+expects; any mismatch reads as `error`, which is the point. Whether
+subagent transcripts that sit beside a session file in the store are listed as
+sessions is also to be confirmed by that read.
+
+**Codex** (`createCodexTranscriptAdapter()`). **Not supported.** The locator
+marks the Codex format unsupported and no recorded sample backs a reader, so the
+adapter reads nothing and opens no file: `list()` is `null` (recorded as
+`source_unreadable`) and every read is `error: unsupported`. It is never idle and
+never no status. A test fails when the locator starts supporting Codex, as the
+prompt to write the reader.
+
 ## The session-registry adapter and the activity meter
 
 `session-registry-adapter.js` reads the Claude Code command-line tool's local
@@ -201,5 +256,6 @@ core, so on the core a stale blocked line is `blocked_unresolved`.
 
 ## Not in the core
 
-Live sources, delivery of anything and the queue and outbox (#9284). The seed-handoff origin is not derived: `seed_ref` is
+Live sources other than the transcript readers above, delivery of anything and the
+queue and outbox (#9284). The seed-handoff origin is not derived: `seed_ref` is
 always null until a source that carries seed scope and write time is added.
