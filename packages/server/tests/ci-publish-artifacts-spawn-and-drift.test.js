@@ -135,7 +135,7 @@ describe('a child process started with a literal script path is followed or reco
     ['a computed script argument', `${CP}const s = f(); spawnSync('node', [s])`, /child process 'spawnSync' runs interpreter 'node' with a computed argument/],
     ['a computed template script', `${CP}spawnSync('node', [\`scripts/\${name}.mjs\`])`, /with a computed argument/],
     ['a computed script behind a flag', `${CP}spawnSync('node', ['--no-warnings', s])`, /with a computed argument/],
-    ['a computed script through the wrapper', `${CP}${WRAPPER}run('bash', [s])`, /child process 'wrapper' runs interpreter 'bash' with a computed argument/],
+    ['a computed script through the wrapper', `${CP}${WRAPPER}run('bash', [s])`, /child process 'run' runs interpreter 'bash' with a computed argument/],
     ['a variable argument array', `${CP}const args = ['scripts/x.mjs']; spawnSync('node', args)`, /with computed arguments/],
     ['a spread inside the argument array', `${CP}spawnSync('node', [...rest, 'scripts/x.mjs'])`, /with computed arguments/],
     ['a built argument array', `${CP}spawnSync('node', ['a'].concat(s))`, /with computed arguments/],
@@ -170,7 +170,7 @@ describe('a child process started with a literal script path is followed or reco
     })
 
     it('sees a spawn through the verifier own run() wrapper: a computed script is refused', () => {
-      assert.throws(() => discoverReal(source => `${source}\nrun('node', [computedScript])\n`), /child process 'wrapper' runs interpreter 'node' with a computed argument/)
+      assert.throws(() => discoverReal(source => `${source}\nrun('node', [computedScript])\n`), /child process 'run' runs interpreter 'node' with a computed argument/)
     })
 
     it('sees a spawn through the verifier own run() wrapper: a literal script is recorded', () => {
@@ -337,7 +337,7 @@ describe('the program a child process runs is resolved or its script arguments r
     ['ruby', `${CP}spawnSync('ruby', ['scripts/x.rb'])`, /runs program 'ruby'/],
     ['an unresolved program', `${CP}spawnSync(chosenProgram, ['scripts/x.mjs'])`, /runs a computed program with script argument/],
     ['a reassigned program variable', `${CP}let NODE = 'node'; NODE = other; spawnSync(NODE, ['scripts/x.mjs'])`, /runs a computed program with script argument/],
-    ['an unresolved program through the wrapper', `${CP}${WRAPPER}run(chosen, ['scripts/x.sh'])`, /child process 'wrapper' runs a computed program with script argument 'scripts\/x\.sh'/],
+    ['an unresolved program through the wrapper', `${CP}${WRAPPER}run(chosen, ['scripts/x.sh'])`, /child process 'run' runs a computed program with script argument 'scripts\/x\.sh'/],
   ]) {
     it(`refuses ${label} given a script argument`, () => assert.throws(() => discover(source, files), message))
   }
@@ -365,8 +365,8 @@ describe('wrappers and aliases of child_process fail closed (#9150 review)', () 
   for (const [label, source, message] of [
     ['a wrapper that swaps its parameters', `${CP}const go = (a, b) => spawnSync(b, [a])\ngo('scripts/x.mjs', 'node')`, /local function 'go' reaches a child process without forwarding/],
     ['a wrapper that forwards only one parameter', `${CP}const go = (c, a) => spawnSync(c, [...a])\ngo('node', [])`, /local function 'go' reaches a child process without forwarding/],
-    ['a wrapper whose first argument is not its first parameter', `${CP}function go(c, a) { return spawnSync(a, a) }\ngo('node', ['scripts/x.mjs'])`, /local function 'go' reaches a child process without forwarding/],
-    ['a wrapper that forwards in the wrong order', `${CP}function go(c, a) { return spawnSync(a, c) }\ngo(['x'], 'node')`, /local function 'go' reaches a child process without forwarding/],
+    ['a wrapper whose first argument is not its first parameter', `${CP}function go(c, a) { return spawnSync(a, a) }\ngo('node', ['scripts/x.mjs'])`, /runs a computed program with computed arguments/],
+    ['a wrapper that forwards in the wrong order', `${CP}function go(c, a) { return spawnSync(a, c) }\ngo(['x'], 'node')`, /runs a computed program with computed arguments/],
     ['a wrapper of an opaque wrapper', `${CP}const inner = (a, b) => spawnSync(b, [a])\nconst outer = (c, a) => inner(c, a)\nouter('node', ['x'])`, /local function '(?:inner|outer)' reaches a child process without forwarding/],
     ['a wrapper aliased to another name', `${CP}${WRAPPER}const go = run\ngo('node', ['scripts/x.mjs'])`, /child process wrapper 'run' may only be called directly/],
     ['a wrapper passed as a value', `${CP}${WRAPPER}[['node', ['scripts/x.mjs']]].map(([c, a]) => 1); const list = [run]`, /child process wrapper 'run' may only be called directly/],
@@ -393,12 +393,12 @@ describe('options of a followed script are an allowlist (#9150 review)', () => {
     assert.deepEqual(discover(`${CP}fork('scripts/x.mjs', ['a', 'b'], { env: { NODE_OPTIONS: '--x' }, timeout: 1, maxBuffer: 2, encoding: 'utf8', input: 'i' })`, files).inputs, ['scripts/x.mjs'])
   })
   for (const [label, source, message] of [
-    ['fork execArgv as the second argument', `${CP}fork('scripts/x.mjs', { execArgv: ['--import=./h.mjs'] })`, /with option 'execArgv'/],
-    ['fork execPath after an args array', `${CP}fork('scripts/x.mjs', ['a'], { execPath: '/bin/other' })`, /with option 'execPath'/],
-    ['fork options that are a variable', `${CP}fork('scripts/x.mjs', opts)`, /options discovery cannot resolve/],
+    ['fork execArgv as the second argument', `${CP}fork('scripts/x.mjs', { execArgv: ['--import=./h.mjs'] })`, /passes option 'execArgv'/],
+    ['fork execPath after an args array', `${CP}fork('scripts/x.mjs', ['a'], { execPath: '/bin/other' })`, /passes option 'execPath'/],
+    ['fork options that are a variable', `${CP}fork('scripts/x.mjs', opts)`, /options or arguments discovery cannot resolve/],
     ['fork options with a spread', `${CP}fork('scripts/x.mjs', { ...opts })`, /options discovery cannot resolve/],
-    ['spawnSync shell: true', `${CP}spawnSync('node', ['scripts/x.mjs'], { shell: true })`, /with option 'shell'/],
-    ['spawnSync argv0', `${CP}spawnSync('node', ['scripts/x.mjs'], { argv0: 'other' })`, /with option 'argv0'/],
+    ['spawnSync shell: true', `${CP}spawnSync('node', ['scripts/x.mjs'], { shell: true })`, /passes option 'shell'/],
+    ['spawnSync argv0', `${CP}spawnSync('node', ['scripts/x.mjs'], { argv0: 'other' })`, /passes option 'argv0'/],
     ['a cwd that is not the repo root', `${CP}fork('scripts/x.mjs', { cwd: '/tmp' })`, /cwd that is not the repo root/],
   ]) {
     it(`refuses ${label}`, () => assert.throws(() => discover(source, files), message))
@@ -431,5 +431,133 @@ describe('loader aliases and escapes are refused (#9150 review)', () => {
 
   it('still accepts members of process, globalThis and an imported process', () => {
     assert.deepEqual(discover("import proc from 'node:process'; const a = process.env.HOME + proc.argv.length + globalThis.setTimeout.name + process.execPath").inputs, [])
+  })
+})
+
+describe('refuse at the spawn source: an unknown program with computed arguments only inside a recognised wrapper (#9150 round 2)', () => {
+  const REFUSED = /runs a computed program with computed arguments/
+  for (const [label, source] of [
+    ['an exported const wrapper', `${CP}export const run = (c, a) => execFileSync(c, a)`],
+    ['an exported function wrapper', `${CP}export function run(c, a) { return execFileSync(c, a) }`],
+    ['a wrapper exported by name', `${CP}const run = (c, a) => execFileSync(c, a)\nexport { run }`],
+    ['a wrapper exported under another name', `${CP}const run = (c, a) => execFileSync(c, a)\nexport { run as launch }`],
+    ['a default-exported wrapper', `${CP}export default function run(c, a) { return execFileSync(c, a) }`],
+    ['a default-exported wrapper by name', `${CP}const run = (c, a) => execFileSync(c, a)\nexport default run`],
+    ['a duplicate-named wrapper', `${CP}const run = (c, a) => execFileSync(c, a)\n{ const run = 1 }`],
+    ['a var-bound wrapper', `${CP}var run = (c, a) => execFileSync(c, a)`],
+    ['an object-method wrapper', `${CP}const o = { run(c, a) { return execFileSync(c, a) } }\no.run('node', ['scripts/x.mjs'])`],
+    ['a class wrapper', `${CP}class W { static run(c, a) { return spawnSync(c, a) } }\nW.run('node', ['scripts/x.mjs'])`],
+    ['an IIFE wrapper', `${CP};((c, a) => execFileSync(c, a))('node', ['scripts/x.mjs'])`],
+    ['a wrapper that reassigns its program', `${CP}const run = (c, a) => { c = other; return execFileSync(c, a) }`],
+    ['a wrapper that mutates its arguments binding', `${CP}function run(c, a) { a = ['x']; return execFileSync(c, a) }`],
+    ['a wrapper that updates a param', `${CP}function run(c, a) { a++; return execFileSync(c, a) }`],
+    ['a wrapper that shadows a param in a nested function', `${CP}const run = (c, a) => { const f = (a) => 1; return execFileSync(c, a) }`],
+    ['a wrapper that shadows a param by declaration', `${CP}function run(c, a) { { const c = 'node'; f(c) } return execFileSync(c, a) }`],
+    ['a wrapper with a default first param', `${CP}const run = (c = 'node', a) => execFileSync(c, a)`],
+    ['a bare computed call', `${CP}execFileSync(chosen, args)`],
+  ]) {
+    it(`refuses ${label} at its inner call`, () => assert.throws(() => discover(source, { 'scripts/x.mjs': '' }), REFUSED))
+  }
+
+  it('still recognises the verifier wrapper shape (const arrow forwarding params 0 and 1, options spread from a param)', () => {
+    assert.deepEqual(discover(`${CP}${WRAPPER}run(bin, ['--version'])`).inputs, [])
+  })
+
+  for (const [label, source] of [
+    ['a spread program', `${CP}spawnSync(...argv)`],
+    ['spread arguments', `${CP}spawnSync('node', ...rest)`],
+    ['a spread through the wrapper', `${CP}${WRAPPER}run(...argv)`],
+    ['a spread second argument through the wrapper', `${CP}${WRAPPER}run('node', ...rest)`],
+    ['a spread fork path', `${CP}fork(...argv)`],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source), /called with a spread argument/))
+  }
+})
+
+describe('options are refused on every call site, except the wrapper own forwarding call (#9150 round 2)', () => {
+  for (const [label, source, message] of [
+    ['a shell command string with shell: true', `${CP}execFileSync('node x.mjs', { shell: true })`, /passes option 'shell'/],
+    ['shell on a non-script program', `${CP}spawnSync('npm', ['pack'], { shell: true })`, /passes option 'shell'/],
+    ['execArgv on a non-script program', `${CP}spawnSync('npm', ['pack'], { execArgv: ['--import=x'] })`, /passes option 'execArgv'/],
+    ['execPath on a non-script program', `${CP}spawnSync('npm', ['pack'], { execPath: 'x' })`, /passes option 'execPath'/],
+    ['argv0 on a non-script program', `${CP}spawnSync('npm', ['pack'], { argv0: 'x' })`, /passes option 'argv0'/],
+    ['a computed options variable', `${CP}spawnSync('npm', ['pack'], opts)`, /options discovery cannot resolve/],
+    ['a spread inside options', `${CP}spawnSync('npm', ['pack'], { ...opts })`, /options discovery cannot resolve/],
+    ['a computed option key', `${CP}spawnSync('npm', ['pack'], { [k]: 1 })`, /options discovery cannot resolve/],
+    ['options-only form with shell', `${CP}spawnSync('npm', { shell: true })`, /passes option 'shell'/],
+    ['shell at a wrapper call site', `${CP}${WRAPPER}run('npm', ['pack'], { shell: true })`, /child process 'run' passes option 'shell'/],
+    ['computed options at a wrapper call site', `${CP}${WRAPPER}run('npm', ['pack'], opts)`, /child process 'run' has options discovery cannot resolve/],
+    ['computed options with an unknown program', `${CP}spawnSync(bin, ['doctor'], opts)`, /options discovery cannot resolve/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source, { 'scripts/x.mjs': '' }), message))
+  }
+
+  it('accepts literal options, and the wrapper own forwarding call may spread its params', () => {
+    assert.deepEqual(discover(`${CP}${WRAPPER}run('npm', ['pack'], { cwd: 'x', env: {}, stdio: 'inherit' }); spawnSync('npm', args, { timeout: 1 })`).inputs, [])
+  })
+})
+
+describe('an interpreter given no script reads its program from stdin (#9150 round 2)', () => {
+  it('accepts a bare interpreter call and one with ordinary options', () => {
+    assert.deepEqual(discover(`${CP}spawnSync('node')`).inputs, [])
+    assert.deepEqual(discover(`${CP}spawnSync('node', [], { encoding: 'utf8' })`).inputs, [])
+    assert.deepEqual(discover(`${CP}spawnSync('node', ['--no-warnings'])`).inputs, [])
+  })
+  for (const [label, source] of [
+    ['an empty argument array with input', `${CP}spawnSync('node', [], { input: 'import("x")' })`],
+    ['only allowed flags with input', `${CP}spawnSync('node', ['--no-warnings'], { input: 'x' })`],
+    ['no argument array with input', `${CP}spawnSync('bash', { input: 'echo hi' })`],
+    ['a through-the-wrapper call with input', `${CP}${WRAPPER}run('python3', [], { input: 'print(1)' })`],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source), /with no script and an 'input' option: its program comes from stdin/))
+  }
+  it('refuses options that are not a literal object', () => {
+    assert.throws(() => discover(`${CP}spawnSync('node', [], opts)`), /options discovery cannot resolve/)
+  })
+})
+
+describe('globals, modules and members that can reach code discovery cannot see (#9150 round 2)', () => {
+  for (const [label, source, message] of [
+    ['a computed globalThis member', 'globalThis[name]("x")', /computed globalThis\[\.\.\.\] member/],
+    ['a computed global member', "global[key]('x')", /computed global\[\.\.\.\] member/],
+    ['a concatenated eval key', "globalThis['ev' + 'al']('1')", /computed globalThis\[\.\.\.\] member/],
+    ['globalThis.process as a value', 'const p = globalThis.process', /'globalThis\.process' used as a bare value/],
+    ['global.process as a value', 'f(global.process)', /'global\.process' used as a bare value/],
+    ['static cluster', "import cluster from 'node:cluster'", /'node:cluster' runs code or threads/],
+    ['bare cluster', "import cluster from 'cluster'", /'cluster' runs code or threads/],
+    ['dynamic cluster', "await import('node:cluster')", /'node:cluster' runs code or threads/],
+    ['static inspector', "import inspector from 'node:inspector'", /'node:inspector' runs code or threads/],
+    ['dynamic inspector', "await import('inspector')", /'inspector' runs code or threads/],
+    ['static node:test', "import { test } from 'node:test'", /'node:test' runs code or threads/],
+    ['dynamic bare test', "await import('test')", /'test' runs code or threads/],
+    ['process.execve', "process.execve('/bin/sh', [])", /process\.execve/],
+    ['a data: import', "import 'data:text/javascript,1'", /scheme imports/],
+    ['a dynamic data: import', "await import('data:text/javascript,1')", /scheme imports/],
+    ['an https: import', "import 'https://example.test/x.mjs'", /scheme imports/],
+    ['a file: import', "import 'file:///tmp/x.mjs'", /file URL imports|scheme imports/],
+    ['a node: builtin look-alike scheme', "import 'nodex:fs'", /scheme imports/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source), message))
+  }
+  it('still accepts members: globalThis.process.env, a literal globalThis key, node: builtins', () => {
+    assert.deepEqual(discover("const a = globalThis.process.env.HOME + globalThis['setTimeout'].name; import 'node:path'").inputs, [])
+  })
+})
+
+describe('unknown programs: const-bound and more script extensions (#9150 round 2)', () => {
+  for (const [label, source] of [
+    ['a const-bound .ts argument', `${CP}const S = 'scripts/x.ts'\nspawnSync('tsx', [S])`],
+    ['a const-bound .sh argument to an unresolved program', `${CP}const S = 'scripts/x.sh'\nspawnSync(chosen, [S])`],
+    ['a const-bound argument through the wrapper', `${CP}${WRAPPER}const S = 'scripts/x.py'\nrun('uv', ['run', S])`],
+    ['.zsh', `${CP}spawnSync('runner', ['scripts/x.zsh'])`],
+    ['.php', `${CP}spawnSync('php', ['scripts/x.php'])`],
+    ['.ps1', `${CP}spawnSync('pwsh', ['scripts/x.ps1'])`],
+    ['.bat', `${CP}spawnSync('cmd', ['scripts/x.bat'])`],
+    ['.cmd', `${CP}spawnSync('cmd', ['scripts/x.cmd'])`],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source), /with script argument/))
+  }
+  it('names the local wrapper by its own name', () => {
+    assert.throws(() => discover(`${CP}const go = (c, a) => spawnSync(c, a)\ngo(x, ['scripts/x.sh'])`), /child process 'go' runs a computed program with script argument/)
   })
 })

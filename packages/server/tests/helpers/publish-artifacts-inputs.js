@@ -24,12 +24,14 @@ const INTERPRETER_FLAGS = {
 }
 const CHILD_PROCESS_FNS = new Set(['exec', 'execSync', 'execFile', 'execFileSync', 'spawn', 'spawnSync', 'fork'])
 // Options a followed script may be started with. `env` contents are NOT analysed.
+// Refused on EVERY child-process call: each can change which program or code runs.
+const DANGEROUS_OPTION_KEYS = new Set(['shell', 'execArgv', 'execPath', 'argv0'])
 const SPAWN_OPTION_KEYS = new Set(['cwd', 'stdio', 'encoding', 'timeout', 'maxBuffer', 'input', 'env'])
 // A literal argument with one of these extensions to an unknown program is a script we cannot follow.
-const SCRIPT_ARGUMENT = /\.(?:js|mjs|cjs|ts|mts|cts|sh|py|rb|pl)$/
+const SCRIPT_ARGUMENT = /\.(?:js|mjs|cjs|ts|mts|cts|sh|zsh|py|rb|pl|php|ps1|bat|cmd)$/
 const GLOBAL_OBJECTS = new Set(['globalThis', 'global'])
 const SHELL_STRING_FNS = new Set(['exec', 'execSync'])
-const FORBIDDEN_MODULE = /^(?:node:)?(?:vm|worker_threads)$/
+const FORBIDDEN_MODULE = /^(?:node:)?(?:vm|worker_threads|cluster|inspector|test)$/
 const SCRIPT_MODULE = /\.(?:mjs|cjs|js)$/
 
 function walk(node, visit, parent = null) {
@@ -139,14 +141,23 @@ export function extractPackedPackages(src, file = VERIFY_SCRIPT) {
  *    spread arguments, a literal script-looking argument (.js .mjs .cjs .ts .mts
  *    .cts .sh .py .rb .pl) to any other program, a child_process binding that is
  *    aliased, destructured or passed on, a non-forwarding local wrapper, dynamic
- *    import of child_process, vm and worker_threads.
+ *    import of child_process, vm, worker_threads, cluster, inspector and test;
+ *    a spread in a call's program/argument position; options that are not a
+ *    literal object or that carry shell/execArgv/execPath/argv0; an interpreter
+ *    given no script and an `input` option (its program comes from stdin); and
+ *    a child-process call whose program is unknown and whose arguments are not
+ *    a literal array, unless it is the forwarding call of a RECOGNISED wrapper
+ *    (declared once, never exported, a declaration or const function, forwarding
+ *    its own unmodified params 0 and 1). Refused at the spawn, so no caller works.
  *  - NOT ANALYSED (known limits): inline node -e/-p code; the children of a
  *    followed non-JS script; env / NODE_OPTIONS contents; `npm run <script>`;
- *    (()=>{}).constructor(...); a computed program name (the verifier's installed bin).
+ *    (()=>{}).constructor(...); a computed program name (the verifier's installed bin);
+ *    an extensionless relative script passed to an unknown program.
  *
  * Code loaders are refused, never ignored: require(), eval, any bare Function,
- * process.binding/getBuiltinModule/dlopen/mainModule, and process, globalThis or
- * global used as a bare value. Other computed content reads/imports, module URL
+ * process.binding/getBuiltinModule/dlopen/mainModule/execve, process, globalThis or
+ * global used as a bare value (including globalThis.process), a computed
+ * globalThis[...] member, and any non-node: scheme import (data:, file:, https:). Other computed content reads/imports, module URL
  * queries/fragments, absolute/escaping paths and ambiguous bindings fail with a
  * location. This is not a general JS evaluator or a shell/runtime-output analysis.
  */
@@ -285,6 +296,7 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
         if (!SCRIPT_MODULE.test(target)) unsupported(file, node, 'local module imports must have a .js/.mjs/.cjs extension')
         visit(target)
       } else if (/^(?:[/.]|file:)/.test(value)) unsupported(file, node, 'absolute or file URL imports are not supported')
+      else if (/^[a-z][a-z0-9+.-]*:/i.test(value) && !/^node:/.test(value)) unsupported(file, node, `'${value}' is not a node: builtin or a local path; scheme imports (data:, file:, https:) cannot be followed`)
       else if (FORBIDDEN_MODULE.test(value)) unsupported(file, node, `'${value}' runs code or threads discovery cannot see and needs explicit support`)
       else if (/^(?:node:)?module$/.test(value)) unsupported(file, node, "'node:module' (createRequire) lets a CommonJS dependency escape discovery")
     }
@@ -334,46 +346,85 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       return null
     }
     const localFunctions = new Map()
-    walk(ast, node => {
-      if (node.type === 'FunctionDeclaration' && node.id) localFunctions.set(node.id.name, node)
+    walk(ast, (node, parent) => {
+      if (node.type === 'FunctionDeclaration' && node.id) localFunctions.set(node.id.name, { fn: node, bound: true })
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && ['ArrowFunctionExpression', 'FunctionExpression'].includes(node.init?.type)) {
-        localFunctions.set(node.id.name, node.init)
+        localFunctions.set(node.id.name, { fn: node.init, bound: parent?.kind === 'const' })
       }
     })
-    // A local function that reaches a child process is a 'wrapper' only when it
-    // forwards its own first two parameters, in order, as the call's first two
-    // arguments (the verifier's run(cmd, args, opts)). Any other shape is
-    // 'opaque' and every reference to it is refused. Resolved transitively.
+    const exportedNames = new Set()
+    walk(ast, node => {
+      if (node.type === 'ExportNamedDeclaration') {
+        const d = node.declaration
+        if (d?.id) exportedNames.add(d.id.name)
+        for (const declarator of d?.declarations ?? []) patternNames(declarator.id).forEach(n => exportedNames.add(n))
+        if (!node.source) for (const spec of node.specifiers) exportedNames.add(spec.local.name)
+      }
+      if (node.type === 'ExportDefaultDeclaration') {
+        if (node.declaration.type === 'Identifier') exportedNames.add(node.declaration.name)
+        if (node.declaration.id) exportedNames.add(node.declaration.id.name)
+      }
+    })
+    // The invariant: a child-process call whose program is unknown and whose
+    // arguments are not a literal array is accepted ONLY as the forwarding call
+    // of a RECOGNISED wrapper. A wrapper is recognised when its function is
+    // declared once, never exported, a declaration or const-bound function,
+    // and forwards its own params 0 and 1 (plain, never reassigned or shadowed)
+    // as that call's arguments 0 and 1. Every other such call is refused where
+    // it is spawned, so no caller spelling can reach it.
     const callerKinds = new Map()
-    const forwardsParams = (fn, call) => {
-      const [p0, p1] = fn.params
-      return p0?.type === 'Identifier' && p1?.type === 'Identifier' &&
-        call.arguments[0]?.type === 'Identifier' && call.arguments[0].name === p0.name &&
-        call.arguments[1]?.type === 'Identifier' && call.arguments[1].name === p1.name
+    const forwardingCalls = new WeakSet()
+    const paramsRebound = (fn, names) => {
+      let rebound = false
+      walk(fn.body, inner => {
+        const names2 = []
+        if (inner.type === 'AssignmentExpression') names2.push(...patternNames(inner.left))
+        if (inner.type === 'UpdateExpression') names2.push(...patternNames(inner.argument))
+        if (['ForInStatement', 'ForOfStatement'].includes(inner.type) && inner.left.type !== 'VariableDeclaration') names2.push(...patternNames(inner.left))
+        if (inner.type === 'VariableDeclarator') names2.push(...patternNames(inner.id))
+        if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(inner.type)) {
+          if (inner.id) names2.push(inner.id.name)
+          for (const param of inner.params) names2.push(...patternNames(param))
+        }
+        if (inner.type === 'CatchClause' && inner.param) names2.push(...patternNames(inner.param))
+        if (['ClassDeclaration', 'ClassExpression'].includes(inner.type) && inner.id) names2.push(inner.id.name)
+        if (names2.some(n => names.includes(n))) rebound = true
+      })
+      return rebound
     }
     for (let changed = true; changed;) {
       changed = false
-      for (const [name, fn] of localFunctions) {
+      for (const [name, { fn, bound }] of localFunctions) {
         if (callerKinds.has(name) || declarations.get(name) !== 1) continue
         let reaches = false
-        let forwards = false
+        const forwarding = []
+        const [p0, p1] = fn.params
         walk(fn.body, inner => {
           if (inner.type !== 'CallExpression') return
           const known = childProcessFn(inner.callee) !== null || (inner.callee.type === 'Identifier' && callerKinds.has(inner.callee.name))
           if (!known) return
           reaches = true
-          if (forwardsParams(fn, inner)) forwards = true
+          if (p0?.type === 'Identifier' && p1?.type === 'Identifier' &&
+            inner.arguments[0]?.type === 'Identifier' && inner.arguments[0].name === p0.name &&
+            inner.arguments[1]?.type === 'Identifier' && inner.arguments[1].name === p1.name) forwarding.push(inner)
         })
-        if (reaches) { callerKinds.set(name, forwards ? 'wrapper' : 'opaque'); changed = true }
+        if (!reaches) continue
+        const recognised = bound && !exportedNames.has(name) && forwarding.length > 0 && !paramsRebound(fn, [p0.name, p1.name]) &&
+          forwarding.every(call => callerKinds.get(call.callee.name) !== 'opaque')
+        if (recognised) forwarding.forEach(call => forwardingCalls.add(call))
+        callerKinds.set(name, recognised ? 'wrapper' : 'opaque')
+        changed = true
       }
     }
-    function spawnedScript(node, name, scriptNode, optionsNode) {
-      const what = `child process '${name}'`
+    const plainObject = node => node?.type === 'ObjectExpression' && node.properties.every(p => p.type === 'Property' && !p.computed && !p.method && p.kind === 'init')
+    // Where a call's options live: (cmd, args, opts), (cmd, opts) or (cmd, computedArgs, opts).
+    const optionsOf = (second, third) => second?.type === 'ArrayExpression' ? third : second?.type === 'ObjectExpression' ? second : third
+    function spawnedScript(node, label, scriptNode, optionsNode) {
+      const what = `child process '${label}'`
       const script = text(scriptNode)
       if (script === null) unsupported(file, node, `${what} needs a literal script path: a computed one cannot be followed`)
       if (optionsNode !== undefined) {
-        const plain = optionsNode.type === 'ObjectExpression' && optionsNode.properties.every(p => p.type === 'Property' && !p.computed && !p.method && p.kind === 'init')
-        if (!plain) unsupported(file, node, `${what} runs '${script}' with options discovery cannot resolve: they must be a literal object`)
+        if (!plainObject(optionsNode)) unsupported(file, node, `${what} runs '${script}' with options discovery cannot resolve: they must be a literal object`)
         for (const p of optionsNode.properties) {
           const key = p.key.name ?? p.key.value
           if (!SPAWN_OPTION_KEYS.has(key)) unsupported(file, node, `${what} runs '${script}' with option '${key}', which can change what runs and is not understood`)
@@ -394,39 +445,63 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (node?.type === 'Identifier') return text(visibleBinding(node))
       return null
     }
-    function spawned(node, name) {
+    function spawned(node, name, label) {
       if (name !== 'wrapper' && !CHILD_PROCESS_FNS.has(name)) unsupported(file, node, `child process '${name}' is not understood by input discovery`)
       if (SHELL_STRING_FNS.has(name)) unsupported(file, node, `child process '${name}' runs a shell command string that discovery cannot follow`)
       const [first, second, third] = node.arguments
-      if (name === 'fork') return spawnedScript(node, name, first, second?.type === 'ArrayExpression' ? third : second)
+      const forwardingCall = forwardingCalls.has(node)
+      if (node.arguments.slice(0, 2).some(arg => arg?.type === 'SpreadElement')) {
+        unsupported(file, node, `child process '${label}' is called with a spread argument: its program and arguments cannot be followed`)
+      }
+      const options = optionsOf(second, third)
+      if (!forwardingCall && options !== undefined) {
+        if (!plainObject(options)) unsupported(file, node, `child process '${label}' has options discovery cannot resolve: they must be a literal object`)
+        for (const p of options.properties) {
+          const key = p.key.name ?? p.key.value
+          if (DANGEROUS_OPTION_KEYS.has(key)) unsupported(file, node, `child process '${label}' passes option '${key}', which can change what runs and is not understood`)
+        }
+      }
+      if (name === 'fork') {
+        if (second !== undefined && options === undefined) unsupported(file, node, `child process '${label}' has options or arguments discovery cannot resolve: they must be a literal array or object`)
+        return spawnedScript(node, label, first, options)
+      }
       const command = commandName(first)
+      if (command === null && !forwardingCall && second?.type !== 'ArrayExpression') {
+        unsupported(file, node, `child process '${label}' runs a computed program with computed arguments: only a recognised forwarding wrapper may`)
+      }
       const kind = command === null || !Object.hasOwn(INTERPRETER_KIND, path.basename(command)) ? undefined : INTERPRETER_KIND[path.basename(command)]
-      const options = second?.type === 'ArrayExpression' ? third : second
       if (kind === undefined) {
-        if (command !== null && command.includes('/') && !path.isAbsolute(command)) return spawnedScript(node, name, first, options)
-        // Unknown program: refuse a literal script-looking argument, never ignore it.
+        if (command !== null && command.includes('/') && !path.isAbsolute(command)) return spawnedScript(node, label, first, options)
+        // Unknown program: refuse a literal or const-bound script-looking argument, never ignore it.
         const program = command === null ? 'a computed program' : `program '${command}'`
         for (const el of second?.type === 'ArrayExpression' ? second.elements : []) {
-          const arg = el?.type === 'SpreadElement' ? null : text(el)
-          if (arg !== null && SCRIPT_ARGUMENT.test(arg)) unsupported(file, node, `child process '${name}' runs ${program} with script argument '${arg}': discovery cannot follow it`)
+          const arg = el?.type === 'SpreadElement' ? null : commandName(el)
+          if (arg !== null && SCRIPT_ARGUMENT.test(arg)) unsupported(file, node, `child process '${label}' runs ${program} with script argument '${arg}': discovery cannot follow it`)
         }
         return
       }
-      if (second === undefined) return
+      // An interpreter that is given no script reads its program from stdin.
+      const noScript = () => {
+        if (options?.properties.some(p => (p.key.name ?? p.key.value) === 'input')) {
+          unsupported(file, node, `child process '${label}' runs interpreter '${command}' with no script and an 'input' option: its program comes from stdin`)
+        }
+      }
+      if (second === undefined || (second.type === 'ObjectExpression' && second === options)) return noScript()
       if (second.type !== 'ArrayExpression' || second.elements.some(el => !el || el.type === 'SpreadElement')) {
-        unsupported(file, node, `child process '${name}' runs interpreter '${command}' with computed arguments: its script cannot be followed`)
+        unsupported(file, node, `child process '${label}' runs interpreter '${command}' with computed arguments: its script cannot be followed`)
       }
       const flags = INTERPRETER_FLAGS[kind]
       for (const el of second.elements) {
         const arg = text(el)
-        if (arg === null) unsupported(file, node, `child process '${name}' runs interpreter '${command}' with a computed argument: its script cannot be followed`)
+        if (arg === null) unsupported(file, node, `child process '${label}' runs interpreter '${command}' with a computed argument: its script cannot be followed`)
         // Inline node code is not analysed (documented limit).
         if (flags.inline.includes(arg) || /^--(?:eval|print)=/.test(arg) && kind === 'node') return
-        if (flags.refused.includes(arg)) unsupported(file, node, `child process '${name}' passes '${arg}' to '${command}': inline code or a command string cannot be followed`)
+        if (flags.refused.includes(arg)) unsupported(file, node, `child process '${label}' passes '${arg}' to '${command}': inline code or a command string cannot be followed`)
         if (flags.allowed.includes(arg)) continue
-        if (arg.startsWith('-')) unsupported(file, node, `child process '${name}' passes flag '${arg}' to '${command}': only ${flags.allowed.concat(flags.inline).join(' ')} are understood`)
-        return spawnedScript(node, name, el, options)
+        if (arg.startsWith('-')) unsupported(file, node, `child process '${label}' passes flag '${arg}' to '${command}': only ${flags.allowed.concat(flags.inline).join(' ')} are understood`)
+        return spawnedScript(node, label, el, options)
       }
+      noScript()
     }
     const isGlobalObject = node => node?.type === 'Identifier' && GLOBAL_OBJECTS.has(node.name)
     const isProcess = node => (node?.type === 'Identifier' && (node.name === 'process' || imports.get(node.name)?.source === 'process')) ||
@@ -477,7 +552,13 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (node.type === 'MemberExpression' && isProcess(node.object)) {
         const member = property(node)
         if (member === null || member === undefined) unsupported(file, node, 'a computed process[...] member needs explicit discovery support')
-        if (['getBuiltinModule', 'binding', 'dlopen', 'mainModule'].includes(member)) unsupported(file, node, `process.${member} loads or runs code discovery cannot follow and needs explicit support`)
+        if (['getBuiltinModule', 'binding', 'dlopen', 'mainModule', 'execve'].includes(member)) unsupported(file, node, `process.${member} loads or runs code discovery cannot follow and needs explicit support`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && node.computed && text(node.property) === null) {
+        unsupported(file, node, `a computed ${node.object.name}[...] member can name eval, Function or process and needs explicit discovery support`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && property(node) === 'process' && !(parent?.type === 'MemberExpression' && parent.object === node)) {
+        unsupported(file, node, `'${node.object.name}.process' used as a bare value can leak members discovery cannot see; use its members directly`)
       }
       if (node.type === 'MemberExpression' && isGlobalObject(node.object) && ['eval', 'Function'].includes(property(node))) {
         unsupported(file, node, `${property(node) === 'eval' ? 'eval()' : 'new Function()'} runs code discovery cannot see and needs explicit support`)
@@ -521,7 +602,7 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (node.type !== 'CallExpression') return
       if (node.callee.type === 'Identifier' && node.callee.name === 'require') unsupported(file, node, 'require() needs explicit discovery support')
       const childFn = childProcessFn(node.callee) ?? (node.callee.type === 'Identifier' && callerKinds.get(node.callee.name) === 'wrapper' ? 'wrapper' : null)
-      if (childFn !== null) spawned(node, childFn)
+      if (childFn !== null) spawned(node, childFn, childFn === 'wrapper' ? node.callee.name : childFn)
       if (!fsRead(node.callee)) return
       const arg = node.arguments[0]
       let value = staticPath(arg)
