@@ -582,10 +582,19 @@ describe('a recognised wrapper may use params 0 and 1 only as the forwarding arg
     ['forwarding options with shell: true', `${CP}const run = (c, a) => execFileSync(c, a, { shell: true })`, why('non-literal forwarding options')],
     ['forwarding options spreading a param then shell', `${CP}const run = (c, a, opts) => execFileSync(c, a, { ...opts, shell: true })`, why('non-literal forwarding options')],
     ['forwarding options with a shell string', `${CP}const run = (c, a) => execFileSync(c, a, { shell: '/bin/sh' })`, why('non-literal forwarding options')],
-    ['forwarding options that are an identifier', `${CP}const run = (c, a, opts) => execFileSync(c, a, opts)`, why('non-literal forwarding options')],
+    ['forwarding options that are an identifier', `${CP}const run = (c, a, opts) => execFileSync(c, a, opts)`, why('param referenced outside the forwarding call')],
     ['forwarding options that are a call', `${CP}const run = (c, a) => execFileSync(c, a, build())`, why('non-literal forwarding options')],
     ['forwarding options spreading a non-param', `${CP}const run = (c, a) => execFileSync(c, a, { ...outer })`, why('non-literal forwarding options')],
     ['forwarding options with a computed value', `${CP}const run = (c, a) => execFileSync(c, a, { encoding: pick() })`, why('non-literal forwarding options')],
+    ['a write to the options param before forwarding', `${CP}const run = (c, a, opts = {}) => { opts.shell = true; return execFileSync(c, a, { ...opts }) }`, why('param referenced outside the forwarding call')],
+    ['Object.assign onto the options param', `${CP}const run = (c, a, opts = {}) => { Object.assign(opts, { shell: true }); return execFileSync(c, a, { ...opts }) }`, why('param referenced outside the forwarding call')],
+    ['a read of the options param', `${CP}const run = (c, a, opts = {}) => { f(opts.x); return execFileSync(c, a, { ...opts }) }`, why('param referenced outside the forwarding call')],
+    ['a body declaration shadowing the options param', `${CP}const run = (c, a, opts = {}) => { { const opts = { shell: true }; f(opts) } return execFileSync(c, a, { ...opts }) }`, why('param referenced outside the forwarding call')],
+    ['an assignment to the options param', `${CP}const run = (c, a, opts = {}) => { opts = { shell: true }; return execFileSync(c, a, { ...opts }) }`, why('param referenced outside the forwarding call')],
+    ['two later params', `${CP}const run = (c, a, x = {}, y = {}) => execFileSync(c, a, { ...x })`, why('more than one options param')],
+    ['forwarding options with a cwd', `${CP}const run = (c, a) => execFileSync(c, a, { cwd: 'packages/x' })`, why('non-literal forwarding options')],
+    ['forwarding options with input', `${CP}const run = (c, a) => execFileSync(c, a, { input: 'code' })`, why('non-literal forwarding options')],
+    ['forwarding options with env', `${CP}const run = (c, a) => execFileSync(c, a, { env: {} })`, why('non-literal forwarding options')],
     ['an exported wrapper names its reason', `${CP}export const run = (c, a) => execFileSync(c, a)`, why('exported')],
     ['a duplicate wrapper names its reason', `${CP}const run = (c, a) => execFileSync(c, a)\n{ const run = 1 }`, why('declared more than once')],
     ['a var wrapper names its reason', `${CP}var run = (c, a) => execFileSync(c, a)`, why('not a function declaration or const-bound function')],
@@ -597,6 +606,10 @@ describe('a recognised wrapper may use params 0 and 1 only as the forwarding arg
   it('accepts the verifier-shaped forwarding call: { encoding, ...opts } with a trivially defaulted opts', () => {
     const source = `${CP}const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', ...opts })\nrun(bin, ['--version'], { env: {} })`
     assert.deepEqual(discover(source).inputs, [])
+  })
+  it('accepts forwarding options that are only the options spread, or stdio plus the spread', () => {
+    assert.deepEqual(discover(`${CP}const run = (c, a, opts = {}) => execFileSync(c, a, { ...opts })\nrun(bin, ['--version'])`).inputs, [])
+    assert.deepEqual(discover(`${CP}const run = (c, a, opts) => execFileSync(c, a, { stdio: 'inherit', ...opts })\nrun(bin, ['--version'])`).inputs, [])
   })
   it('accepts a wrapper whose params are spelled as non-computed member names and object keys', () => {
     const source = `${CP}const run = (cmd, args) => { const o = { cmd: 1, args: 2 }; return execFileSync(cmd, args, { timeout: 5 }) + o.cmd + o.args }\nrun(bin, ['--version'])`

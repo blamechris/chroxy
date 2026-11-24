@@ -26,6 +26,8 @@ const CHILD_PROCESS_FNS = new Set(['exec', 'execSync', 'execFile', 'execFileSync
 // Options a followed script may be started with. `env` contents are NOT analysed.
 // Refused on EVERY child-process call: each can change which program or code runs.
 const DANGEROUS_OPTION_KEYS = new Set(['shell', 'execArgv', 'execPath', 'argv0'])
+// The only literal keys a recognised wrapper's own forwarding call may carry.
+const FORWARDING_OPTION_KEYS = new Set(['encoding', 'stdio', 'timeout', 'maxBuffer'])
 const SPAWN_OPTION_KEYS = new Set(['cwd', 'stdio', 'encoding', 'timeout', 'maxBuffer', 'input', 'env'])
 // A literal argument with one of these extensions to an unknown program is a script we cannot follow.
 const SCRIPT_ARGUMENT = /\.(?:js|mjs|cjs|ts|mts|cts|sh|zsh|py|rb|pl|php|ps1|bat|cmd)$/
@@ -147,10 +149,11 @@ export function extractPackedPackages(src, file = VERIFY_SCRIPT) {
  *    given no script and an `input` option (its program comes from stdin); and
  *    a child-process call whose program is unknown and whose arguments are not
  *    a literal array, unless it is the forwarding call of a RECOGNISED wrapper
- *    (declared once, never exported, a declaration or const function, forwarding
- *    its own params 0 and 1, which appear nowhere else in the function; later params
- *    are plain or trivially defaulted; forwarding options are literal or a spread of
- *    its own later param). Refused at the spawn, so no caller works.
+ *    (declared once, not exported; a declaration or a const-bound function; params
+ *    0 and 1 plain and used only as forwarding args 0 and 1; at most ONE later
+ *    param, with a trivial default, used only as the spread in the forwarding
+ *    options; forwarding options are a literal holding only that spread and
+ *    encoding/stdio/timeout/maxBuffer literals). Refused at the spawn, so no caller works.
  *  - NOT ANALYSED (known limits): inline node -e/-p code; the children of a
  *    followed non-JS script; env / NODE_OPTIONS contents; `npm run <script>`;
  *    (()=>{}).constructor(...); a computed (non-literal) argument list passed to a literal
@@ -391,24 +394,30 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (!bound) return 'not a function declaration or const-bound function'
       if (forwarding.length === 0 || forwarding.some(call => callerKinds.get(call.callee.name) === 'opaque')) return 'params 0/1 not forwarded in order'
       const [p0, p1, ...later] = fn.params
+      if (later.length > 1) return 'more than one options param'
       if (!later.every(trivialParam)) return 'default or destructured param'
-      // Params 0 and 1 may appear ONLY as args 0 and 1 of the forwarding calls.
-      const allowed = new Set([p0, p1, ...forwarding.flatMap(call => [call.arguments[0], call.arguments[1]])])
+      const optionsParam = later[0]?.type === 'AssignmentPattern' ? later[0].left : later[0]
+      // Params 0 and 1 may appear ONLY as args 0 and 1 of the forwarding calls; the
+      // options param ONLY as its own declaration and as the spread in the forwarding options.
+      const spreads = forwarding.flatMap(call => call.arguments[2]?.type === 'ObjectExpression'
+        ? call.arguments[2].properties.filter(prop => prop.type === 'SpreadElement').map(prop => prop.argument) : [])
+      const guarded = [p0.name, p1.name, ...(optionsParam ? [optionsParam.name] : [])]
+      const allowed = new Set([p0, p1, ...(optionsParam ? [optionsParam, ...spreads] : []), ...forwarding.flatMap(call => [call.arguments[0], call.arguments[1]])])
       let referenced = false
       walk(fn, (inner, parent) => {
-        if (inner.type !== 'Identifier' || ![p0.name, p1.name].includes(inner.name) || allowed.has(inner)) return
+        if (inner.type !== 'Identifier' || !guarded.includes(inner.name) || allowed.has(inner)) return
         if (parent?.type === 'MemberExpression' && parent.property === inner && !parent.computed) return
         if (parent?.type === 'Property' && parent.key === inner && !parent.computed && !parent.shorthand) return
         referenced = true
       })
       if (referenced) return 'param referenced outside the forwarding call'
-      const ownLater = new Set(later.map(param => param.type === 'Identifier' ? param.name : param.left.name))
+      const ownLater = new Set(optionsParam ? [optionsParam.name] : [])
       for (const call of forwarding) {
         const options = call.arguments[2]
         if (options === undefined) continue
         const literalKeys = options.type === 'ObjectExpression' && options.properties.every(prop => prop.type === 'SpreadElement'
           ? prop.argument.type === 'Identifier' && ownLater.has(prop.argument.name)
-          : prop.type === 'Property' && !prop.computed && !prop.method && prop.kind === 'init' && SPAWN_OPTION_KEYS.has(prop.key.name ?? prop.key.value) && staticLiteral(prop.value))
+          : prop.type === 'Property' && !prop.computed && !prop.method && prop.kind === 'init' && FORWARDING_OPTION_KEYS.has(prop.key.name ?? prop.key.value) && staticLiteral(prop.value))
         if (!literalKeys) return 'non-literal forwarding options'
       }
       return null
