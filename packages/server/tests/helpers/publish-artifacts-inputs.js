@@ -12,6 +12,15 @@ const FS_READS = ['readFile', 'readFileSync', 'createReadStream']
 // up to today's call counts: any additional call is refused, never ignored.
 // existsSync with a literal repo path is still discovered as an input.
 const VERIFIER_FS_CALLS = { mkdtempSync: 1, rmSync: 1, writeFileSync: 1, existsSync: 3 }
+// Child processes whose first literal script argument is followed as an input.
+const INTERPRETERS = new Set(['node', 'nodejs', 'bash', 'sh', 'zsh', 'python', 'python3'])
+// Flags after which the next argument is inline code, so there is no script file.
+const INLINE_CODE_FLAGS = new Set(['-e', '-p', '-pe', '-c', '--eval', '--print'])
+// Interpreter flags that take a SEPARATE value: the script position is then unknowable.
+const VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions', '-m'])
+const GLOBAL_OBJECTS = new Set(['globalThis', 'global'])
+const SHELL_STRING_FNS = new Set(['exec', 'execSync'])
+const SCRIPT_MODULE = /\.(?:mjs|cjs|js)$/
 
 function walk(node, visit, parent = null) {
   if (!node || typeof node.type !== 'string') return
@@ -105,7 +114,11 @@ export function extractPackedPackages(src, file = VERIFY_SCRIPT) {
  * Const path aliases, dirname and fileURLToPath cover the verifier's ROOT.
  *
  * The verifier's existing package-manifest read is explicitly recognized below.
- * Other computed content reads/imports, require(), module URL queries/fragments,
+ * Child processes started with a literal script path are followed (a JS script
+ * is parsed like any module, another script is recorded as an input); a computed
+ * script argument to an interpreter is refused. `npm run <script>` is not followed.
+ * Other computed content reads/imports, require(), eval/new Function,
+ * process.binding/getBuiltinModule, module URL queries/fragments,
  * absolute/escaping paths and ambiguous bindings fail with a location. This is
  * not a general JS evaluator or a shell/runtime-output dependency analysis.
  */
@@ -277,6 +290,77 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
       if (base?.source === 'fs' && property(node) === 'promises') return { source: 'fs/promises', defaultExport: false }
       return null
     }
+    // Child processes. A call is a child-process call when its callee is a
+    // child_process function (named, aliased or through a namespace) or a local
+    // function whose body forwards to one, as the verifier's own `run` does.
+    function childProcessFn(callee) {
+      if (callee?.type === 'Identifier') {
+        const imp = imports.get(callee.name)
+        return imp?.source === 'child_process' && imp.name !== '*' ? imp.name : null
+      }
+      if (callee?.type === 'MemberExpression' && callee.object.type === 'Identifier') {
+        const imp = imports.get(callee.object.name)
+        return imp?.source === 'child_process' && imp.name === '*' ? property(callee) ?? null : null
+      }
+      return null
+    }
+    const localFunctions = new Map()
+    walk(ast, node => {
+      if (node.type === 'FunctionDeclaration' && node.id) localFunctions.set(node.id.name, node)
+      if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && ['ArrowFunctionExpression', 'FunctionExpression'].includes(node.init?.type)) {
+        localFunctions.set(node.id.name, node.init)
+      }
+    })
+    const spawnWrappers = new Set()
+    for (const [name, fn] of localFunctions) {
+      if (declarations.get(name) !== 1) continue
+      walk(fn.body, inner => { if (inner.type === 'CallExpression' && childProcessFn(inner.callee) !== null) spawnWrappers.add(name) })
+    }
+    function spawnedScript(node, name, scriptNode, argsNode, optionsNode) {
+      const what = `child process '${name}'`
+      const script = text(scriptNode)
+      if (script === null) unsupported(file, node, `${what} needs a literal script path: a computed one cannot be followed`)
+      if (optionsNode !== undefined) {
+        const cwd = optionsNode.type === 'ObjectExpression' && !optionsNode.properties.some(p => p.type !== 'Property' || p.computed)
+          ? optionsNode.properties.find(p => (p.key.name ?? p.key.value) === 'cwd')
+          : null
+        const unknownOptions = optionsNode.type !== 'ObjectExpression' || optionsNode.properties.some(p => p.type !== 'Property' || p.computed)
+        if (unknownOptions || (cwd && staticPath(cwd.value) !== REPO)) {
+          unsupported(file, node, `${what} runs '${script}' with options discovery cannot resolve: its cwd must be the repo root`)
+        }
+      }
+      const target = localInput(script, node, false)
+      inputs.add(target)
+      if (SCRIPT_MODULE.test(target)) visit(target)
+      else read(target)
+    }
+    function spawned(node, name) {
+      if (SHELL_STRING_FNS.has(name)) unsupported(file, node, `child process '${name}' runs a shell command string that discovery cannot follow`)
+      const [first, second, third] = node.arguments
+      if (name === 'fork') return spawnedScript(node, name, first, second, third)
+      const command = text(first)
+      if (command === null) return // an unknown program (the verifier's installed bin) has no script to name
+      if (!INTERPRETERS.has(path.basename(command))) {
+        if (command.includes('/') && !path.isAbsolute(command)) spawnedScript(node, name, first, undefined, second?.type === 'ArrayExpression' ? third : second)
+        return
+      }
+      if (second === undefined) return
+      if (second.type !== 'ArrayExpression' || second.elements.some(el => !el || el.type === 'SpreadElement')) {
+        unsupported(file, node, `child process '${name}' runs interpreter '${command}' with computed arguments: its script cannot be followed`)
+      }
+      const options = second.type === 'ArrayExpression' ? third : second
+      for (const el of second.elements) {
+        const arg = text(el)
+        if (arg === null) unsupported(file, node, `child process '${name}' runs interpreter '${command}' with a computed argument: its script cannot be followed`)
+        if (INLINE_CODE_FLAGS.has(arg) || /^--(?:eval|print)=/.test(arg)) return
+        if (VALUE_FLAGS.has(arg)) unsupported(file, node, `child process '${name}' passes '${arg}' to '${command}': its script position is not understood`)
+        if (arg.startsWith('-')) continue
+        return spawnedScript(node, name, el, second, options)
+      }
+    }
+    const isGlobalObject = node => node?.type === 'Identifier' && GLOBAL_OBJECTS.has(node.name)
+    const isProcess = node => (node?.type === 'Identifier' && node.name === 'process') ||
+      (node?.type === 'MemberExpression' && property(node) === 'process' && isGlobalObject(node.object))
     const fsCalls = new Map()
     walk(ast, (node, parent) => {
       const importedBinding = ['ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier'].includes(parent?.type)
@@ -314,8 +398,26 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
         if (/^(?:node:)?fs(?:\/promises)?$/.test(text(node.source) ?? '')) unsupported(file, node, 'dynamic filesystem bindings require explicit discovery support')
         imported(node, node.source)
       }
+      // Forms that load or run code discovery cannot see. Refused wherever they
+      // appear, including aliased or optional-chained, never silently ignored.
+      if (node.type === 'MemberExpression' && isProcess(node.object)) {
+        const member = property(node)
+        if (member === null || member === undefined) unsupported(file, node, 'a computed process[...] member needs explicit discovery support')
+        if (['getBuiltinModule', 'binding'].includes(member)) unsupported(file, node, `process.${member}() loads modules discovery cannot follow and needs explicit support`)
+      }
+      if (node.type === 'MemberExpression' && isGlobalObject(node.object) && ['eval', 'Function'].includes(property(node))) {
+        unsupported(file, node, `${property(node) === 'eval' ? 'eval()' : 'new Function()'} runs code discovery cannot see and needs explicit support`)
+      }
+      if (node.type === 'Identifier' && node.name === 'eval' && !memberProperty && !(parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand)) {
+        unsupported(file, node, 'eval() runs code discovery cannot see and needs explicit support')
+      }
+      if (node.type === 'Identifier' && node.name === 'Function' && ['NewExpression', 'CallExpression'].includes(parent?.type) && parent.callee === node) {
+        unsupported(file, node, 'new Function() runs code discovery cannot see and needs explicit support')
+      }
       if (node.type !== 'CallExpression') return
       if (node.callee.type === 'Identifier' && node.callee.name === 'require') unsupported(file, node, 'require() needs explicit discovery support')
+      const childFn = childProcessFn(node.callee) ?? (node.callee.type === 'Identifier' && spawnWrappers.has(node.callee.name) ? 'wrapper' : null)
+      if (childFn !== null) spawned(node, childFn)
       if (!fsRead(node.callee)) return
       const arg = node.arguments[0]
       let value = staticPath(arg)
@@ -349,7 +451,7 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
         let enclosingFunction = parents.get(node)
         while (enclosingFunction && !['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(enclosingFunction.type)) enclosingFunction = parents.get(enclosingFunction)
         const uses = []
-        let rosterBounded = true
+        let rosterDrift = null
         let rosterUses = 0
         walk(ast, (candidate, parent) => {
           if (candidate.type !== 'Identifier') return
@@ -363,13 +465,30 @@ export function discoverPublishInputs({ readSource, entry = VERIFY_SCRIPT }) {
           const packLoop = parent?.type === 'ForOfStatement' && parent.right === candidate && sameSyntax(parent, expectedPackLoop)
           const filterCall = parent?.type === 'MemberExpression' && parent.object === candidate && sameSyntax(parents.get(parent), expectedBuildFilter) && sameSyntax(parents.get(parents.get(parent)), expectedBuildLoop)
           const entryFilter = parent?.type === 'MemberExpression' && parent.object === candidate && sameSyntax(parents.get(parents.get(parents.get(parent))), expectedUse)
-          if (!declaration && !packLoop && !filterCall && !entryFilter) rosterBounded = false
+          if (!declaration && !packLoop && !filterCall && !entryFilter && rosterDrift === null) {
+            const call = parent?.type === 'MemberExpression' && parent.object === candidate ? parents.get(parent) : null
+            if (parent?.type === 'ForOfStatement' && parent.right === candidate) rosterDrift = 'the PACKAGES pack loop drifted'
+            else if (call && (sameSyntax(call, expectedBuildFilter) || parents.get(call)?.type === 'ForOfStatement')) rosterDrift = 'the PACKAGES.filter((p) => p.build) build loop drifted'
+            else rosterDrift = 'PACKAGES is used outside its declaration, pack loop, build loop and entryPointsFor filter'
+          }
         })
-        const coveredManifest = file === VERIFY_SCRIPT && fn === enclosingFunction && sameSyntax(fn, expectedFunction) &&
-          uses.length === 1 && sameSyntax(uses[0], expectedUse) && rosterBounded && rosterUses === 4 && declarations.get('PACKAGES') === 1 &&
-          builtin({ type: 'Identifier', name: 'join' }, 'path', 'join') && staticPath(bindings.get('ROOT')?.init) === REPO
-        if (coveredManifest) return
-        unsupported(file, node, 'filesystem content reads require a static repo path (or proven package-only manifest use)')
+        // Each coupled snippet is named, in a fixed order, so a legitimate edit to
+        // one fails with the snippet that drifted instead of one generic message.
+        // The conjunction is exactly the old single boolean: nothing newly passes.
+        const drift = file !== VERIFY_SCRIPT ? null : [
+          [fn !== null, 'entryPointsFor must be declared exactly once'],
+          [fn === enclosingFunction, 'this dynamic read is not inside entryPointsFor'],
+          [sameSyntax(fn, expectedFunction), 'entryPointsFor no longer matches the expected function'],
+          [uses.length === 1 && sameSyntax(uses[0], expectedUse), 'the PACKAGES.filter(...).flatMap(entryPointsFor) use drifted'],
+          [rosterDrift === null, rosterDrift],
+          [rosterUses === 4, `PACKAGES has ${rosterUses} uses, expected its declaration plus the pack loop, build loop and entryPointsFor filter`],
+          [declarations.get('PACKAGES') === 1, 'PACKAGES must be declared exactly once'],
+          [builtin({ type: 'Identifier', name: 'join' }, 'path', 'join'), "'join' is no longer imported from node:path"],
+          [staticPath(bindings.get('ROOT')?.init) === REPO, 'ROOT no longer resolves to the repo root'],
+        ].find(([ok]) => !ok)
+        if (file === VERIFY_SCRIPT && !drift) return
+        const detail = drift ? `: ${drift[1]}` : ''
+        unsupported(file, node, `filesystem content reads require a static repo path (or proven package-only manifest use)${detail}`)
       }
       // Absolute strings authored by a source are not repo-relative. Only
       // values derived from import.meta.url/ROOT may use our virtual / root.
