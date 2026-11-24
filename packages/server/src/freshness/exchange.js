@@ -85,7 +85,7 @@ function unconfirmedFor(state, item) {
 
 // ── inputs ───────────────────────────────────────────────────────────
 
-function* ingest(ctx, ex, { input, parse, handle, tickId, now }) {
+function* ingest(ctx, ex, { input, parse, handle, now }) {
   const lim = exchangeLimits(ctx.state.config)
   const { lines, problem } = readInput(ex.files[input], { maxFileBytes: lim.max_file_bytes, maxLineBytes: lim.max_line_bytes })
   // Once per file, not once per tick: a rotated file starts a new one.
@@ -274,8 +274,8 @@ export function* planExchange(ctx, ex, { source, tickId, now, signals, tickOpenS
   ex.now = now
   ex.tickEchoes.clear()
   yield* sweepUnknownDeliveries(ctx, now)
-  yield* ingest(ctx, ex, { input: 'receipts', parse: parseReceipt, handle: (r, lid) => handleReceipt(ctx, ex, r, lid, now), tickId, now })
-  yield* ingest(ctx, ex, { input: 'acks', parse: parseAck, handle: (a, lid) => handleAck(ctx, ex, a, lid, now), tickId, now })
+  yield* ingest(ctx, ex, { input: 'receipts', parse: parseReceipt, handle: (r, lid) => handleReceipt(ctx, ex, r, lid, now), now })
+  yield* ingest(ctx, ex, { input: 'acks', parse: parseAck, handle: (a, lid) => handleAck(ctx, ex, a, lid, now), now })
   yield* planQueue(ctx, { source, tickId, now, signals, tickOpenSeq })
   yield* renderOutbox(ctx, ex, now)
 }
