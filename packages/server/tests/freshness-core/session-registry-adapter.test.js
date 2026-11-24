@@ -136,6 +136,8 @@ const CHANGED_SHAPES = {
   'a row file is a directory': ['shape_changed', (g) => fs.mkdirSync(path.join(g.dir, '5.json'))],
   'a row file is a symlink': ['shape_changed', (g) => (g.put(900, VALID()), fs.symlinkSync(path.join(g.dir, '900.json'), path.join(g.dir, '5.json')))],
   'a row file is too large': ['too_large', (g) => g.put(5, row('s1', { pad: 'x'.repeat(2000) }))],
+  'row files renamed to a pid-prefixed pattern': ['shape_changed', (g) => g.put('session-123', VALID())],
+  'row files renamed to a uuid pattern': ['shape_changed', (g) => g.put('3f2b8c1e-5a4d-4e0b-9c1d-7a6e2f4b8d10', VALID())],
   'the directory is gone': ['source_missing', (g) => fs.rmSync(g.dir, { recursive: true })],
   'the registry is a file': ['shape_changed', (g) => (fs.rmSync(g.dir, { recursive: true }), fs.writeFileSync(g.dir, 'x'))],
 }
@@ -173,6 +175,7 @@ proves(
     'a row that is not a regular file is read': [edit(ADAPTER, "if (!e.isFile()) return { error: 'shape_changed' }", '')],
     'a large row is read': [edit(ADAPTER, '.size > maxFileBytes', '.size > Infinity')],
     'a missing directory is an empty registry': [edit(ADAPTER, "return { error: err?.code === 'ENOENT' ? 'source_missing' : 'unreachable' }", 'return { rows: new Map() }')],
+    'files under another name read as an empty registry': [edit(ADAPTER, "candidates.length === 0 && entries.some((e) => e.isFile() && e.name.endsWith('.json'))", 'false')],
     'a registry that is a file is unreachable': [edit(ADAPTER, "if (err?.code === 'ENOTDIR') return { error: 'shape_changed' }", '')],
     'an unreadable registry reads as no report': [edit(ADAPTER, "if (snapshot.error) return { outcome: 'error', error_code: snapshot.error }", "if (snapshot.error) return { outcome: 'no_report' }")],
   },
@@ -193,6 +196,18 @@ proves(
     assert.equal(b.error_code, 'too_large')
   },
   { 'the row count is unbounded': [edit(ADAPTER, 'candidates.length > maxFiles', 'false')] },
+)
+
+proves(
+  'shape: an empty directory, or one with only non-JSON files, is a registry with no live sessions',
+  (M) => {
+    const r = rig(M)
+    const g = registry(r, M)
+    assert.deepEqual(g.adapters()[0].list(), [])
+    fs.writeFileSync(path.join(g.dir, 'notes.txt'), 'x')
+    fs.mkdirSync(path.join(g.dir, 'sub.json'))
+    assert.deepEqual(g.adapters()[0].list(), [])
+  },
 )
 
 proves(

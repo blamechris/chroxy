@@ -8,7 +8,7 @@ import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { MIN, REAL, T0, cleanupTmp, cleanupVariants, mustKill, tmp } from './helpers/harness.js'
+import { MIN, REAL, T0, cleanupTmp, cleanupVariants, must, mustKill, tmp } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
@@ -75,13 +75,41 @@ proves(
     const west = M.dailyActivity({ samples, day: '2026-01-05', utcOffsetMinutes: -360 })
     assert.deepEqual(west.apps, [{ app: 'cli', live_sessions: 2, active_ms: 20 * MIN, active_hours: 0.33 }])
     assert.deepEqual(M.dailyActivity({ samples: [], day: '2026-01-05' }).apps, [])
+    for (const day of ['2026-13-45', '2026-02-31', '2026-00-10', '2026-04-31', '1969-12-31', '0050-01-01']) assert.throws(() => M.dailyActivity({ samples, day }), /real date/, day)
+    assert.doesNotThrow(() => M.dailyActivity({ samples, day: '2028-02-29' }))
+    for (const utcOffsetMinutes of [841, -841, Infinity, NaN]) assert.throws(() => M.dailyActivity({ samples, day: '2026-01-05', utcOffsetMinutes }), TypeError)
+    assert.doesNotThrow(() => M.dailyActivity({ samples, day: '2026-01-05', utcOffsetMinutes: 840 }))
     for (const day of ['2026-1-5', 'yesterday', '', '2026-01-05T00:00']) assert.throws(() => M.dailyActivity({ samples, day }), /YYYY-MM-DD/)
     assert.throws(() => M.dailyActivity({ samples: null, day: '2026-01-05' }), TypeError)
     assert.throws(() => M.dailyActivity({ samples, day: '2026-01-05', maxGapMs: 0 }), TypeError)
   },
   {
+    'an impossible date rolls over': [edit(METER, "utc.getUTCDate() !== d", 'false'), edit(METER, 'utc.getUTCMonth() !== mo - 1 || ', '')],
+    'years before 1970 are accepted': [edit(METER, 'y < 1970 || ', '')],
+    'the offset is unbounded': [edit(METER, 'Math.abs(utcOffsetMinutes) > 840 || ', '')],
     'the offset is ignored': [edit(METER, ' - utcOffsetMinutes * 60_000', '')],
     'the day format is not checked': [edit(METER, "if (!m) throw new TypeError('dailyActivity: day must be YYYY-MM-DD')", '')],
+  },
+)
+
+proves(
+  'a span that starts before the day counts only its part inside the day, and malformed entries are dropped',
+  (M) => {
+    const before = Date.parse('2026-01-04T23:50:00Z')
+    const samples = [
+      { at: before, sessions: [s('a', 'cli', true)] },
+      { at: before + 20 * MIN, sessions: [s('a', 'cli', false)] },
+    ]
+    const rec = must(() => M.dailyActivity({ samples, day: '2026-01-05' }))
+    // The second sample is in the day, so the session is live in it; of the first span only the part after midnight counts.
+    assert.deepEqual(rec.apps, [{ app: 'cli', live_sessions: 1, active_ms: 10 * MIN, active_hours: 0.17 }])
+    const mixed = [{ at: T0, sessions: [s('a', 'cli', true), null, 'x', { id: 3, app: 'cli' }, { id: 'b' }, undefined] }, { at: T0 + 10 * MIN, sessions: [] }]
+    const out = must(() => M.dailyActivity({ samples: mixed, day: '2026-01-05' }))
+    assert.deepEqual(out.apps, [{ app: 'cli', live_sessions: 1, active_ms: 10 * MIN, active_hours: 0.17 }])
+  },
+  {
+    'a span before the day is credited whole': [edit(METER, 'const from = Math.max(a.at, start)', 'const from = a.at')],
+    'a malformed session entry throws': [edit(METER, '.map((s) => ({ at: s.at, sessions: s.sessions.filter(okSession) }))', '.map((s) => ({ at: s.at, sessions: s.sessions }))')],
   },
 )
 

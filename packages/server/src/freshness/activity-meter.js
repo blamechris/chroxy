@@ -39,8 +39,11 @@ export function sampleRegistry({ dir, at, ...limits }) {
 function dayWindow(day, utcOffsetMinutes) {
   const m = DAY_RE.exec(day)
   if (!m) throw new TypeError('dailyActivity: day must be YYYY-MM-DD')
-  const start = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - utcOffsetMinutes * 60_000
-  if (!Number.isFinite(start)) throw new TypeError('dailyActivity: day is not a date')
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const utc = new Date(Date.UTC(y, mo - 1, d))
+  // Round-trip: an impossible date would otherwise roll over into another day.
+  if (y < 1970 || utc.getUTCFullYear() !== y || utc.getUTCMonth() !== mo - 1 || utc.getUTCDate() !== d) throw new TypeError('dailyActivity: day is not a real date (YYYY-MM-DD, 1970 or later)')
+  const start = utc.getTime() - utcOffsetMinutes * 60_000
   return { start, end: start + DAY_MS }
 }
 
@@ -56,9 +59,14 @@ function dayWindow(day, utcOffsetMinutes) {
  */
 export function dailyActivity({ samples, day, utcOffsetMinutes = 0, maxGapMs = DEFAULT_MAX_GAP_MS }) {
   if (!Array.isArray(samples)) throw new TypeError('dailyActivity: samples must be an array')
-  if (!Number.isFinite(utcOffsetMinutes) || !(maxGapMs > 0)) throw new TypeError('dailyActivity: bad offset or gap')
+  if (!Number.isFinite(utcOffsetMinutes) || Math.abs(utcOffsetMinutes) > 840 || !(maxGapMs > 0)) throw new TypeError('dailyActivity: bad offset or gap')
   const { start, end } = dayWindow(day, utcOffsetMinutes)
-  const ordered = samples.filter((s) => s && Number.isFinite(s.at) && Array.isArray(s.sessions)).sort((a, b) => a.at - b.at)
+  // A malformed sample or session entry is dropped, never thrown on.
+  const okSession = (x) => x !== null && typeof x === 'object' && typeof x.id === 'string' && typeof x.app === 'string'
+  const ordered = samples
+    .filter((s) => s && Number.isFinite(s.at) && Array.isArray(s.sessions))
+    .map((s) => ({ at: s.at, sessions: s.sessions.filter(okSession) }))
+    .sort((a, b) => a.at - b.at)
   const apps = new Map()
   const slot = (app) => {
     if (!apps.has(app)) apps.set(app, { app, ids: new Set(), active_ms: 0 })

@@ -29,8 +29,9 @@
  * lowercase token is recorded as `other`; the raw string is not kept.
  *
  * The directory is only read, never written. `list()` takes one snapshot and
- * the `read()` calls that follow answer from it. An empty directory is a
- * registry with no live sessions.
+ * the `read()` calls that follow answer from it. A directory with no
+ * row files is a registry with no live sessions, unless it holds a regular `*.json`
+ * file under another name, which is a changed format and reads as `error`.
  *
  * Time: `statusUpdatedAt` is the time the row's status last changed
  * (`report_time_basis` is `none`: there is no report). A row dated further in
@@ -100,6 +101,8 @@ export function loadRegistry(dir, { maxFiles = DEFAULT_MAX_FILES, maxFileBytes =
   }
   const candidates = entries.filter((e) => ROW_FILE_RE.test(e.name))
   if (candidates.length > maxFiles) return { error: 'too_large' }
+  // Rows under a name this module does not know are a changed format, not an empty registry.
+  if (candidates.length === 0 && entries.some((e) => e.isFile() && e.name.endsWith('.json'))) return { error: 'shape_changed' }
   const rows = new Map()
   for (const e of candidates.sort((a, b) => (a.name < b.name ? -1 : 1))) {
     if (!e.isFile()) return { error: 'shape_changed' }

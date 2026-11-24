@@ -137,8 +137,11 @@ duplicate `sessionId`, a row file that is not a regular file or a registry
 directory that is missing makes the whole registry `error` for that tick
 (`shape_changed`, `parse_failed`, `too_large`, `source_missing`), never `idle`.
 A row dated more than five minutes ahead of the check is `error: clock_skew`.
-Files not named `<digits>.json` are ignored unopened. An empty directory is a
-registry with no live sessions. The directory is only read.
+Files not named `<digits>.json` are ignored unopened, but a directory with
+regular `*.json` files and none named `<digits>.json` is a changed format
+(`shape_changed`), so a renamed file pattern cannot read as every session gone.
+A directory that is empty, or holds only non-JSON files, is a registry with no
+live sessions. The directory is only read.
 
 `activity-meter.js` turns samples of the registry (`sampleRegistry`) into one
 record per day: for each host application, the live sessions seen and the hours
@@ -146,7 +149,7 @@ it was active. A sample's busy state holds until the next sample, a span is
 credited at most 30 minutes (a gap is not evidence), the last sample credits
 nothing and the day is clipped to its UTC window (shifted by an offset).
 Active time is wall time with at least one busy session of the application, not
-a sum over sessions. The meter is separate from provider quota (#6778). Running
+a sum over sessions. A day must be a real date (1970 or later) and the offset within 14 hours of UTC, or the meter throws. The meter is separate from provider quota (#6778). Running
 either against the real registry, and where samples are kept between ticks, are
 for the runner (#9282).
 
