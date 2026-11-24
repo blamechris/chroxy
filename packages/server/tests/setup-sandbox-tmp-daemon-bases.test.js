@@ -78,13 +78,13 @@ const ex = (reason, site, count = 1) => ({ reason, site, count })
 const EXEMPT_LITERALS = new Map([
   // `chroxy-pr-body-<random>.md` — a per-call random FILE written and read back
   // inside one request; not a base a daemon validates or sweeps.
-  ['ws-file-ops/git.js|chroxy-pr-body-', ex('per-call random temp file, not a daemon base', 'TemplateElement>TemplateLiteral>call:join@1>decl:bodyFile>VariableDeclaration')],
-  ['checkpoint-manager.js|chroxy-checkpoint/', ex('git tag name, not a path', 'TemplateElement>TemplateLiteral>decl:tagName>VariableDeclaration')],
-  ['checkpoint-manager.js|chroxy-snapshot/', ex('git commit message, not a path', 'TemplateElement>TemplateLiteral>ArrayExpression>call:execFileAsync@1>AwaitExpression>decl:ObjectPattern>VariableDeclaration')],
+  ['ws-file-ops/git.js|chroxy-pr-body-', ex('per-call random temp file, not a daemon base', 'TemplateElement>TemplateLiteral[1]>call:join@1>decl:bodyFile>VariableDeclaration')],
+  ['checkpoint-manager.js|chroxy-checkpoint/', ex('git tag name, not a path', 'TemplateElement>TemplateLiteral[1]>decl:tagName>VariableDeclaration')],
+  ['checkpoint-manager.js|chroxy-snapshot/', ex('git commit message, not a path', 'TemplateElement>TemplateLiteral[1]>ArrayExpression>call:execFileAsync@1>AwaitExpression>decl:ObjectPattern>VariableDeclaration')],
   ['docker-byok-session.js|/tmp/.chroxy-post-create-', ex('path inside the container, not the host tmpdir', 'Literal>decl:POST_CREATE_MARKER_PREFIX>VariableDeclaration')],
-  ['docker-byok-session.js|chroxy-byok-snap:', ex('docker image tag', 'TemplateElement>TemplateLiteral>return')],
-  ['docker-byok-session.js|chroxy-byok-build:', ex('docker image tag', 'TemplateElement>TemplateLiteral>return')],
-  ['docker-byok-session.js|chroxy-byok-', ex('compose project name', 'TemplateElement>TemplateLiteral>assign:_composeProject>ExpressionStatement')],
+  ['docker-byok-session.js|chroxy-byok-snap:', ex('docker image tag', 'TemplateElement>TemplateLiteral[2]>return')],
+  ['docker-byok-session.js|chroxy-byok-build:', ex('docker image tag', 'TemplateElement>TemplateLiteral[1]>return')],
+  ['docker-byok-session.js|chroxy-byok-', ex('compose project name', 'TemplateElement>TemplateLiteral[1]>assign:_composeProject>ExpressionStatement')],
 ])
 
 const SCAN_EXTS = ['.js', '.mjs', '.cjs']
@@ -133,7 +133,14 @@ const REASON_FOLLOW = 'tmpdir reached in a form the scan cannot follow'
  * bound name, an assignment its target, a property its key. Exemptions are
  * bound to this (#9212) so a literal reused at a different kind of site —
  * `join(tmpdir(), 'chroxy-byok-')` where the exempt one is a template in a
- * `const` — does not inherit the exemption.
+ * `const` — does not inherit the exemption. A template contributes its
+ * expression count (`TemplateLiteral[1]`) so a fixed name (no `${}`) at a
+ * random-suffixed site is a different shape.
+ *
+ * Shapes are EXACT ancestor chains up to the first enclosing statement, so a
+ * refactor of an exempt call site fails with the expected and found shapes. The
+ * fix is to update that entry's `site` after checking the use is still not a
+ * real tmpdir base.
  */
 function siteShape (node, ancestors) {
   const calleeName = (c) => c.type === 'Identifier' ? c.name
@@ -142,7 +149,8 @@ function siteShape (node, ancestors) {
   let child = node
   for (let i = ancestors.length - 1; i >= 0; i--) {
     const a = ancestors[i]
-    if (a.type === 'CallExpression' || a.type === 'NewExpression') {
+    if (a.type === 'TemplateLiteral') parts.push(`TemplateLiteral[${a.expressions.length}]`)
+    else if (a.type === 'CallExpression' || a.type === 'NewExpression') {
       const idx = a.arguments.indexOf(child)
       parts.push(idx >= 0 ? `call:${calleeName(a.callee)}@${idx}` : 'callee')
     } else if (a.type === 'VariableDeclarator') parts.push(`decl:${a.id.type === 'Identifier' ? a.id.name : a.id.type}`)
@@ -283,6 +291,7 @@ function scanSourceText (source, { exempt = new Map() } = {}) {
   // exempt, or reported.
   if (touches) {
     const atSite = new Map() // exempt text -> occurrences at its bound site
+    const mismatched = new Set() // texts already reported at a wrong shape
     forEachNode(ast, null, (n, parent, ancestors) => {
       const isStr = n.type === 'Literal' && typeof n.value === 'string'
       const isTpl = n.type === 'TemplateElement'
@@ -294,13 +303,39 @@ function scanSourceText (source, { exempt = new Map() } = {}) {
       exemptUsed.add(text)
       const shape = siteShape(n, ancestors)
       if (shape === rule.site) atSite.set(text, (atSite.get(text) || 0) + 1)
-      else problems.push(`${line(n)}: exempt literal ${JSON.stringify(text)} at a site other than the exempted one — found ${shape}, expected ${rule.site}; a real tmpdir base reusing an exempted literal is hidden otherwise`)
+      else {
+        mismatched.add(text)
+        problems.push(`${line(n)}: exempt literal ${JSON.stringify(text)} at a site other than the exempted one — found ${shape}, expected ${rule.site}; a real tmpdir base reusing an exempted literal is hidden otherwise`)
+      }
     })
     for (const [text, rule] of exempt) {
       const got = atSite.get(text) || 0
-      if (exemptUsed.has(text) && got !== rule.count) {
+      if (exemptUsed.has(text) && !mismatched.has(text) && got !== rule.count) {
         problems.push(`1: exempt literal ${JSON.stringify(text)} expected ${rule.count} occurrence(s) at ${rule.site}, found ${got}`)
       }
+    }
+    // A site bound to `const NAME = <exempt literal>` binds the declaration
+    // only: a later `join(tmpdir(), NAME)` (or `${NAME}` inside one) would build
+    // a real base from the exempt literal through the const (#9212).
+    const names = new Set()
+    for (const [, rule] of exempt) {
+      const m = /decl:([\w$]+)>VariableDeclaration$/.exec(rule.site)
+      if (m) names.add(m[1])
+    }
+    if (names.size) {
+      forEachNode(ast, null, (n) => {
+        if (n.type !== 'CallExpression') return
+        const c = n.callee
+        const fname = c.type === 'Identifier' ? c.name : (c.type === 'MemberExpression' && !c.computed ? c.property.name : null)
+        if ((fname !== 'join' && fname !== 'resolve') || n.arguments.length < 2 || !derived(n.arguments[0])) return
+        for (const arg of n.arguments.slice(1)) {
+          forEachNode(arg, null, (r) => {
+            if (r.type === 'Identifier' && names.has(r.name)) {
+              problems.push(`${line(r)}: exempt const ${r.name} used as a tmpdir base argument of ${fname}() — the exemption binds its declaration, not this use`)
+            }
+          })
+        }
+      })
     }
   }
   return { bases, problems, exemptUsed: [...exemptUsed] }
@@ -417,7 +452,7 @@ describe('tmpdir daemon-base roster (#8352)', () => {
     })
     it('an exempt literal at its bound site is accepted and reported as used; an unlisted one is not', () => {
       const body = "const t = tmpdir()\nconst tag = `chroxy-tag:${t}`\n"
-      const exempt = new Map([['chroxy-tag:', ex('image tag', 'TemplateElement>TemplateLiteral>decl:tag>VariableDeclaration')]])
+      const exempt = new Map([['chroxy-tag:', ex('image tag', 'TemplateElement>TemplateLiteral[1]>decl:tag>VariableDeclaration')]])
       const r = scanSourceText(IMPORT + body, { exempt })
       assert.deepEqual(r.problems, [])
       assert.deepEqual(r.exemptUsed, ['chroxy-tag:'])
@@ -425,7 +460,7 @@ describe('tmpdir daemon-base roster (#8352)', () => {
     })
 
     describe('exemptions bind to the usage site (#9212)', () => {
-      const SITE = 'TemplateElement>TemplateLiteral>decl:tag>VariableDeclaration'
+      const SITE = 'TemplateElement>TemplateLiteral[1]>decl:tag>VariableDeclaration'
       const exempt = (count = 1) => new Map([['chroxy-tag:', ex('image tag', SITE, count)]])
       const EXEMPT_SITE = "const tag = `chroxy-tag:${tmpdir()}`\n"
       const run = (body, e = exempt()) => scanSourceText(IMPORT + body, { exempt: e }).problems
@@ -445,7 +480,37 @@ describe('tmpdir daemon-base roster (#8352)', () => {
       })
       it('reported: the exempt site changed shape (same literal, different enclosing site)', () => {
         const p = run("const other = `chroxy-tag:${tmpdir()}`\n")
-        assert.ok(p.some((x) => x.includes('found TemplateElement>TemplateLiteral>decl:other')), p.join('\n'))
+        assert.ok(p.some((x) => x.includes('found TemplateElement>TemplateLiteral[1]>decl:other')), p.join('\n'))
+      })
+      it('reported: a fixed name (no interpolation) at the random-suffixed site', () => {
+        const p = run("const tag = 'chroxy-tag:'\nconst t = tmpdir()")
+        assert.ok(p.some((x) => x.includes('found Literal>decl:tag')), p.join('\n'))
+        const q = run("const tag = `chroxy-tag:`\nconst t = tmpdir()")
+        assert.ok(q.some((x) => x.includes('found TemplateElement>TemplateLiteral[0]>decl:tag')), q.join('\n'))
+      })
+      it('two exempt literals sharing one site shape are told apart by their exact text keys', () => {
+        const both = new Map([
+          ['chroxy-a:', ex('tag', 'TemplateElement>TemplateLiteral[1]>return')],
+          ['chroxy-b:', ex('tag', 'TemplateElement>TemplateLiteral[1]>return')]])
+        const body = 'const t = tmpdir()\nfunction a () { return `chroxy-a:${t}` }\nfunction b () { return `chroxy-b:${t}` }\n'
+        assert.deepEqual(run(body, both), [])
+        assert.ok(run(body + 'function c () { return `chroxy-c:${t}` }', both).some((x) => x.includes('"chroxy-c:"')))
+      })
+      describe('an exempt const is not a base through its uses', () => {
+        const CSITE = 'Literal>decl:P>VariableDeclaration'
+        const cex = new Map([['chroxy-x-', ex('container path', CSITE)]])
+        const crun = (body) => run(body, cex)
+        it('clean: the declaration and a non-base use', () => {
+          assert.deepEqual(crun("const P = 'chroxy-x-'\nconst t = tmpdir()\nconst m = `${P}${t}`\nconst q = join('/x', P)"), [])
+        })
+        it('reported: join(tmpdir(), P)', () => {
+          const p = crun("const P = 'chroxy-x-'\nconst b = join(tmpdir(), P)")
+          assert.ok(p.some((x) => x.includes('exempt const P used as a tmpdir base')), p.join('\n'))
+        })
+        it('reported: P interpolated inside such a call', () => {
+          const p = crun("const P = 'chroxy-x-'\nconst b = join(tmpdir(), `${P}abc`)")
+          assert.ok(p.some((x) => x.includes('exempt const P used as a tmpdir base')), p.join('\n'))
+        })
       })
       it('stale: the exempted literal is gone, so it is not reported as used', () => {
         const r = scanSourceText(IMPORT + 'const t = tmpdir()', { exempt: exempt() })
