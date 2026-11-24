@@ -11,7 +11,7 @@ specification and defines the vocabulary: report, check, key table, ledger).
 
 The code is in `packages/server/src/freshness/`. `src` is in the published
 package's `files`, so **it ships**. Nothing in the daemon imports it yet and
-nothing starts it: it is a library until a runner is added (#9282).
+nothing in the daemon starts it. The read-only runner that ticks it over live sources is described in [`freshness-runner.md`](freshness-runner.md) (#9282).
 
 The model's pure rule modules moved there from `tests/freshness/model/`
 (`hash`, `keys`, `grade`, `config`, `ledger`, `checks`, `derive`, `policy`,
@@ -119,7 +119,7 @@ that hold message text.
 
 Live sources are kept out of `src/freshness/`: that directory's isolation test
 allows no import of the daemon's transcript locator. They ship in the package
-with the rest of `src`, and like the core nothing imports them yet (#9282).
+with the rest of `src`; the runner (`src/freshness-runner/`, see [`freshness-runner.md`](freshness-runner.md)) wires them, and nothing in the daemon imports them.
 Register the capabilities each exports (`CLAUDE_TRANSCRIPT_CAPS`,
 `CODEX_TRANSCRIPT_CAPS`) in the reconciler's configuration under the adapter's
 source name.
@@ -206,7 +206,7 @@ nothing and the day is clipped to its UTC window (shifted by an offset).
 Active time is wall time with at least one busy session of the application, not
 a sum over sessions. A day must be a real date (1970 or later) and the offset within 14 hours of UTC, or the meter throws. The meter is separate from provider quota (#6778). Running
 either against the real registry, and where samples are kept between ticks, are
-for the runner (#9282).
+for a later slice: the runner does not run the meter.
 
 ## Relation to the daemon's stall alerts (#8709)
 

@@ -117,6 +117,26 @@ function inside(child, parent) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
+/**
+ * The real path of `p`: the real path of its deepest existing ancestor with the
+ * names below it (which do not exist yet) appended. A symlink anywhere above
+ * the path is resolved, so two spellings of one directory compare equal.
+ */
+function realish(p) {
+  let cur = path.resolve(p)
+  const tail = []
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(cur), ...tail.reverse())
+    } catch (err) {
+      const parent = path.dirname(cur)
+      if (parent === cur || (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR')) return path.resolve(p)
+      tail.push(path.basename(cur))
+      cur = parent
+    }
+  }
+}
+
 function readLock(lockPath) {
   let text
   let mtimeMs
@@ -310,7 +330,7 @@ function writeAll(fd, buf) {
 export function openFileLedger({ dir, ledgerId, now, leaseMs = DEFAULT_LEASE_MS, guard = writerGuard, keepOutOf = [], pid, host, isAlive }) {
   if (!dir || !ledgerId) throw new TypeError('openFileLedger: dir and ledgerId are required')
   for (const p of keepOutOf) {
-    if (inside(dir, p)) throw new TypeError(`openFileLedger: the ledger must be kept outside ${p}`)
+    if (inside(dir, p) || inside(realish(dir), realish(p))) throw new TypeError(`openFileLedger: the ledger must be kept outside ${p}`)
   }
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const file = path.join(dir, LEDGER_FILE)
