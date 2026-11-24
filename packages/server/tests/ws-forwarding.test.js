@@ -1056,29 +1056,30 @@ describe('setupForwarding', () => {
       registerProvider('test-create-failure-list-8988', RejectingStart8988)
 
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-8988-'))
-      const sm = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: join(dir, 'session-state.json') })
+      let sm = null
       try {
+        sm = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: join(dir, 'session-state.json') })
         const listsSent = []
-        let failedId = null
+        // Stub mirrors ws-server.js's broadcastSessionList, which reads listSessions() at fire time.
         const broadcastSessionList = mock.fn(() => {
-          // What the real ws-server broadcast builds: the manager's list at fire time.
           listsSent.push(sm.listSessions().map((r) => r.sessionId))
         })
         const ctx = makeCtx({ sessionManager: sm, broadcastSessionList })
         setupForwarding(ctx)
-        sm.on('session_create_failed', (e) => { failedId = e.sessionId })
+        // Wait on the real event, registered before the create triggers it.
+        const failed = new Promise((resolve) => sm.once('session_create_failed', resolve))
 
         const id = sm.createSession({ cwd: dir, name: 'Doomed', provider: 'test-create-failure-list-8988' })
         assert.ok(sm.listSessions().some((r) => r.sessionId === id), 'listed while its start is pending')
-        for (let i = 0; i < 10; i++) await Promise.resolve()
-        assert.equal(failedId, id, 'the start rejection surfaced as session_create_failed')
+        const failedEvent = await failed
+        assert.equal(failedEvent.sessionId, id, 'the start rejection surfaced as session_create_failed')
         assert.equal(broadcastSessionList.mock.callCount(), 0, 'not synchronously, inside the emit')
         await nextLoopTurn()
 
         assert.equal(listsSent.length, 1, 'exactly one list')
         assert.ok(!listsSent[0].includes(id), 'the list built when the queued turn fires omits the failed session')
       } finally {
-        sm.destroyAll()
+        sm?.destroyAll()
         rmSync(dir, { recursive: true, force: true })
       }
     })
