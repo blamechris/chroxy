@@ -115,7 +115,6 @@ describe('a child process started with a literal script path is followed or reco
       run('node', ['-p', "JSON.stringify(require('./packages/server/package.json'))"], { cwd: ROOT })
       spawnSync('node', ['--input-type=module', '-e', 'await import("x")'], { encoding: 'utf8' })
       spawnSync('node', ['--eval=1'])
-      spawnSync('bash', ['-c', 'echo hi'])
       spawnSync('node')
       run('npm', ['run', 'build', '-w', '@chroxy/protocol'], { cwd: ROOT })
       run('tar', ['tzf', 'a.tgz'])
@@ -128,8 +127,8 @@ describe('a child process started with a literal script path is followed or reco
     assert.deepEqual(result.modules, [VERIFY_SCRIPT])
   })
 
-  it('does not follow a command string that merely names a script path as an argument of a non-interpreter', () => {
-    assert.deepEqual(discover(`${CP}spawnSync('tar', ['tzf', 'scripts/x.mjs'])`).inputs, [])
+  it('refuses (never ignores) a script-looking argument to a program that is not an interpreter, even tar', () => {
+    assert.throws(() => discover(`${CP}spawnSync('tar', ['tzf', 'scripts/x.mjs'])`), /runs program 'tar' with script argument 'scripts\/x\.mjs'/)
   })
 
   for (const [label, source, message] of [
@@ -141,15 +140,15 @@ describe('a child process started with a literal script path is followed or reco
     ['a spread inside the argument array', `${CP}spawnSync('node', [...rest, 'scripts/x.mjs'])`, /with computed arguments/],
     ['a built argument array', `${CP}spawnSync('node', ['a'].concat(s))`, /with computed arguments/],
     ['a computed fork module', `${CP}fork(modulePath)`, /child process 'fork' needs a literal script path/],
-    ['a node flag that takes a separate value', `${CP}spawnSync('node', ['--import', './hook.mjs', 'scripts/x.mjs'])`, /passes '--import' to 'node'/],
+    ['a node flag that takes a separate value', `${CP}spawnSync('node', ['--import', './hook.mjs', 'scripts/x.mjs'])`, /passes flag '--import' to 'node'/],
     ['a shell command string (exec)', "import { exec } from 'node:child_process'; exec('node scripts/x.mjs')", /child process 'exec' runs a shell command string/],
     ['a shell command string (execSync)', "import { execSync } from 'node:child_process'; execSync('bash scripts/x.sh')", /child process 'execSync' runs a shell command string/],
     ['a script outside the repo', `${CP}spawnSync('node', ['../outside.mjs'])`, /escapes the repo/],
-    ['an absolute script path', `${CP}spawnSync('node', ['/tmp/x.mjs'])`, /escapes the repo|absolute/],
+    ['an absolute script path', `${CP}spawnSync('node', ['/tmp/x.mjs'])`, /input path escapes the repo/],
     ['a URL script path', `${CP}spawnSync('node', ['file:///tmp/x.mjs'])`, /without URL suffixes/],
     ['a script with a query', `${CP}spawnSync('node', ['scripts/x.mjs?v=1'])`, /without URL suffixes/],
-    ['a cwd that is not the repo root', `${CP}spawnSync('node', ['scripts/x.mjs'], { cwd: '/tmp' })`, /its cwd must be the repo root/],
-    ['a computed cwd', `${CP}spawnSync('node', ['scripts/x.mjs'], { cwd: elsewhere })`, /its cwd must be the repo root/],
+    ['a cwd that is not the repo root', `${CP}spawnSync('node', ['scripts/x.mjs'], { cwd: '/tmp' })`, /cwd that is not the repo root/],
+    ['a computed cwd', `${CP}spawnSync('node', ['scripts/x.mjs'], { cwd: elsewhere })`, /cwd that is not the repo root/],
     ['spread options', `${CP}spawnSync('node', ['scripts/x.mjs'], { ...opts })`, /options discovery cannot resolve/],
     ['an options variable', `${CP}spawnSync('node', ['scripts/x.mjs'], opts)`, /options discovery cannot resolve/],
   ]) {
@@ -163,12 +162,11 @@ describe('a child process started with a literal script path is followed or reco
   })
 
   describe('against the real verifier', () => {
-    it('the real verifier still passes unchanged, with the same inputs it had', () => {
+    it('the real verifier still passes unchanged, with exactly the inputs the base helper (64423ce60) found', () => {
       const result = discoverPublishInputs({ readSource: p => readFileSync(`${ROOT}${p}`, 'utf8') })
       assert.deepEqual(result.packages, ['protocol', 'store-core', 'server'])
-      assert.ok(result.inputs.includes('scripts/lib/classify-doctor-output.mjs'))
-      assert.ok(result.inputs.includes('scripts/lib/daemon-entry-modules.mjs'))
-      assert.ok(result.inputs.every(p => !p.endsWith('.sh')), JSON.stringify(result.inputs))
+      // Captured by running the base helper on the real tree, not copied from this helper's output.
+      assert.deepEqual(result.inputs, ['scripts/lib/classify-doctor-output.mjs', 'scripts/lib/daemon-entry-modules.mjs'])
     })
 
     it('sees a spawn through the verifier own run() wrapper: a computed script is refused', () => {
@@ -215,7 +213,7 @@ describe('a drifted exemption snippet is named, and nothing newly passes (#9150)
     assert.throws(() => discoverReal(source => `${source}\n${loop}\n`), /PACKAGES has 5 uses, expected its declaration plus the pack loop, build loop and entryPointsFor filter/)
   })
 
-  it('a second entryPointsFor declaration is named', () => {
+  it('an entryPointsFor that is no longer a function declaration is named (a true duplicate is a syntax error)', () => {
     assert.throws(() => discoverReal(replaceOnce('function entryPointsFor(pkg) {', 'const entryPointsFor = function (pkg) {')), /entryPointsFor must be declared exactly once/)
   })
 
@@ -237,13 +235,13 @@ describe('a drifted exemption snippet is named, and nothing newly passes (#9150)
 
 describe('code loaders discovery cannot follow are refused, not ignored (#9150)', () => {
   for (const [label, source, message] of [
-    ['process.getBuiltinModule', "const fs = process.getBuiltinModule('fs')", /process\.getBuiltinModule\(\) loads modules/],
-    ['process.binding', "process.binding('fs')", /process\.binding\(\) loads modules/],
-    ['process bracket binding', "process['binding']('fs')", /process\.binding\(\) loads modules/],
-    ['process bracket getBuiltinModule', "process['getBuiltinModule']('fs')", /process\.getBuiltinModule\(\) loads modules/],
-    ['optional-chained binding', "process?.binding?.('fs')", /process\.binding\(\) loads modules/],
-    ['globalThis.process.binding', "globalThis.process.binding('fs')", /process\.binding\(\) loads modules/],
-    ['an aliased binding', "const load = process.binding", /process\.binding\(\) loads modules/],
+    ['process.getBuiltinModule', "const fs = process.getBuiltinModule('fs')", /process\.getBuiltinModule loads or runs code/],
+    ['process.binding', "process.binding('fs')", /process\.binding loads or runs code/],
+    ['process bracket binding', "process['binding']('fs')", /process\.binding loads or runs code/],
+    ['process bracket getBuiltinModule', "process['getBuiltinModule']('fs')", /process\.getBuiltinModule loads or runs code/],
+    ['optional-chained binding', "process?.binding?.('fs')", /process\.binding loads or runs code/],
+    ['globalThis.process.binding', "globalThis.process.binding('fs')", /process\.binding loads or runs code/],
+    ['an aliased binding', "const load = process.binding", /process\.binding loads or runs code/],
     ['a computed process member', 'process[name]("fs")', /computed process\[\.\.\.\] member/],
     ['eval', "eval('1')", /eval\(\) runs code/],
     ['an indirect eval', ";(0, eval)('1')", /eval\(\) runs code/],
@@ -264,7 +262,7 @@ describe('code loaders discovery cannot follow are refused, not ignored (#9150)'
   })
 
   it('refuses them inside a followed spawned script', () => {
-    assert.throws(() => discover(`${CP}spawnSync('node', ['scripts/x.mjs'])`, { 'scripts/x.mjs': "process.binding('fs')" }), /scripts\/x\.mjs:\d+: .*process\.binding\(\)/)
+    assert.throws(() => discover(`${CP}spawnSync('node', ['scripts/x.mjs'])`, { 'scripts/x.mjs': "process.binding('fs')" }), /scripts\/x\.mjs:\d+: .*process\.binding/)
   })
 
   it('does not refuse look-alikes: other objects, keys, strings and comments', () => {
@@ -278,5 +276,160 @@ describe('code loaders discovery cannot follow are refused, not ignored (#9150)'
       class Function2 {}
     `)
     assert.deepEqual(result.inputs, [])
+  })
+})
+
+describe('child-process flags are per interpreter and refuse-by-default (#9150 review)', () => {
+  const files = { 'scripts/x.mjs': '', 'scripts/x.sh': '', 'scripts/x.py': '' }
+  for (const [label, source, expected] of [
+    ['bash -e (errexit) then the script', `${CP}spawnSync('bash', ['-e', 'scripts/x.sh'])`, ['scripts/x.sh']],
+    ['sh -x -u then the script', `${CP}spawnSync('sh', ['-u', '-x', 'scripts/x.sh'])`, ['scripts/x.sh']],
+    ['shell -- then the script', `${CP}spawnSync('bash', ['--', 'scripts/x.sh'])`, ['scripts/x.sh']],
+    ['python -u -B then the script', `${CP}spawnSync('python3', ['-u', '-B', 'scripts/x.py'])`, ['scripts/x.py']],
+    ['node --no-warnings --input-type=commonjs', `${CP}spawnSync('node', ['--no-warnings', '--input-type=commonjs', 'scripts/x.mjs'])`, ['scripts/x.mjs']],
+    ['node -- then the script', `${CP}spawnSync('node', ['--', 'scripts/x.mjs'])`, ['scripts/x.mjs']],
+  ]) {
+    it(`follows ${label}`, () => assert.deepEqual(discover(source, files).inputs, expected))
+  }
+
+  for (const [label, source, message] of [
+    ['bash -c', `${CP}spawnSync('bash', ['-c', 'node scripts/x.mjs'])`, /passes '-c' to 'bash': inline code or a command string/],
+    ['sh -c', `${CP}spawnSync('sh', ['-c', 'echo hi'])`, /passes '-c' to 'sh'/],
+    ['python -c', `${CP}spawnSync('python3', ['-c', 'print(1)'])`, /passes '-c' to 'python3'/],
+    ['python -m', `${CP}spawnSync('python', ['-m', 'http.server'])`, /passes '-m' to 'python'/],
+    ['bash -p (not a shell allowlist flag)', `${CP}spawnSync('bash', ['-p', 'scripts/x.sh'])`, /passes flag '-p' to 'bash'/],
+    ['python -e', `${CP}spawnSync('python3', ['-e', 'scripts/x.py'])`, /passes flag '-e' to 'python3'/],
+    ['node --import=', `${CP}spawnSync('node', ['--import=./h.mjs', 'scripts/x.mjs'])`, /passes flag '--import=\.\/h\.mjs'/],
+    ['node --require=', `${CP}spawnSync('node', ['--require=./h.cjs', 'scripts/x.mjs'])`, /passes flag '--require=\.\/h\.cjs'/],
+    ['node -r attached', `${CP}spawnSync('node', ['-r./h.cjs', 'scripts/x.mjs'])`, /passes flag '-r\.\/h\.cjs'/],
+    ['node --loader=', `${CP}spawnSync('node', ['--loader=./l.mjs', 'scripts/x.mjs'])`, /passes flag '--loader=\.\/l\.mjs'/],
+    ['node --env-file=', `${CP}spawnSync('node', ['--env-file=.env', 'scripts/x.mjs'])`, /passes flag '--env-file=\.env'/],
+    ['node --import separate', `${CP}spawnSync('node', ['--import', './h.mjs', 'scripts/x.mjs'])`, /passes flag '--import' to 'node'/],
+    ['node bare -', `${CP}spawnSync('node', ['-', 'scripts/x.mjs'])`, /passes flag '-' to 'node'/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source, files), message))
+  }
+
+  it('node inline code stays accepted and is not analysed (documented limit)', () => {
+    assert.deepEqual(discover(`${CP}spawnSync('node', ['--input-type=module', '--eval', 'await import("x")'])`).inputs, [])
+    assert.deepEqual(discover(`${CP}spawnSync('node', ['-pe', '1'])`).inputs, [])
+  })
+})
+
+describe('the program a child process runs is resolved or its script arguments refused (#9150 review)', () => {
+  const files = { 'scripts/x.mjs': '', 'scripts/x.ts': '', 'scripts/x.sh': '' }
+  for (const [label, source] of [
+    ['process.execPath', `${CP}execFileSync(process.execPath, ['scripts/x.mjs'])`],
+    ['a const bound to a literal', `${CP}const NODE = 'node'\nspawnSync(NODE, ['scripts/x.mjs'])`],
+    ['a const through the wrapper', `${CP}${WRAPPER}const NODE = 'node'\nrun(NODE, ['scripts/x.mjs'])`],
+    ['a computed key on the namespace with a literal key', "import * as cp from 'node:child_process'; cp['spawnSync']('node', ['scripts/x.mjs'])"],
+  ]) {
+    it(`follows ${label}`, () => assert.deepEqual(discover(source, files).inputs, ['scripts/x.mjs']))
+  }
+
+  for (const [label, source, message] of [
+    ['tsx', `${CP}spawnSync('tsx', ['scripts/x.ts'])`, /runs program 'tsx' with script argument 'scripts\/x\.ts'/],
+    ['env', `${CP}spawnSync('env', ['node', 'scripts/x.mjs'])`, /runs program 'env' with script argument/],
+    ['npx', `${CP}spawnSync('npx', ['tsx', 'scripts/x.ts'])`, /runs program 'npx'/],
+    ['deno', `${CP}spawnSync('deno', ['run', 'scripts/x.ts'])`, /runs program 'deno'/],
+    ['bun', `${CP}spawnSync('bun', ['scripts/x.ts'])`, /runs program 'bun'/],
+    ['perl', `${CP}spawnSync('perl', ['scripts/x.pl'])`, /runs program 'perl'/],
+    ['ruby', `${CP}spawnSync('ruby', ['scripts/x.rb'])`, /runs program 'ruby'/],
+    ['an unresolved program', `${CP}spawnSync(chosenProgram, ['scripts/x.mjs'])`, /runs a computed program with script argument/],
+    ['a reassigned program variable', `${CP}let NODE = 'node'; NODE = other; spawnSync(NODE, ['scripts/x.mjs'])`, /runs a computed program with script argument/],
+    ['an unresolved program through the wrapper', `${CP}${WRAPPER}run(chosen, ['scripts/x.sh'])`, /child process 'wrapper' runs a computed program with script argument 'scripts\/x\.sh'/],
+  ]) {
+    it(`refuses ${label} given a script argument`, () => assert.throws(() => discover(source, files), message))
+  }
+
+  it('still accepts the verifier shapes: unresolved bin, npm, tar, mkdir with no script argument', () => {
+    const source = `${CP}${WRAPPER}${ROOT_DECL}const work = f(); const bin = g()
+      run(bin, ['--version'], { env: {} })
+      spawnSync(bin, ['doctor'], { timeout: 1 })
+      run('npm', ['pack', '-w', '@chroxy/protocol', '--pack-destination', work], { cwd: ROOT })
+      run('tar', ['tzf', work])
+      run('mkdir', ['-p', work])`
+    assert.deepEqual(discover(source).inputs, [])
+  })
+})
+
+describe('wrappers and aliases of child_process fail closed (#9150 review)', () => {
+  const files = { 'scripts/x.mjs': '' }
+  it('recognises a wrapper of a wrapper that forwards its parameters', () => {
+    assert.deepEqual(discover(`${CP}${WRAPPER}const go = (c, a) => run(c, a)\ngo('node', ['scripts/x.mjs'])`, files).inputs, ['scripts/x.mjs'])
+  })
+  it('follows a wrapper of a wrapper whose program is computed only when no script is named', () => {
+    assert.deepEqual(discover(`${CP}${WRAPPER}const go = (c, a) => run(c, a)\ngo(bin, ['--version'])`).inputs, [])
+  })
+
+  for (const [label, source, message] of [
+    ['a wrapper that swaps its parameters', `${CP}const go = (a, b) => spawnSync(b, [a])\ngo('scripts/x.mjs', 'node')`, /local function 'go' reaches a child process without forwarding/],
+    ['a wrapper that forwards only one parameter', `${CP}const go = (c, a) => spawnSync(c, [...a])\ngo('node', [])`, /local function 'go' reaches a child process without forwarding/],
+    ['a wrapper whose first argument is not its first parameter', `${CP}function go(c, a) { return spawnSync(a, a) }\ngo('node', ['scripts/x.mjs'])`, /local function 'go' reaches a child process without forwarding/],
+    ['a wrapper that forwards in the wrong order', `${CP}function go(c, a) { return spawnSync(a, c) }\ngo(['x'], 'node')`, /local function 'go' reaches a child process without forwarding/],
+    ['a wrapper of an opaque wrapper', `${CP}const inner = (a, b) => spawnSync(b, [a])\nconst outer = (c, a) => inner(c, a)\nouter('node', ['x'])`, /local function '(?:inner|outer)' reaches a child process without forwarding/],
+    ['a wrapper aliased to another name', `${CP}${WRAPPER}const go = run\ngo('node', ['scripts/x.mjs'])`, /child process wrapper 'run' may only be called directly/],
+    ['a wrapper passed as a value', `${CP}${WRAPPER}[['node', ['scripts/x.mjs']]].map(([c, a]) => 1); const list = [run]`, /child process wrapper 'run' may only be called directly/],
+    ['an aliased member', "import * as cp from 'node:child_process'; const f = cp.spawnSync; f('node', ['scripts/x.mjs'])", /child_process binding 'cp' may only be called directly/],
+    ['a destructured namespace', "import * as cp from 'node:child_process'; const { spawn } = cp; spawn('node', ['scripts/x.mjs'])", /child_process binding 'cp' may only be called directly/],
+    ['a named import used as a value', `${CP}const f = spawnSync; f('node', ['scripts/x.mjs'])`, /child_process binding 'spawnSync' may only be called directly/],
+    ['.call on a named import', `${CP}execFileSync.call(null, 'node', ['scripts/x.mjs'])`, /child_process binding 'execFileSync' may only be called directly/],
+    ['a computed non-literal key', "import * as cp from 'node:child_process'; cp[name]('node', ['scripts/x.mjs'])", /child_process binding 'cp' may only be called directly/],
+    ['the function passed as an argument', `${CP}[1].map(spawnSync)`, /child_process binding 'spawnSync' may only be called directly/],
+    ['a dynamic import', "const cp = await import('node:child_process')", /dynamic child_process bindings/],
+    ['a dynamic import (bare)', "await import('child_process')", /dynamic child_process bindings/],
+    ['a re-export', "export { spawn } from 'node:child_process'", /child_process re-exports/],
+    ['a shadowed binding', `${CP}function f(spawnSync) { spawnSync('node', ['scripts/x.mjs']) }`, /shadowed built-in binding 'spawnSync'/],
+    ['an unknown child_process export', "import { ChildProcess } from 'node:child_process'; ChildProcess()", /child process 'ChildProcess' is not understood/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source, files), message))
+  }
+})
+
+describe('options of a followed script are an allowlist (#9150 review)', () => {
+  const files = { 'scripts/x.mjs': '' }
+  it('follows a fork or spawn with allowed literal options (env contents are not analysed)', () => {
+    assert.deepEqual(discover(`${CP}${ROOT_DECL}fork('scripts/x.mjs', { cwd: ROOT, stdio: 'inherit' })`, files).inputs, ['scripts/x.mjs'])
+    assert.deepEqual(discover(`${CP}fork('scripts/x.mjs', ['a', 'b'], { env: { NODE_OPTIONS: '--x' }, timeout: 1, maxBuffer: 2, encoding: 'utf8', input: 'i' })`, files).inputs, ['scripts/x.mjs'])
+  })
+  for (const [label, source, message] of [
+    ['fork execArgv as the second argument', `${CP}fork('scripts/x.mjs', { execArgv: ['--import=./h.mjs'] })`, /with option 'execArgv'/],
+    ['fork execPath after an args array', `${CP}fork('scripts/x.mjs', ['a'], { execPath: '/bin/other' })`, /with option 'execPath'/],
+    ['fork options that are a variable', `${CP}fork('scripts/x.mjs', opts)`, /options discovery cannot resolve/],
+    ['fork options with a spread', `${CP}fork('scripts/x.mjs', { ...opts })`, /options discovery cannot resolve/],
+    ['spawnSync shell: true', `${CP}spawnSync('node', ['scripts/x.mjs'], { shell: true })`, /with option 'shell'/],
+    ['spawnSync argv0', `${CP}spawnSync('node', ['scripts/x.mjs'], { argv0: 'other' })`, /with option 'argv0'/],
+    ['a cwd that is not the repo root', `${CP}fork('scripts/x.mjs', { cwd: '/tmp' })`, /cwd that is not the repo root/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source, files), message))
+  }
+})
+
+describe('loader aliases and escapes are refused (#9150 review)', () => {
+  for (const [label, source, message] of [
+    ['an aliased Function', 'const F = Function', /new Function\(\) runs code/],
+    ['Reflect.construct(Function)', "Reflect.construct(Function, ['return 1'])", /new Function\(\) runs code/],
+    ['a bare process value', 'const p = process', /'process' used as a bare value/],
+    ['a bare globalThis value', 'const g = globalThis', /'globalThis' used as a bare value/],
+    ['a bare global value', 'const g = global', /'global' used as a bare value/],
+    ['process passed as an argument', 'f(process)', /'process' used as a bare value/],
+    ['an imported process used bare', "import proc from 'node:process'; const p = proc", /'proc' used as a bare value/],
+    ['an imported process binding', "import proc from 'node:process'; proc.binding('fs')", /process\.binding/],
+    ['process.dlopen', "process.dlopen(module, 'x.node')", /process\.dlopen/],
+    ['process.mainModule', 'const m = process.mainModule', /process\.mainModule/],
+    ['a named getBuiltinModule import', "import { getBuiltinModule } from 'node:process'", /importing 'getBuiltinModule' from process/],
+    ['a named binding import', "import { binding as b } from 'process'", /importing 'binding' from process/],
+    ['a named dlopen import', "import { dlopen } from 'process'", /importing 'dlopen' from process/],
+    ['static vm', "import vm from 'node:vm'", /'node:vm' runs code or threads/],
+    ['bare vm', "import { runInThisContext } from 'vm'", /'vm' runs code or threads/],
+    ['dynamic vm', "await import('node:vm')", /'node:vm' runs code or threads/],
+    ['static worker_threads', "import { Worker } from 'node:worker_threads'", /'node:worker_threads' runs code or threads/],
+    ['dynamic worker_threads', "await import('worker_threads')", /'worker_threads' runs code or threads/],
+  ]) {
+    it(`refuses ${label}`, () => assert.throws(() => discover(source), message))
+  }
+
+  it('still accepts members of process, globalThis and an imported process', () => {
+    assert.deepEqual(discover("import proc from 'node:process'; const a = process.env.HOME + proc.argv.length + globalThis.setTimeout.name + process.execPath").inputs, [])
   })
 })
