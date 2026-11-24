@@ -30,11 +30,12 @@ import { planConfig, run, trackedSessions } from './runtime.js'
 import { H } from './hash.js'
 import { safeList, safeRead, sealAdapter } from './adapter.js'
 import { STATE_FILE_CAPS, STATE_FILE_SOURCE } from './state-file-adapter.js'
+import { REGISTRY_CAPS, REGISTRY_SOURCE } from './session-registry-adapter.js'
 
-/** The model's configuration with the state-file source's capabilities added. */
+/** The model's configuration with the state-file and session-registry sources' capabilities added. */
 export function coreConfig(overrides = {}) {
   const { sources, ...rest } = overrides
-  return makeConfig({ ...rest, sources: { [STATE_FILE_SOURCE]: STATE_FILE_CAPS, ...(sources ?? {}) } })
+  return makeConfig({ ...rest, sources: { [STATE_FILE_SOURCE]: STATE_FILE_CAPS, [REGISTRY_SOURCE]: REGISTRY_CAPS, ...(sources ?? {}) } })
 }
 
 /**
