@@ -3006,7 +3006,11 @@ replaces the search with identity plus observation:
   newline-terminated line, or not a plain pid FAILS the case;
 - liveness is observed for that pid with `ps` and `kill(pid, 0)` together, in a
   bounded wait of up to 25 looks 0.2 s apart; "gone" and "zombie" pass,
-  "present" and "unknown" (including the two observers disagreeing) fail;
+  "present" and "unknown" (including the two observers disagreeing) fail. A
+  zombie passes because a `Z` row has terminated and is only waiting to be
+  collected; once the bounded call has returned, its parent is whatever adopted
+  it, so a lingering one describes the host's init, not the wrapper (the harness
+  passes it with a "has NOT been collected" note);
 - the harness sends no signal and uses no `pgrep`/`pkill`/`killall` pattern;
   a surviving fixture is released by removing its own file;
 - a fixture that ends on its own writes `<fixture>.ended`, and a pid that ended
@@ -3016,8 +3020,10 @@ replaces the search with identity plus observation:
 original harness exits 0 with both fixtures alive, and the modified harness
 exits 1 with exactly the two liveness cases red, naming the pids the stand-in
 started. An identity never written, malformed or unterminated also goes red. A
-reviewer re-ran the same stand-in on Linux (Debian 12, bash 5.2, procps 4.0.2)
-and saw the same two cases red. The entry's writer did not re-run any of these.
+reviewer ran a stand-in that returns 124 and reaps nothing on Linux (Debian 12,
+bash 5.2, procps 4.0.2): both liveness cases went red there, and so did other
+cases, the passthrough-rc ones, which an always-124 stand-in breaks by
+construction. The entry's writer did not re-run any of these.
 
 **The fix's first revision carried a second instance, caught in review before
 landing.** Its "terminated" branch accepted a `Z` row from `ps` before checking
