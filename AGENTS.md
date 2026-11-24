@@ -359,6 +359,8 @@ The recurring causes:
   among them. The bug report's own table listed five of the eleven, and the
   enumeration written to replace it found a seventeenth file nobody had scoped
   in (`#7653`)
+- a search keyed on a property the subject itself changes — `pgrep -f` for a
+  fixture that had `exec`ed away its own argv (`#9088`)
 
 **Collapse to a boolean before asserting against file text.** A failing
 `assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`

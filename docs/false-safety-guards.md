@@ -2962,3 +2962,87 @@ like to it. A no-op check should compare against a snapshot of the starting
 state, not against the vocabulary of the starting state — and the snapshot must
 share no object with the state the handler can reach, or it is a second name for
 the thing being checked.
+
+### 38. The reaping assertion that searched for a name the fixture had given up — `#9088`
+
+`scripts/__tests__/run-with-timeout.test.sh` has two cases that exist to show a
+TERM-ignoring command is actually gone after `run_with_timeout`'s bound and KILL
+escalation, not merely that the call returned 124 in time (real backend, and
+the forced perl fallback). Each claimed "no leftover process" and checked it
+with `pgrep -f "$term_script"`: the fixture's path.
+
+The fixture was:
+
+```bash
+#!/usr/bin/env bash
+trap '' TERM
+exec sleep 40
+```
+
+After the `exec`, the process's argv is `sleep 40`. The path matched nothing
+whether the process was alive or dead, so "no such process" and "a process this
+search cannot see" were the same answer, and the guard's only observable
+outcome was pass. The search key was a property of the subject (its argv) that
+the subject itself replaced before the search ran.
+
+Found while validating `#8579`'s fixture-allocation fix: a control run with a
+stand-in wrapper that kept the exit-code contract (the command's own code, 124
+at the bound) and reaped nothing still passed both cases. Measured on macOS per
+the issue: the original harness exited 0 with `passed: 12  failed: 0` while
+both fixture pids were still alive as `sleep 40`. The same stand-in with a
+fixture that did not `exec` made both cases fail, so `pgrep` worked; the key
+was what was wrong. A regression in either escalation path (GNU `timeout -k 10`
+or the perl grace-then-KILL loop) that returned 124 without ending the process
+would have shipped green. Two of the twelve passes were not evidence of reaping.
+
+Deleting the `exec`, or matching a different argv substring, would only have
+moved the problem: the key would still belong to the thing being observed.
+
+The fix (`#9090`, test-only; `scripts/lib/run-with-timeout.sh` unchanged)
+replaces the search with identity plus observation:
+
+- the fixture writes its own pid to `<fixture>.pid` after it starts ignoring
+  TERM, and a record that is missing, unreadable, not exactly one
+  newline-terminated line, or not a plain pid FAILS the case;
+- liveness is observed for that pid with `ps` and `kill(pid, 0)` together, in a
+  bounded wait of up to 25 looks 0.2 s apart; "gone" and "zombie" pass,
+  "present" and "unknown" (including the two observers disagreeing) fail. A
+  zombie passes because a `Z` row has terminated and is only waiting to be
+  collected; once the bounded call has returned, its parent is whatever adopted
+  it, so a lingering one describes the host's init, not the wrapper (the harness
+  passes it with a "has NOT been collected" note);
+- the harness sends no signal and uses no `pgrep`/`pkill`/`killall` pattern;
+  a surviving fixture is released by removing its own file;
+- a fixture that ends on its own writes `<fixture>.ended`, and a pid that ended
+  with that marker fails, because the wrapper did not end it.
+
+**Proof.** Per the PR: with a wrapper that returns 124 and reaps nothing, the
+original harness exits 0 with both fixtures alive, and the modified harness
+exits 1 with exactly the two liveness cases red, naming the pids the stand-in
+started. An identity never written, malformed or unterminated also goes red. A
+reviewer ran a stand-in that returns 124 and reaps nothing on Linux (Debian 12,
+bash 5.2, procps 4.0.2): both liveness cases went red there, and so did other
+cases, the passthrough-rc ones, which an always-124 stand-in breaks by
+construction. The entry's writer did not re-run any of these.
+
+**The fix's first revision carried a second instance, caught in review before
+landing.** Its "terminated" branch accepted a `Z` row from `ps` before checking
+that `ps` had succeeded or had listed the asking process, so a failing or
+partial `ps` could pass the case. That is the same shape one layer down: a
+"cannot observe" outcome and a "terminated" outcome reading alike. The merged
+probe counts nothing `ps` prints unless it exited 0, every line is one
+well-formed row for one of the two pids asked about, and the harness's own pid
+is among them. Asking about the harness in the same call is what makes a `ps`
+exit status meaningful: a `ps` able to look exits 0 even when the fixture is
+gone, so a failing, silent or partial one is "unknown", not "gone". The PR
+records this as tested on macOS, with the reviewer's Linux run confirming it
+for procps.
+
+**Guard against it:** when a check looks for a thing by a property of that
+thing, ask whether the thing controls that property. A process can replace its
+argv, a file can be renamed, a record can be rewritten: the search then reports
+"not found" for a subject that is still there. Identify the subject by
+something it cannot change out from under you (a pid it recorded, a handle you
+hold), and make "could not identify" and "could not observe" fail, never pass.
+The same holds for the observer: one that cannot tell "absent" from "unable to
+look" reports the same outcome for both.
