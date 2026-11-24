@@ -4,14 +4,22 @@
  * stale holder fenced). Each rule has a mutant that must fail its check.
  */
 
-import { afterEach } from 'node:test'
+import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, proves, rig } from './helpers.js'
+import { MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
+
+const proves = (name, check, mutants = {}) =>
+  describe(name, () => {
+    it('holds on the real code', async () => {
+      await check(REAL)
+    })
+    for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKill(check, label, edits))
+  })
 
 const { keys } = REAL
 const edit = (file, from, to) => ({ file, from, to })
@@ -50,7 +58,7 @@ proves(
   },
   {
     'no exclusive create': [edit('file-ledger.js', "fs.openSync(lockPath, 'wx', 0o600)", "fs.openSync(lockPath, 'w', 0o600)")],
-    'every lock is stale': [edit('file-ledger.js', 'if (now - mtimeMs > leaseMs) return true', 'return true')],
+    'every lock is stale': [edit('file-ledger.js', 'return !isAlive(holder.pid)', 'return true')],
     'the staleness test is skipped': [edit('file-ledger.js', 'if (!rules.isStale({ holder: found.holder, mtimeMs: found.mtimeMs, now, leaseMs, host, isAlive })) {', 'if (false) {')],
   },
 )
@@ -89,7 +97,7 @@ proves(
     mustRefuse(M, r, { now: T0 + 2 * MIN, pid: 4_000_002, host: 'h1', isAlive: alive })
     b.close()
   },
-  { 'a dead holder is not detected': [edit('file-ledger.js', 'if (holder && holder.host === host && Number.isSafeInteger(holder.pid) && !isAlive(holder.pid)) return true', '')] },
+  { 'a dead holder is not detected': [edit('file-ledger.js', 'return !isAlive(holder.pid)', 'return false')] },
 )
 
 proves(
@@ -107,8 +115,8 @@ proves(
     void a
   },
   {
-    'the lease is never checked': [edit('file-ledger.js', 'if (now - mtimeMs > leaseMs) return true', '')],
-    'the lease boundary is inclusive': [edit('file-ledger.js', 'if (now - mtimeMs > leaseMs) return true', 'if (now - mtimeMs >= leaseMs) return true')],
+    'the lease is never checked': [edit('file-ledger.js', 'return now - mtimeMs > leaseMs', 'return false')],
+    'the lease boundary is inclusive': [edit('file-ledger.js', 'return now - mtimeMs > leaseMs', 'return now - mtimeMs >= leaseMs')],
   },
 )
 
@@ -244,7 +252,7 @@ proves(
     a.close()
     assert.equal(synced, 4)
   },
-  { 'no sync': [edit('file-ledger.js', 'writeAll(fd, Buffer.from(JSON.stringify(record) + \'\\n\'))\n      fs.fsyncSync(fd)', "writeAll(fd, Buffer.from(JSON.stringify(record) + '\\n'))")] },
+  { 'no sync': [edit('file-ledger.js', 'fs.fsyncSync(fd)\n      size += line.length', 'size += line.length')] },
 )
 
 proves(
@@ -300,4 +308,64 @@ proves(
     assert.throws(() => M.openFileLedger({ dir: r.ledgerDir, ledgerId: 'another', now: T0 }), (e) => e instanceof M.LedgerCorruptError)
   },
   { 'the ledger id is not checked': [edit('file-ledger.js', 'if (first && !(first.kind', 'if (false && first && !(first.kind')] },
+)
+
+proves(
+  'stale holder: a live pid on this host is never stale, however old its lock',
+  (M) => {
+    const r = rig(M)
+    const a = mustOpen(M, r)
+    ageLock(r, 100 * LEASE)
+    mustRefuse(M, r, { now: T0 })
+    assert.equal(a.append(sys(1), T0).status, 'appended', 'the holder is untouched')
+    a.close()
+  },
+  { 'age alone makes it stale': [edit('file-ledger.js', 'return !isAlive(holder.pid)', 'return !isAlive(holder.pid) || now - mtimeMs > leaseMs')] },
+)
+
+proves(
+  'lease: the lock\'s time only moves forward whatever now a caller supplies',
+  (M) => {
+    const r = rig(M)
+    const a = mustOpen(M, r, { now: T0 })
+    a.append(sys(1), T0 - 60 * MIN)
+    const mtime = fs.statSync(path.join(r.ledgerDir, 'ledger.lock')).mtimeMs
+    assert.ok(mtime >= T0, 'an older now did not move the lock back')
+    a.close()
+  },
+  { 'the lock time follows the caller': [edit('file-ledger.js', 'new Date(Math.max(now, found.mtimeMs))', 'new Date(now)')] },
+)
+
+proves(
+  'lease: it must exceed the tick cadence, and by default it is twice the longest cadence',
+  (M) => {
+    const r = rig(M)
+    const cfg = M.coreConfig()
+    assert.throws(() => r.open({ config: cfg, leaseMs: 30 * MIN }), TypeError, 'equal to the cadence')
+    r.open({ config: cfg, leaseMs: 31 * MIN }).close()
+    const slow = M.coreConfig({ cadence_minutes: 120 })
+    const a = r.open({ config: slow, pid: 4_000_001, host: 'h1' })
+    ageLock(r, 100 * MIN)
+    assert.throws(() => r.open({ config: slow, host: 'h2', isAlive: () => true }), (e) => e instanceof M.LedgerHeldError, 'a 100 minute silence is inside a 240 minute default lease')
+    void a
+  },
+  {
+    'a lease no longer than the cadence is accepted': [edit('core.js', 'else if (!(leaseMs > cadenceMs))', 'else if (false)')],
+    'the default lease ignores the cadence': [edit('core.js', 'Math.max(DEFAULT_LEASE_MS, 2 * cadenceMs)', 'DEFAULT_LEASE_MS')],
+  },
+)
+
+proves(
+  'fence: a writer refuses to write to a file that grew under it, even if the lock still names it',
+  (M) => {
+    const r = rig(M)
+    const noLockCheck = { ...M.writerGuard, assertHeld() {} }
+    const a = mustOpen(M, r, { guard: noLockCheck })
+    a.append(sys(1), T0)
+    fs.appendFileSync(r.ledgerFile, '{"another":"writer"}\n') // a successor wrote in the window
+    const before = fs.readFileSync(r.ledgerFile)
+    assert.throws(() => a.append(sys(2), T0 + MIN), (e) => e instanceof M.LedgerFencedError)
+    assert.deepEqual(fs.readFileSync(r.ledgerFile), before, 'nothing was written')
+  },
+  { 'the file size is not checked': [edit('file-ledger.js', 'if (fs.fstatSync(fd).size !== size) throw', 'if (false) throw')] },
 )

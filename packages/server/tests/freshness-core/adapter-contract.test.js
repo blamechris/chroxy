@@ -3,14 +3,22 @@
  * failing adapter reads as an error, never as an absence of status.
  */
 
-import { afterEach } from 'node:test'
+import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, must, proves, rig } from './helpers.js'
+import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, must, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
+
+const proves = (name, check, mutants = {}) =>
+  describe(name, () => {
+    it('holds on the real code', async () => {
+      await check(REAL)
+    })
+    for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKill(check, label, edits))
+  })
 
 const edit = (file, from, to) => ({ file, from, to })
 const ok = { source: 'fixture', list: () => [], read: () => ({ outcome: 'no_report' }) }
@@ -40,6 +48,8 @@ proves(
     assert.throws(() => M.sealAdapter(new OwnReadAndList()), (e) => e instanceof M.AdapterContractError, 'a send on the prototype of an adapter whose own members are right')
     assert.throws(() => M.sealAdapter({ get source() { return 'fixture' }, list: ok.list, read: ok.read }), (e) => e instanceof M.AdapterContractError, 'an accessor')
     assert.throws(() => M.sealAdapter({ ...ok, source: 'Not A Name' }), (e) => e instanceof M.AdapterContractError)
+    assert.throws(() => M.sealAdapter({ ...ok, source: 'a'.repeat(65) }), (e) => e instanceof M.AdapterContractError, 'longer than 64')
+    M.sealAdapter({ ...ok, source: 'a'.repeat(64) })
     assert.throws(() => M.sealAdapter({ source: 'fixture', list: ok.list }), (e) => e instanceof M.AdapterContractError)
     assert.throws(() => M.sealAdapter({ ...ok, [Symbol('x')]: 1 }), (e) => e instanceof M.AdapterContractError, 'a symbol member')
     const real = M.createStateFileAdapter({ path: '/nonexistent/state.json' })
@@ -49,8 +59,9 @@ proves(
   {
     'extra members are accepted': [edit('adapter.js', 'if (extra.length) {', 'if (false) {')],
     'a prototype is accepted': [edit('adapter.js', 'return proto === Object.prototype || proto === null', 'return true')],
+    'the source name length is not limited': [edit('adapter.js', 'name.length <= 64', 'true')],
     'an accessor is accepted': [edit('adapter.js', "if (!d || 'get' in d || 'set' in d)", 'if (!d)')],
-    'the source name is not checked': [edit('adapter.js', "if (typeof adapter.source !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(adapter.source)) {", 'if (false) {')],
+    'the source name is not checked': [edit('adapter.js', 'if (!validSourceName(adapter.source)) {', 'if (false) {')],
   },
 )
 

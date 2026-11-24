@@ -27,24 +27,29 @@
  *   - `ledger.lock` is created with `O_EXCL`, so exactly one process creates
  *     it. A process that finds it present and its holder live throws
  *     `LedgerHeldError` before it reads or writes the ledger.
- *   - A holder is stale when its lock file has not been touched for `leaseMs`
- *     (every append touches it), or when it is on this host and its pid no
- *     longer exists. A crashed holder is therefore taken over at once on the
- *     same host, and after the lease anywhere. A live holder is never taken.
+ *   - Staleness depends on where the holder runs. On this host, a holder is
+ *     stale only if its pid no longer exists: a live pid is never stale,
+ *     however old its lock, because a tick can legitimately outlast any lease.
+ *     On another host (or when the lock cannot be read) the pid cannot be
+ *     checked, so a holder is stale when its lock has not been touched for
+ *     `leaseMs` (every append touches it). The lease must exceed the tick
+ *     cadence; `openReconciler` enforces that.
  *   - A takeover bumps the lock's `epoch`, and is written to the ledger as a
  *     `writer_takeover` system record.
  *   - Before every append the writer re-reads the lock and writes only if the
- *     lock still names it (same holder id and epoch). A holder that was paused
- *     past the lease and taken over finds the lock gone or changed and its
- *     append throws `LedgerFencedError`, writing nothing.
+ *     lock still names it, and checks that the file is the size this writer
+ *     left it at. A holder that was paused, taken over, and woke finds the lock
+ *     changed, or the file grown, and its append throws `LedgerFencedError`,
+ *     writing nothing.
+ *   - The lock's mtime only moves forward, whatever `now` a caller supplies.
  *
- * Residual window, stated rather than hidden: the lock check and the write are
- * two steps, so a holder that is taken over in the microseconds between them
- * can still land one record. That record is a valid record under its own key
- * (the takeover never rewrites the file and the hash chain is checked on the
- * next open), so the damage is bounded to one extra idempotent record, not a
- * lost or reordered one. Pid reuse can make a dead holder look live until the
- * lease runs out; the lease bounds that too.
+ * Residual window, stated rather than hidden: the lock check, the size check
+ * and the write are separate steps. A holder taken over, and a successor that
+ * writes, inside the microseconds between this writer's size check and its
+ * write can still land a duplicate sequence number. The next open then refuses
+ * the ledger with `LedgerCorruptError` rather than repairing it, so the damage
+ * is detected, not silent, and needs an operator. Pid reuse can make a dead
+ * same-host holder look live; the lock is then refused until that pid exits.
  */
 
 import fs from 'node:fs'
@@ -96,9 +101,10 @@ export const DEFAULT_GUARD_RULES = Object.freeze({
    * could not be parsed), `mtimeMs` the lock file's last touch.
    */
   isStale({ holder, mtimeMs, now, leaseMs, host, isAlive }) {
-    if (now - mtimeMs > leaseMs) return true
-    if (holder && holder.host === host && Number.isSafeInteger(holder.pid) && !isAlive(holder.pid)) return true
-    return false
+    // On this host the pid decides: a live pid is never stale, whatever the age.
+    if (holder && holder.host === host && Number.isSafeInteger(holder.pid)) return !isAlive(holder.pid)
+    // Elsewhere the pid cannot be checked; only silence for the lease counts.
+    return now - mtimeMs > leaseMs
   },
   /** May this process write? The lock must still name it (holder ids are unique per acquire). */
   holdsLock({ holder, token }) {
@@ -209,7 +215,7 @@ export function createWriterGuard(rules = DEFAULT_GUARD_RULES) {
         throw new LedgerFencedError('this writer no longer holds the ledger lock; nothing was written')
       }
       try {
-        const t = new Date(now)
+        const t = new Date(Math.max(now, found.mtimeMs))
         fs.utimesSync(lockPath, t, t)
       } catch {
         // The heartbeat is best effort; the next append re-checks the lock.
@@ -317,13 +323,18 @@ export function openFileLedger({ dir, ledgerId, now, leaseMs = DEFAULT_LEASE_MS,
     const records = loadRecords(file)
     const ledger = loadLedger({ ledgerId, records })
     fd = fs.openSync(file, 'a', 0o600)
+    // The file is the size this writer left it at, or someone else wrote to it.
+    let size = fs.fstatSync(fd).size
     const persist = (record) => {
-      writeAll(fd, Buffer.from(JSON.stringify(record) + '\n'))
+      const line = Buffer.from(JSON.stringify(record) + '\n')
+      writeAll(fd, line)
       fs.fsyncSync(fd)
+      size += line.length
     }
     const write = (draft, at) => {
       if (broken) throw new Error('ledger handle is broken by an earlier failed write; reopen it')
       guard.assertHeld(lockPath, token, at)
+      if (fs.fstatSync(fd).size !== size) throw new LedgerFencedError('the ledger changed under this writer; nothing was written')
       const reply = ledgerAppend(ledger, draft, at)
       if (reply.record) {
         try {

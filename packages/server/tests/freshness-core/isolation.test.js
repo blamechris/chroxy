@@ -7,7 +7,7 @@
  * shown to fail on a mutant that does the forbidden thing.
  */
 
-import { afterEach } from 'node:test'
+import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -19,10 +19,18 @@ import http from 'node:http'
 import https from 'node:https'
 import dgram from 'node:dgram'
 import childProcess from 'node:child_process'
-import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, loadVariant, proves, rig } from './helpers.js'
+import { FIXTURE_CAPS, MIN, REAL, SRC, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, loadVariant, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
+
+const proves = (name, check, mutants = {}) =>
+  describe(name, () => {
+    it('holds on the real code', async () => {
+      await check(REAL)
+    })
+    for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKill(check, label, edits))
+  })
 
 const edit = (file, from, to) => ({ file, from, to })
 const FRESHNESS_DIR = path.join(SRC, 'freshness')

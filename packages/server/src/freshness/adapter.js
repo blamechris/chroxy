@@ -49,6 +49,15 @@ const DECISION_BASIS = new Set(['none', 'stated', 'possibly_inherited'])
 const OUTCOMES = new Set(['ok', 'no_report', 'error', 'blocked'])
 const CODE_RE = /^[a-z][a-z0-9_]{0,39}$/
 
+/**
+ * A source id: lowercase letters, digits, `_` and `-`, starting with a letter,
+ * at most 64 characters. It names an adapter in ledger records; it is not an
+ * MCP server name.
+ */
+function validSourceName(name) {
+  return typeof name === 'string' && name.length >= 1 && name.length <= 64 && /^[a-z][a-z0-9_-]*$/.test(name)
+}
+
 function isPlain(v) {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
   const proto = Object.getPrototypeOf(v)
@@ -69,7 +78,7 @@ export function sealAdapter(adapter) {
     const d = Object.getOwnPropertyDescriptor(adapter, k)
     if (!d || 'get' in d || 'set' in d) throw new AdapterContractError(`adapter.${k} must be a plain data member`)
   }
-  if (typeof adapter.source !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(adapter.source)) {
+  if (!validSourceName(adapter.source)) {
     throw new AdapterContractError('adapter.source must be a short lowercase name')
   }
   if (typeof adapter.list !== 'function' || typeof adapter.read !== 'function') {

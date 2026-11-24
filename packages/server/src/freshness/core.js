@@ -25,7 +25,7 @@ import { deriveState, sessionsOf } from './derive.js'
 import { planRead, put } from './checks.js'
 import { DEFAULT_POLICY } from './policy.js'
 import { checkTickKey, systemKey, tickId as makeTickId, tickKey } from './keys.js'
-import { openFileLedger } from './file-ledger.js'
+import { DEFAULT_LEASE_MS, openFileLedger } from './file-ledger.js'
 import { planConfig, run, trackedSessions } from './runtime.js'
 import { H } from './hash.js'
 import { safeList, safeRead, sealAdapter } from './adapter.js'
@@ -80,6 +80,12 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
   return { tickId: tid }
 }
 
+/** The longest tick cadence the configuration allows, in ms. */
+function longestCadenceMs(config) {
+  const sources = new Set([...Object.keys(config.sources ?? {}), ...Object.keys(config.per_source ?? {})])
+  return Math.max(cadenceSeconds(config, ''), ...[...sources].map((s) => cadenceSeconds(config, s))) * 1000
+}
+
 /**
  * Open a reconciler over a file ledger. Takes the ledger's writer lock, so a
  * second reconciler on the same directory throws `LedgerHeldError` here.
@@ -94,9 +100,13 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
  * @param {object} [opts.policy]
  * @param {string[]} [opts.keepOutOf] directories the ledger must not be in or under
  * @param {object} [opts.guard]       writer guard, for tests
- * @param {number} [opts.leaseMs]
+ * @param {number} [opts.leaseMs]     must exceed the longest tick cadence; default is twice it, at least 15 minutes
  */
 export function openReconciler({ dir, ledgerId, config, adapters, now, policy = DEFAULT_POLICY, guard, leaseMs, keepOutOf, pid, host, isAlive }) {
+  // The lease must outlast a tick interval, or a holder between ticks looks silent.
+  const cadenceMs = longestCadenceMs(config)
+  if (leaseMs === undefined) leaseMs = Math.max(DEFAULT_LEASE_MS, 2 * cadenceMs)
+  else if (!(leaseMs > cadenceMs)) throw new TypeError(`openReconciler: leaseMs (${leaseMs}) must exceed the longest tick cadence (${cadenceMs} ms)`)
   const sealed = new Map()
   for (const a of adapters) {
     const s = sealAdapter(a)

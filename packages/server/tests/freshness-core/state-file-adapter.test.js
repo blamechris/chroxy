@@ -5,14 +5,22 @@
  * fail its check.
  */
 
-import { afterEach } from 'node:test'
+import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, proves, rig } from './helpers.js'
+import { MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
+
+const proves = (name, check, mutants = {}) =>
+  describe(name, () => {
+    it('holds on the real code', async () => {
+      await check(REAL)
+    })
+    for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKill(check, label, edits))
+  })
 
 const edit = (file, from, to) => ({ file, from, to })
 const good = (updatedAt = T0 - MIN) => entry('s1', { state: 'running', next: 'build', updatedAt })
@@ -26,6 +34,8 @@ const CHANGED_SHAPES = {
   'an entry with no id': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [good(), { name: 'x' }] }),
   'an entry that is not an object': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [good(), 'x'] }),
   'a duplicate id': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [good(), good()] }),
+  'declaredStatus renamed': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [{ id: 's1', sdkSessionId: null, conversationId: null, declared_status: { state: 'running', summary: 's', updatedAt: T0 - MIN, source: 'marker' } }] }),
+  'declaredStatus dropped with the keys the daemon always writes': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [{ id: 's1', name: 'x' }] }),
   'declaredStatus is null': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [{ ...good(), declaredStatus: null }] }),
   'declaredStatus has an unknown key': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [entry('s1', { state: 'running', updatedAt: T0 - MIN, flavour: 'new' })] }),
   'a state outside the enum': () => JSON.stringify({ version: 1, timestamp: T0, sessions: [entry('s1', { state: 'sleeping', updatedAt: T0 - MIN })] }),
@@ -56,6 +66,8 @@ proves(
     'another version is accepted': [edit('state-file-adapter.js', 'doc.version !== 1 || ', '')],
     'a bad declaration reads as no report': [edit('state-file-adapter.js', "if (!parsed.success) return { outcome: 'error', error_code: 'shape_changed' }", "if (!parsed.success) return { outcome: 'no_report' }")],
     'an unreadable file reads as no report': [edit('state-file-adapter.js', "if (snapshot.error) return { outcome: 'error', error_code: snapshot.error }", "if (snapshot.error) return { outcome: 'no_report' }")],
+    'a renamed declaration reads as no report': [edit('state-file-adapter.js', ' && !hasMisplacedDeclaration(entry)', '')],
+    'an entry unlike the daemon\'s reads as no report': [edit('state-file-adapter.js', 'looksLikeDaemonEntry(entry) && ', '')],
     'a duplicate id is accepted': [edit('state-file-adapter.js', ' || byId.has(entry.id)', '')],
     'a parse failure reads as an empty file': [edit('state-file-adapter.js', "return { error: 'parse_failed' }", 'return { byId: new Map() }')],
     'the declaration is not shape-checked': [edit('state-file-adapter.js', 'DeclaredStatusSchema.safeParse(raw)', '{ success: true, data: raw }')],
@@ -125,6 +137,7 @@ proves(
       cwd,
       history: [{ type: 'response', text: history }],
       sdkSessionId: extra,
+      conversationId: null,
       decisionActivity: { startedAt: 5, endedAt: 4, note: activity },
       ...(declared ? { declaredStatus: { source: 'marker', summary, ...declared } } : {}),
     })

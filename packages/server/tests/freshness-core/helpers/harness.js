@@ -9,14 +9,13 @@
  * exactly once, so a mutant that no longer applies is itself a failure.
  */
 
-import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export const SRC = path.resolve(import.meta.dirname, '../../src')
+export const SRC = path.resolve(import.meta.dirname, '../../../src')
 export const T0 = Date.parse('2026-01-05T00:00:00.000Z')
 export const MIN = 60_000
 export const HOUR = 60 * MIN
@@ -62,21 +61,15 @@ export function cleanupVariants() {
 const isAssertion = (e) => e instanceof assert.AssertionError
 
 /**
- * One check, the real code and a table of mutants.
- * `check(M)` receives a module namespace and throws an AssertionError on a violation.
+ * Prove that `check` fails on a mutant. The check runs against the variant
+ * built from `edits`; it must reject with an assertion, so a mutant that merely
+ * breaks the module cannot pass as "caught". Registers nothing: each
+ * `*.test.js` file calls describe/it itself (see `proves` there), so the
+ * Windows runner's derived file set is the test files alone.
  */
-export function proves(name, check, mutants = {}) {
-  describe(name, () => {
-    it('holds on the real code', async () => {
-      await check(REAL)
-    })
-    for (const [label, edits] of Object.entries(mutants)) {
-      it(`mutant "${label}" fails it`, async () => {
-        const M = await loadVariant(edits)
-        await assert.rejects(async () => check(M), isAssertion, `the "${label}" mutant survived`)
-      })
-    }
-  })
+export async function mustKill(check, label, edits) {
+  const M = await loadVariant(edits)
+  await assert.rejects(async () => check(M), isAssertion, `the "${label}" mutant survived`)
 }
 
 const tmpDirs = []
@@ -91,7 +84,7 @@ export function cleanupTmp() {
 
 /** One persisted-session entry as the daemon writes it, plus content the reconciler must never read. */
 export function entry(id, declared, extra = {}) {
-  return { id, name: 'session name', cwd: '/work/dir', ...extra, ...(declared ? { declaredStatus: { summary: 'a summary', source: 'marker', ...declared } } : {}) }
+  return { id, name: 'session name', cwd: '/work/dir', sdkSessionId: null, conversationId: null, ...extra, ...(declared ? { declaredStatus: { summary: 'a summary', source: 'marker', ...declared } } : {}) }
 }
 
 /** A rig: a state file, a ledger directory and a way to open a reconciler over them. */
@@ -161,4 +154,3 @@ export function must(fn, what = 'the step') {
   }
 }
 
-export { describe, it }

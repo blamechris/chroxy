@@ -14,11 +14,15 @@ package's `files`, so **it ships**. Nothing in the daemon imports it yet and
 nothing starts it: it is a library until a runner is added (#9282).
 
 The model's pure rule modules moved there from `tests/freshness/model/`
-(`hash`, `keys`, `grade`, `config`, `ledger`, `checks`, `derive`, `policy`,
-and the driver in `runtime.js`). The files of the same name under
+(`hash`, `keys`, `grade`, `config`, `ledger`, `checks`, `derive`, `policy`, and
+the driver in `runtime.js`). The files of the same name under
 `tests/freshness/model/` re-export them, so the model tests and the reconciler
-run one implementation. The investigation scheduler and the owner queue stay
-under `tests/` and do not ship.
+run one implementation. Everything in those files ships, including the parts the
+core does not run: `derive.js` folds the surface, owner and investigation
+records, and `policy.js` holds the owner-block, surface-order and investigation
+rules. What stays under `tests/` and does not ship: the investigation scheduler
+(`investigation.js`), the owner queue (`queue.js`), the model's tick planner
+(`reconciler.js`) and the test helpers.
 
 | File | Role |
 |---|---|
@@ -68,18 +72,24 @@ A second reconciler on the same ledger is **refused**: `ledger.lock` is created
 exclusively, and a process that finds a live holder throws `LedgerHeldError`
 before it reads or writes anything.
 
-A **stale** holder is **fenced**. A holder is stale when its lock has not been
-touched for the lease (15 minutes; every append touches it), or when it is on
-this host and its pid is gone. A takeover bumps the lock's epoch and writes one
+A **stale** holder is **fenced**. On this host a holder is stale only when its
+pid is gone: a live pid is never taken over, however old its lock. On another
+host, where the pid cannot be checked, a holder is stale when its lock has not
+been touched for the lease. The lease must exceed the tick cadence;
+`openReconciler` rejects a shorter one and defaults to twice the longest cadence
+(at least 15 minutes). A takeover bumps the lock's epoch and writes one
 `writer_takeover` record. Before every append the writer re-checks that the lock
-still names it; a holder that was paused past the lease and taken over gets
-`LedgerFencedError` and writes nothing. Closing a fenced handle does not release
-the new holder's lock.
+still names it and that the file is the size it left it at; a holder that was
+paused past the lease and taken over gets `LedgerFencedError` and writes
+nothing. The lock's time only moves forward. Closing a fenced handle does not
+release the new holder's lock.
 
-The check and the write are two steps, so a holder taken over between them can
-land one more record. It is a valid record under its own key and the hash chain
-is verified on the next open. Pid reuse can make a dead holder look live until
-the lease runs out.
+The checks and the write are separate steps. A successor that takes over and
+writes inside the microseconds between a stale holder's size check and its write
+can leave a duplicate sequence number. The next open then refuses the ledger
+with `LedgerCorruptError` instead of repairing it: the damage is detected, not
+silent, and needs an operator. Pid reuse can make a dead same-host holder look
+live until that pid exits.
 
 ## The state-file adapter
 
@@ -90,8 +100,13 @@ and its `declaredStatus`, and from that `state`, `next`, `blockedOn`,
 fields leaves no trace in the ledger. It never writes the file.
 
 Every read is shape-checked: the file must be an object with `version: 1` and a
-`sessions` array of objects with unique string ids, and each `declaredStatus`
-must satisfy the daemon's own strict `DeclaredStatusSchema`. A changed shape is
+`sessions` array of objects with unique string ids; each `declaredStatus` must
+satisfy the daemon's own strict `DeclaredStatusSchema`; an entry with no
+`declaredStatus` must still carry the keys the daemon always writes
+(`sdkSessionId`, `conversationId`) and no declaration-shaped object under another
+key, so a renamed field is an error. A declaration dropped from an otherwise
+intact entry cannot be told from a session that never declared, and reads as no
+status. A changed shape is
 `error` (`shape_changed`, `parse_failed`, `source_missing`), never `idle`, never
 no status. The daemon stamps `updatedAt` when a declaration changes, so reports
 are timed `changed_at` and a decision is recorded `possibly_inherited`.

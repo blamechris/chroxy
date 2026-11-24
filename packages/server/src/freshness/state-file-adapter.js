@@ -14,7 +14,13 @@
  *   - the file must be a JSON object with `version: 1` and a `sessions` array
  *     whose entries are objects with a unique non-empty string `id`;
  *   - a session's `declaredStatus`, when present, must satisfy the daemon's
- *     own strict `DeclaredStatusSchema` (an unknown key is a changed shape).
+ *     own strict `DeclaredStatusSchema` (an unknown key is a changed shape);
+ *   - an entry with no `declaredStatus` must still look like one the daemon
+ *     wrote (it always writes `sdkSessionId` and `conversationId`) and must
+ *     not carry a declaration-shaped object under another key. An entry that
+ *     fails either is a changed shape, so a renamed or restructured field
+ *     reads as an error. What cannot be told apart is a declaration dropped
+ *     from an otherwise intact entry: that is a session that never declared.
  *
  * A file that fails the first check cannot be listed (`list()` is null, and
  * every tracked session's read is `error: shape_changed`). A session whose
@@ -87,6 +93,19 @@ export function reportFromText(text, { updatedAt }) {
   return declared ? reportFromDeclared(declared, { updatedAt, via: 'transcript' }) : null
 }
 
+const DECLARATION_STATES = new Set(['running', 'idle', 'blocked', 'stalled', 'done', 'unknown'])
+const SHAPE_CHANGED = Symbol('shape_changed')
+
+/** Does this entry carry an object shaped like a declaration under a key other than `declaredStatus`? */
+function hasMisplacedDeclaration(entry) {
+  return Object.entries(entry).some(([k, v]) => k !== 'declaredStatus' && isPlain(v) && DECLARATION_STATES.has(v.state) && typeof v.summary === 'string' && typeof v.updatedAt === 'number')
+}
+
+/** What the daemon's entry for a session with no declaration looks like. */
+function looksLikeDaemonEntry(entry) {
+  return 'sdkSessionId' in entry && 'conversationId' in entry
+}
+
 function loadSnapshot(path, maxBytes) {
   let text
   try {
@@ -110,7 +129,8 @@ function loadSnapshot(path, maxBytes) {
       return { error: 'shape_changed' }
     }
     // Only the declaration is carried forward; the rest of the entry is dropped here.
-    byId.set(entry.id, entry.declaredStatus)
+    if (entry.declaredStatus !== undefined) byId.set(entry.id, entry.declaredStatus)
+    else byId.set(entry.id, looksLikeDaemonEntry(entry) && !hasMisplacedDeclaration(entry) ? undefined : SHAPE_CHANGED)
   }
   return { byId }
 }
@@ -136,6 +156,7 @@ export function createStateFileAdapter({ path, source = STATE_FILE_SOURCE, maxBy
       if (snapshot.error) return { outcome: 'error', error_code: snapshot.error }
       if (!snapshot.byId.has(session.native_id)) return { listed: false }
       const raw = snapshot.byId.get(session.native_id)
+      if (raw === SHAPE_CHANGED) return { outcome: 'error', error_code: 'shape_changed' }
       if (raw === undefined) return { outcome: 'no_report' }
       const parsed = DeclaredStatusSchema.safeParse(raw)
       if (!parsed.success) return { outcome: 'error', error_code: 'shape_changed' }

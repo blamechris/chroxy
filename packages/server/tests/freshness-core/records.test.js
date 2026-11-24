@@ -5,12 +5,20 @@
  * system. Each guard has a mutant that must fail its check.
  */
 
-import { afterEach } from 'node:test'
+import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { FIXTURE_CAPS, HOUR, MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, must, proves, rig } from './helpers.js'
+import { FIXTURE_CAPS, HOUR, MIN, REAL, STATE_SOURCE, T0, cleanupTmp, cleanupVariants, entry, fixtureAdapter, fixtureSession, must, rig, mustKill } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
+
+const proves = (name, check, mutants = {}) =>
+  describe(name, () => {
+    it('holds on the real code', async () => {
+      await check(REAL)
+    })
+    for (const [label, edits] of Object.entries(mutants)) it(`mutant "${label}" fails it`, () => mustKill(check, label, edits))
+  })
 
 const { H, keys } = REAL
 const S1 = { source: STATE_SOURCE, native_id: 's1', incarnation: null }
