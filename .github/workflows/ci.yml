@@ -1852,6 +1852,11 @@ jobs:
         # because the token survived via the exported API_TOKEN.
         run: bash scripts/__tests__/docker-entrypoint.test.sh
 
+      - name: Run docker-image-smoke.sh tool-check tests
+        # #9248 — the smoke script must fail an image lacking ps or lsof (the
+        # orphan reaper's tools). Driven against a fake docker in a mktemp -d.
+        run: bash scripts/__tests__/docker-image-smoke.test.sh
+
       - name: Run preview-daemon.sh tests
         # #8305 — the one recipe for an isolated preview daemon (env -i
         # allowlist, keychain off, PID-guarded stop, never 8765). Driven

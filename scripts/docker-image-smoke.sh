@@ -17,7 +17,8 @@
 #
 #   docker build -t chroxy:local . && bash scripts/docker-image-smoke.sh chroxy:local
 #
-# Six checks, all against the image as built:
+# Seven checks, all against the image as built (check 7 runs FIRST — it is the
+# cheapest and needs no running daemon):
 #
 # 1. Every `@chroxy/*` specifier the server imports resolves inside the image.
 #    The specifiers are read from the image's OWN copy of packages/server/src on
@@ -184,7 +185,7 @@ fail() {
 }
 
 cleanup() {
-  docker rm -f "$NAME" "$NAME-scan" "$NAME-imports" "$NAME-ptymarker" "$NAME-version" "$NAME-depjson" "$NAME-deps" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "$NAME-scan" "$NAME-imports" "$NAME-ptymarker" "$NAME-version" "$NAME-depjson" "$NAME-deps" "$NAME-tools" "$NAME-sweep" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -232,6 +233,41 @@ assert_no_pty_failure_signature() {
 
 docker version >/dev/null 2>&1 || fail "cannot reach Docker (no docker CLI on PATH, or no daemon running)"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "no such image: $IMAGE (build it first)"
+
+# --- 7. #9248: the orphan reaper's tools exist in the image, and a sweep works ---
+# The runtime stage once installed only curl/git/ca-certificates, so the boot
+# sweep logged `process listing failed: spawnSync ps ENOENT` and the reaper
+# never reaped anything in Docker. Asserted by RESOLVING the tools inside the
+# built image, not by reading the Dockerfile (which would only assert its
+# spelling). One container per tool so the failure names the missing one.
+for tool in ps lsof; do
+  set +e
+  TOOL_OUT="$(run_with_timeout 30 docker run --rm --init --name "$NAME-tools" --entrypoint sh "$IMAGE" -c 'command -v "$1"' _ "$tool" 2>&1)"
+  tool_rc=$?
+  set -e
+  [ "$tool_rc" -ne 124 ] || fail "checking for '$tool' timed out after 30s inside $IMAGE"
+  [ "$tool_rc" -eq 0 ] && [ -n "$TOOL_OUT" ] \
+    || fail "'$tool' is not installed in $IMAGE (exit $tool_rc) — the orphan reaper needs ps (procps) and lsof (#9248): $TOOL_OUT"
+done
+echo "== Image tools OK: ps and lsof resolve inside $IMAGE"
+
+# One REAL sweep inside the image, with every signal stubbed out: `kill` throws,
+# so nothing is ever signalled (a failed kill is recorded as skipped). Passes
+# only when the sweep ran to completion with no error — in particular no
+# `process listing failed`. The container runs as the image's non-root user,
+# which the reaper requires (it refuses uid 0).
+set +e
+SWEEP_OUT="$(run_with_timeout 60 docker run --rm --init --name "$NAME-sweep" --entrypoint node "$IMAGE" --input-type=module -e '
+  const { sweepOrphans } = await import("/app/packages/server/src/orphan-reaper.js")
+  const r = sweepOrphans({ worktreeBase: "/tmp/chroxy-smoke-worktrees", deps: { kill: () => { throw new Error("signals disabled in smoke") } } })
+  console.log(JSON.stringify({ error: r.error, scanned: r.scanned }))
+  if (r.error !== null || r.scanned === 0) process.exit(1)
+' 2>&1)"
+sweep_rc=$?
+set -e
+[ "$sweep_rc" -ne 124 ] || fail "the orphan-reaper sweep timed out after 60s inside $IMAGE"
+[ "$sweep_rc" -eq 0 ] || fail "an orphan-reaper sweep inside $IMAGE reported an error or listed zero processes (exit $sweep_rc): $SWEEP_OUT"
+echo "== Orphan-reaper sweep OK inside the image: $SWEEP_OUT"
 
 # --- 1. Every @chroxy/* specifier the server imports resolves in the image ---
 # Every line of the image's server JavaScript that quotes an @chroxy/ specifier
