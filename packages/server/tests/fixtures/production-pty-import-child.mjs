@@ -16,14 +16,21 @@
  *
  * Usage: `node --import <setup> --import <hook> production-pty-import-child.mjs <claude-tui|user-shell>`
  *
- * Prints ONE line of JSON to stdout — `{ code, message }` from the rejected
- * `start()` — and always exits 0 (the parent test asserts on the JSON, not
- * the exit code; a non-zero exit would mean this harness script itself blew
- * up, which is reported separately via stderr passthrough).
+ * Prints ONE line of JSON to stdout: `{ code, message, home, configPath }`
+ * from the rejected `start()` (`home` is the child's `os.homedir()`,
+ * `configPath` the global config file the writer would use, #8945). It
+ * always exits 0 (the parent test asserts on the JSON, not the exit code; a
+ * non-zero exit would mean this harness script itself blew up, which is
+ * reported separately via stderr passthrough).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { claudeGlobalConfigPath } from '../../src/utils/claude-config-dir.js'
+
+// #8945: where this child resolves its home and global config file. The
+// parent asserts both lie under its fake HOME.
+const where = () => ({ home: homedir(), configPath: claudeGlobalConfigPath(process.env) })
 
 const target = process.argv[2]
 if (target !== 'claude-tui' && target !== 'user-shell') {
@@ -60,9 +67,9 @@ async function main() {
       })
       try {
         await session.start()
-        console.log(JSON.stringify({ unexpectedSuccess: true }))
+        console.log(JSON.stringify({ unexpectedSuccess: true, ...where() }))
       } catch (err) {
-        console.log(JSON.stringify({ code: err.code, message: err.message }))
+        console.log(JSON.stringify({ code: err.code, message: err.message, ...where() }))
       }
     } finally {
       unpinSinkBase()
@@ -75,9 +82,9 @@ async function main() {
   const session = new UserShellSession({ cwd: '/tmp' })
   try {
     await session.start()
-    console.log(JSON.stringify({ unexpectedSuccess: true }))
+    console.log(JSON.stringify({ unexpectedSuccess: true, ...where() }))
   } catch (err) {
-    console.log(JSON.stringify({ code: err.code, message: err.message }))
+    console.log(JSON.stringify({ code: err.code, message: err.message, ...where() }))
   }
 }
 
