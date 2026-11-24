@@ -88,7 +88,7 @@ after(() => {
   // Code process (including the one driving this test) rewrites, so it went
   // red on clean changes. What the child could actually do wrong is drop a
   // `.claude.json.chroxy.<uuid>.tmp` sibling, so assert exactly that: no
-  // `.claude.json.*` name that was absent before the run exists after it.
+  // `.claude.json.chroxy.*` name that was absent before the run exists after it.
   try {
     assertNoNewClaudeJsonSiblings(siblingsBefore, realHome)
   } finally {
@@ -148,6 +148,13 @@ describe('stray .claude.json sibling guard (#8945)', () => {
     assertNoNewClaudeJsonSiblings(snap, decoy)
   })
 
+  it('stays green when Claude Code itself creates .claude.json.backup / .tmp.123 siblings during the run', () => {
+    const snap = snapshotClaudeJsonSiblings(decoy)
+    writeFileSync(join(decoy, '.claude.json.backup'), '{}')
+    writeFileSync(join(decoy, '.claude.json.tmp.123'), '{}')
+    assertNoNewClaudeJsonSiblings(snap, decoy)
+  })
+
   it('goes red when a .claude.json.chroxy.<uuid>.tmp sibling appears during the run', () => {
     const snap = snapshotClaudeJsonSiblings(decoy)
     writeFileSync(join(decoy, '.claude.json.chroxy.0000-test.tmp'), '{}')
@@ -158,9 +165,9 @@ describe('stray .claude.json sibling guard (#8945)', () => {
   })
 
   it('does not blame this run for a stray sibling that already existed', () => {
-    writeFileSync(join(decoy, '.claude.json.preexisting.tmp'), '{}')
+    writeFileSync(join(decoy, '.claude.json.chroxy.preexisting.tmp'), '{}')
     const snap = snapshotClaudeJsonSiblings(decoy)
-    assert.ok(snap.has('.claude.json.preexisting.tmp'))
+    assert.ok(snap.has('.claude.json.chroxy.preexisting.tmp'))
     assertNoNewClaudeJsonSiblings(snap, decoy)
   })
 

@@ -2,8 +2,7 @@
  * Guard helper for node-pty-production-import.test.js (#8945).
  *
  * The property that harness cares about: the child process must not leave a
- * stray `.claude.json.<anything>` sibling (e.g. `.claude.json.chroxy.<uuid>.tmp`
- * from `ensureCwdTrusted`) in the developer's REAL home. The previous guard
+ * stray `.claude.json.chroxy.<uuid>.tmp` sibling (from `ensureCwdTrusted`) in the developer's REAL home. The previous guard
  * compared the real `~/.claude.json` mtime, which any concurrently running
  * Claude Code process legitimately changes — so it went red on clean runs.
  *
@@ -16,7 +15,13 @@
 import assert from 'node:assert/strict'
 import { readdirSync } from 'node:fs'
 
-const SIBLING_PREFIX = '.claude.json.'
+// Chroxy's own atomic-write temp name: `${destPath}.chroxy.${randomUUID()}.tmp`
+// (src/byok-mcp-config.js:1338, reached via claude-tui/pty-driver.js's
+// ensureCwdTrusted). Deliberately NOT every `.claude.json.*`: Claude Code itself
+// writes `.claude.json.backup` and atomic-write temps in the real home, and a
+// concurrent one appearing mid-run must not fail this harness (same flake class
+// as the mtime check it replaced).
+const SIBLING_PREFIX = '.claude.json.chroxy.'
 
 export function snapshotClaudeJsonSiblings(dir) {
   try {
