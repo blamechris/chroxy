@@ -27,8 +27,12 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, dirname } from 'node:path'
-import { mkdtempSync, rmSync, existsSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
+import {
+  snapshotClaudeJsonSiblings,
+  assertNoNewClaudeJsonSiblings,
+} from './helpers/claude-json-siblings-guard.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 // #8151 round-2 review (Windows fallout, caught by CI after the review
@@ -66,24 +70,30 @@ const CHILD = join(__dirname, 'fixtures', 'production-pty-import-child.mjs')
 // therefore `ensureCwdTrusted`'s every read/write — resolves entirely
 // inside a disposable tmp dir), never the real one.
 let fakeHome
-let realClaudeJsonMtimeBefore
+// The guard helper takes the directory as a parameter, so the decoy tests
+// below aim the very same assertion at a throwaway directory (#8945) instead
+// of ever writing into the developer's real home.
+const realHome = homedir()
+let siblingsBefore
 
 before(() => {
   fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-pty-prod-import-home-'))
-  realClaudeJsonMtimeBefore = existsSync(join(homedir(), '.claude.json'))
-    ? statSync(join(homedir(), '.claude.json')).mtimeMs
-    : null
+  siblingsBefore = snapshotClaudeJsonSiblings(realHome)
 })
 
 after(() => {
-  // The one assertion that actually PROVES this harness left the
-  // developer's real state alone — not merely that it intended to.
-  const realClaudeJsonMtimeAfter = existsSync(join(homedir(), '.claude.json'))
-    ? statSync(join(homedir(), '.claude.json')).mtimeMs
-    : null
-  assert.equal(realClaudeJsonMtimeAfter, realClaudeJsonMtimeBefore,
-    'the real ~/.claude.json must be untouched by this harness (mtime changed)')
-  rmSync(fakeHome, { recursive: true, force: true })
+  // The assertion that actually PROVES this harness left the developer's real
+  // home alone — not merely that it intended to. #8945: this used to compare
+  // the real ~/.claude.json mtime, which every concurrently running Claude
+  // Code process (including the one driving this test) rewrites, so it went
+  // red on clean changes. What the child could actually do wrong is drop a
+  // `.claude.json.chroxy.<uuid>.tmp` sibling, so assert exactly that: no
+  // `.claude.json.*` name that was absent before the run exists after it.
+  try {
+    assertNoNewClaudeJsonSiblings(siblingsBefore, realHome)
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true })
+  }
 })
 
 function runChild(target) {
@@ -103,6 +113,7 @@ describe("production import('node-pty') failure — real child process, no _ptyM
   it('ClaudeTuiSession.start() rejects with the actionable message when the REAL import(\'node-pty\') rejects', () => {
     const result = runChild('claude-tui')
     assert.equal(result.unexpectedSuccess, undefined, 'the real import must actually fail under the resolve hook')
+    assert.equal(result.home, fakeHome, 'the child must resolve homedir() to the fake HOME, never the real one')
     assert.equal(result.code, 'PTY_UNAVAILABLE')
     assert.match(result.message, /^node-pty is unavailable/)
     assert.match(result.message, /claude-sdk/)
@@ -112,9 +123,48 @@ describe("production import('node-pty') failure — real child process, no _ptyM
   it('UserShellSession.start() rejects with the actionable message when the REAL import(\'node-pty\') rejects', () => {
     const result = runChild('user-shell')
     assert.equal(result.unexpectedSuccess, undefined, 'the real import must actually fail under the resolve hook')
+    assert.equal(result.home, fakeHome, 'the child must resolve homedir() to the fake HOME, never the real one')
     assert.equal(result.code, 'PTY_UNAVAILABLE')
     assert.match(result.message, /^node-pty is unavailable/)
     assert.match(result.message, /claude-sdk/)
     assert.match(result.message, /simulated by reject-node-pty-import\.mjs/)
+  })
+})
+
+// #8945 — prove the guard itself, against a DECOY "real home" (a mkdtemp dir).
+// Nothing here may touch the developer's actual home directory.
+describe('stray .claude.json sibling guard (#8945)', () => {
+  let decoy
+  before(() => { decoy = mkdtempSync(join(tmpdir(), 'chroxy-decoy-real-home-')) })
+  after(() => { rmSync(decoy, { recursive: true, force: true }) })
+
+  it('stays green when a concurrent process rewrites ~/.claude.json during the run', () => {
+    const file = join(decoy, '.claude.json')
+    writeFileSync(file, '{}')
+    const snap = snapshotClaudeJsonSiblings(decoy)
+    const t = new Date(Date.now() + 60_000)
+    utimesSync(file, t, t) // another Claude Code process touched it
+    writeFileSync(file, '{"touched":true}')
+    assertNoNewClaudeJsonSiblings(snap, decoy)
+  })
+
+  it('goes red when a .claude.json.chroxy.<uuid>.tmp sibling appears during the run', () => {
+    const snap = snapshotClaudeJsonSiblings(decoy)
+    writeFileSync(join(decoy, '.claude.json.chroxy.0000-test.tmp'), '{}')
+    assert.throws(
+      () => assertNoNewClaudeJsonSiblings(snap, decoy),
+      /\.claude\.json\.chroxy\.0000-test\.tmp/,
+    )
+  })
+
+  it('does not blame this run for a stray sibling that already existed', () => {
+    writeFileSync(join(decoy, '.claude.json.preexisting.tmp'), '{}')
+    const snap = snapshotClaudeJsonSiblings(decoy)
+    assert.ok(snap.has('.claude.json.preexisting.tmp'))
+    assertNoNewClaudeJsonSiblings(snap, decoy)
+  })
+
+  it('refuses (does not pass vacuously) when the directory cannot be read', () => {
+    assert.throws(() => snapshotClaudeJsonSiblings(join(decoy, 'does-not-exist')), /cannot snapshot/)
   })
 })
