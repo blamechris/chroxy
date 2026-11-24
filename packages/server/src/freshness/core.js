@@ -9,8 +9,9 @@
  * `gradeRead` from the report's age at the check time; an adapter reports
  * what it found and never grades.
  *
- * This is the core only. It does not run an investigation, keep a queue,
- * deliver anything or talk to a live source: the adapters it is given decide
+ * It runs the bounded stale investigation of each tick (investigation.js),
+ * which reads through the adapter and records what it found. It keeps no
+ * queue, delivers nothing and talks to no live source: the adapters it is given decide
  * what it reads, and nothing it holds can send. It opens no credential store,
  * holds no secret and makes no network call; its only I/O is the ledger
  * directory it is given and whatever the adapters read.
@@ -23,6 +24,7 @@
 import { sourceCaps, cadenceSeconds, makeConfig } from './config.js'
 import { deriveState, sessionsOf } from './derive.js'
 import { planRead, put } from './checks.js'
+import { planInvestigations } from './investigation.js'
 import { DEFAULT_POLICY } from './policy.js'
 import { checkTickKey, systemKey, tickId as makeTickId, tickKey } from './keys.js'
 import { DEFAULT_LEASE_MS, openFileLedger } from './file-ledger.js'
@@ -61,7 +63,9 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
     // is tracked yet, so an unreadable source never looks like an empty one.
     yield put({ kind: 'system', id: systemKey('source_unreadable', [tid]), body: { event: 'source_unreadable', detail: { ids: [tid], source } } }, now)
   }
-  const world = { list: () => listing }
+  // What an investigation may read: the sealed adapter's `read`, and nothing
+  // else. A separate activity read is the same read with its report ignored.
+  const world = { list: () => listing, reread: (session, at) => safeRead(adapter, session, at), activity: (session, at) => safeRead(adapter, session, at) }
   for (const t of trackedSessions(ctx, source, world)) {
     const key = checkTickKey(tid, t.session)
     if (ctx.policy.reuseRecorded(st.index, key, 'check')) continue
@@ -69,6 +73,9 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
     yield* planRead(ctx, { key, trigger: 'tick', session: t.session, read, now, tickId: tid, scope: t.scope })
   }
 
+  // Bounded, read-only investigation of stale sessions. The queue signals it
+  // returns have nowhere to go yet (#9284); the decision is in its close record.
+  const inv = yield* planInvestigations(ctx, { source, tickId: tid, now, world })
   const closeBody = {
     ...openBody,
     phase: 'close',
@@ -76,9 +83,17 @@ export function* planCoreTick(ctx, { source, slotStart, now, adapter }) {
     checks: [...st.checks.values()].filter((c) => c.tickId === tid && c.body.trigger === 'tick').length,
     new_reports: [...st.reports.values()].filter((r) => r.seq > tickOpenSeq && r.body.source === source).length,
     source_listed: listing !== null,
+    investigations: [...st.investigations.values()].filter((i) => i.tickId === tid).length,
+    source_all_failed: inv.srcHeld,
+    source_onset: inv.srcOnset,
   }
   yield put({ kind: 'tick', id: tickKey(tid, 'close'), refs: { tick: tid }, body: closeBody }, now)
   return { tickId: tid }
+}
+
+/** The core delivers nothing: a planner that yields a send is a fault, not a no-op. */
+function refuseDelivery() {
+  throw new Error('the reconciler core cannot deliver')
 }
 
 /** The longest tick cadence the configuration allows, in ms. */
@@ -138,7 +153,7 @@ export function openReconciler({ dir, ledgerId, config, adapters, now, policy = 
     tick({ source, slotStart, now: at }) {
       const adapter = sealed.get(source)
       if (!adapter) throw new Error(`no adapter for source ${source}`)
-      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter }), { appendRecord })
+      const { value } = run(ctx, planCoreTick(ctx, { source, slotStart, now: at, adapter }), { appendRecord, deliver: refuseDelivery })
       const reads = [...ctx.state.checks.values()]
         .filter((c) => c.tickId === value.tickId && c.body.trigger === 'tick')
         .map((c) => ({
