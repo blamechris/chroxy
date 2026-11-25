@@ -236,20 +236,68 @@ describe('an unverified record is worded as unverified, and still fails closed (
     assert.equal(sentBearer(calls), true)
   })
 
-  it('status: not running + unverified is reported as could-not-verify, JSON and human, with no bearer', async () => {
+  it('status: not running + unverified is reported as could-not-verify, JSON and human, with no request at all', async () => {
+    // Mutation: drop the unverified branch in printHuman -> "Not running" is printed.
     const { runStatusCmd } = await import('../src/cli/status-cmd.js')
-    const failingFetch = async () => { throw new Error('unreachable') }
+    const calls = []
+    const downFetch = async (url, init = {}) => { calls.push({ url: String(url), headers: { ...(init.headers || {}) } }); throw new Error('unreachable') }
     const humanOut = []
-    const status = await runStatusCmd({}, { readConnectionState: unverifiedState, fetchFn: failingFetch, write: (s) => humanOut.push(s), defaultPort: 47999 })
+    const status = await runStatusCmd({}, { readConnectionState: unverifiedState, fetchFn: downFetch, write: (s) => humanOut.push(s), defaultPort: 47999 })
     assert.equal(status.running, false)
     assert.equal(status.livenessUnverified, true)
+    assert.equal(status.connectionReason, 'liveness_unverified')
     assert.ok(UNVERIFIED.test(humanOut.join('\n')))
     assert.ok(/Could not verify/.test(humanOut.join('\n')))
     assert.equal(/Status:\s+Not running/.test(humanOut.join('\n')), false)
     const jsonOut = []
-    await runStatusCmd({ json: true }, { readConnectionState: unverifiedState, fetchFn: failingFetch, write: (s) => jsonOut.push(s), defaultPort: 47999 })
+    await runStatusCmd({ json: true }, { readConnectionState: unverifiedState, fetchFn: downFetch, write: (s) => jsonOut.push(s), defaultPort: 47999 })
     assert.equal(JSON.parse(jsonOut[0]).livenessUnverified, true)
+    assert.equal(sentBearer(calls), false, 'no request carried a bearer')
+    assert.equal(calls.some((c) => c.url.includes('/metrics')), false)
     assert.ok(existsSync(getConnectionInfoPath()))
+  })
+
+  it('status: a healthy ping + an unverified record says Running AND that the record is unverified, with no bearer', async () => {
+    // Mutation: drop the note printed under "Running" -> the note assertion goes red.
+    const { runStatusCmd } = await import('../src/cli/status-cmd.js')
+    const { fetchFn, calls } = recordingFetch()
+    const humanOut = []
+    const status = await runStatusCmd({}, { readConnectionState: unverifiedState, fetchFn, write: (s) => humanOut.push(s), defaultPort: 47999 })
+    const text = humanOut.join('\n')
+    assert.equal(status.running, true)
+    assert.equal(status.livenessUnverified, true)
+    assert.ok(/Status:\s+Running/.test(text))
+    assert.ok(/connection record could not be verified; its token was not used, so metrics are unavailable/.test(text), text)
+    assert.equal(sentBearer(calls), false, 'no request carried a bearer')
+    assert.equal(calls.some((c) => c.url.includes('/metrics')), false)
+    assert.equal(status.sessions, null)
+    const jsonOut = []
+    await runStatusCmd({ json: true }, { readConnectionState: unverifiedState, fetchFn, write: (s) => jsonOut.push(s), defaultPort: 47999 })
+    const parsed = JSON.parse(jsonOut[0])
+    assert.equal(parsed.livenessUnverified, true)
+    assert.equal(parsed.connectionReason, 'liveness_unverified')
+    assert.ok(existsSync(getConnectionInfoPath()))
+  })
+
+  for (const [label, state] of [['missing', { info: null }], ['unknown', { info: null, reason: 'some_future_reason' }]]) {
+    it(`a ${label} reason is worded as "could not verify", never "not running", and carries the raw reason`, async () => {
+      // Mutation: withheldReason collapses everything but liveness_unverified to not_running.
+      const { fetchFn, calls } = recordingFetch()
+      const result = await fetchPairingCode({ readConnectionState: () => state, fetchFn })
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'liveness_unverified')
+      assert.equal(result.connectionReason, state.reason ?? null)
+      assert.equal(calls.length, 0)
+    })
+  }
+
+  it('control: no_record and dead carry their raw reason and read as not running', async () => {
+    const { fetchFn } = recordingFetch()
+    for (const reason of ['no_record', 'dead']) {
+      const result = await fetchPairingCode({ readConnectionState: () => ({ info: null, reason }), fetchFn })
+      assert.equal(result.reason, 'not_running')
+      assert.equal(result.connectionReason, reason)
+    }
   })
 
   it('status control: a dead pid reads "Not running", not unverified', async () => {

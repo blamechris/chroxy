@@ -13,7 +13,7 @@
  * webhook not configured, post failed) with a legible reason.
  */
 
-import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 function portFromUrl(url) {
   if (typeof url !== 'string') return null
@@ -35,7 +35,7 @@ export async function postPairDiscord(deps = {}) {
   const defaultPort = deps.defaultPort || 8765
 
   const { info, ...state } = await readCliConnectionState(deps)
-  if (!info) return { ok: false, reason: withheldReason(state) }
+  if (!info) return withheldResult(state)
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
 
   const port = portFromUrl(info.httpUrl) || portFromUrl(info.wsUrl) || defaultPort

@@ -11,7 +11,7 @@
  * approval can only ever originate from the host machine, never over the tunnel.
  */
 
-import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 async function approvalRequest(method, path, deps = {}) {
   const readShellApprovalInfo =
@@ -19,7 +19,7 @@ async function approvalRequest(method, path, deps = {}) {
   const fetchFn = deps.fetchFn || globalThis.fetch
 
   const { info: conn, ...state } = await readCliConnectionState(deps)
-  if (!conn) return { ok: false, reason: withheldReason(state) }
+  if (!conn) return withheldResult(state)
   if (!conn.apiToken) return { ok: false, reason: 'no_token' }
   const approval = readShellApprovalInfo()
   if (!approval || !Number.isInteger(approval.port)) return { ok: false, reason: 'approval_disabled' }

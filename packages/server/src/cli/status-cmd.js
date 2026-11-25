@@ -6,7 +6,7 @@
  * is stale-checked via PID, then pings the local HTTP health endpoint.
  */
 import { createRequire } from 'module'
-import { readCliConnectionState, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 const require = createRequire(import.meta.url)
 const { version: CLI_VERSION } = require('../../package.json')
@@ -59,6 +59,7 @@ export async function collectStatus(deps = {}) {
     // record's token is NOT used in that case; `running` is then decided by the
     // unauthenticated health ping alone.
     livenessUnverified: false,
+    connectionReason: null, // raw reader reason (alive|no_record|dead|liveness_unverified|...)
     pid: null,
     port: null,
     tunnel: null,
@@ -69,7 +70,8 @@ export async function collectStatus(deps = {}) {
   }
 
   const { info, reason } = await readCliConnectionState(deps)
-  out.livenessUnverified = !info && reason === 'liveness_unverified'
+  out.connectionReason = reason ?? null
+  out.livenessUnverified = !info && withheldReason({ reason }) === 'liveness_unverified'
   if (info) {
     out.pid = info.pid ?? null
     out.port =
@@ -161,6 +163,9 @@ function printHuman(status) {
   lines.push(
     `Status:   Running${status.pid ? ` (pid ${status.pid})` : ''}`
   )
+  if (status.livenessUnverified) {
+    lines.push('          The connection record could not be verified; its token was not used, so metrics are unavailable.')
+  }
   if (status.port != null) lines.push(`Port:     ${status.port}`)
   if (status.tunnel?.url) {
     lines.push(`Tunnel:   ${status.tunnel.url} (${status.tunnel.type})`)

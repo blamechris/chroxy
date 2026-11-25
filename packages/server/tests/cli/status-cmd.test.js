@@ -100,14 +100,15 @@ describe('chroxy status', () => {
   it('proof: a wrong path (unexpected pid, then a default-port ping) is caught by the markers, not passed as "Not running"', async () => {
     // A record whose pid the preload does not answer for: its probe is refused, the
     // record reads as unverified, and status falls back to the default port. That
-    // fetch is refused before any network. The output still says "Not running";
-    // only the REFUSED markers expose the wrong path, which is why every test above
-    // asserts their absence.
+    // fetch is refused before any network. The output says "Could not verify"
+    // (#9229), not "Not running"; the REFUSED markers are what expose the wrong
+    // path, which is why every test above asserts their absence.
     const proof = makeTempHome()
     try {
       const port = plantDeadConnectionInfo(proof.home, { pid: SYNTHETIC_PID + 1 })
       const r = await runCli(['status'], { home: proof.home, env: hermeticEnv(port) })
-      assert.match(r.stdout, /Not running/, 'the wrong path prints the same text')
+      assert.match(r.stdout, /Could not verify/, 'an unexpected pid reads as unverified, not as not running')
+      assert.doesNotMatch(r.stdout, /Not running/)
       assert.ok(r.stderr.includes(`LIVENESS_PRELOAD_REFUSED kill pid=${SYNTHETIC_PID + 1} signal=0`), `the unexpected probe was refused (stderr: ${r.stderr.slice(0, 400)})`)
       assert.ok(r.stderr.includes('LIVENESS_PRELOAD_REFUSED fetch http://127.0.0.1:8765/'), 'the default-port ping was refused before any network')
       assert.equal(r.stderr.includes('LIVENESS_PRELOAD_EXPECTED_FETCH'), false)

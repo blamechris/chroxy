@@ -12,7 +12,7 @@
  * daemon's public `httpUrl` (the tunnel/LAN base) so it opens on any device.
  */
 
-import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 import { basename } from 'path'
 
@@ -32,7 +32,7 @@ async function daemonRequest(method, path, deps, { body } = {}) {
   const defaultPort = deps.defaultPort || 8765
 
   const { info, ...state } = await readCliConnectionState(deps)
-  if (!info) return { ok: false, reason: withheldReason(state) }
+  if (!info) return withheldResult(state)
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
   // Prefer the explicit local `port` (#5683) — in tunnel mode httpUrl/wsUrl are
   // public URLs with no :port to parse, so without this the loopback request

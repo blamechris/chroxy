@@ -177,7 +177,8 @@ function loopbackPortFromUrl(url) {
  * of the daemon's identity either (see utils/pid-liveness.js); the existing auth and
  * transport checks still apply to whatever is dialed.
  *
- * @param {object} [deps] - injection seam for tests
+ * @param {object} [deps] - injection seam for tests. An injected reader is a test seam and
+ *   is trusted as given; production always uses the verifying non-mutating reader.
  * @param {function} [deps.readConnectionInfo]
  * @returns {{ ok: true, url: string, token: string|null, port: number } | { ok: false, reason: 'not_running'|'liveness_unverified' }}
  */
