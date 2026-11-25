@@ -14,6 +14,8 @@
  * (possibly extended) remaining window.
  */
 
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+
 function portFromUrl(url) {
   if (typeof url !== 'string') return null
   const m = url.match(/:(\d+)(?:\/|$)/)
@@ -27,17 +29,14 @@ function portFromUrl(url) {
  * @param {function} [deps.fetchFn]
  * @param {number}   [deps.defaultPort]
  * @returns {Promise<{ ok: true, code: string, url: string|null, expiresInSeconds: number, wsUrl: string|null }
- *                  | { ok: false, reason: 'not_running'|'no_token'|'unavailable', message?: string }>}
+ *                  | { ok: false, reason: 'not_running'|'liveness_unverified'|'no_token'|'unavailable', message?: string }>}
  */
 export async function fetchPairingCode(deps = {}) {
-  const readConnectionInfo =
-    deps.readConnectionInfo ||
-    (await import('../connection-info.js')).readConnectionInfo
   const fetchFn = deps.fetchFn || globalThis.fetch
   const defaultPort = deps.defaultPort || 8765
 
-  const info = readConnectionInfo()
-  if (!info) return { ok: false, reason: 'not_running' }
+  const { info, ...state } = await readCliConnectionState(deps)
+  if (!info) return withheldResult(state)
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
 
   const port = portFromUrl(info.httpUrl) || portFromUrl(info.wsUrl) || defaultPort
@@ -85,6 +84,8 @@ export async function runPairCodeCmd(options = {}, deps = {}) {
   if (!result.ok) {
     if (result.reason === 'not_running') {
       writeErr('Chroxy server is not running. Start it with `chroxy start`.')
+    } else if (result.reason === 'liveness_unverified') {
+      writeErr(LIVENESS_UNVERIFIED_MESSAGE)
     } else if (result.reason === 'no_token') {
       writeErr('Server is running without an auth token — pairing codes are unavailable.')
     } else {

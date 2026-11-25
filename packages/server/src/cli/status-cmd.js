@@ -6,6 +6,7 @@
  * is stale-checked via PID, then pings the local HTTP health endpoint.
  */
 import { createRequire } from 'module'
+import { readCliConnectionState, withheldReason, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 const require = createRequire(import.meta.url)
 const { version: CLI_VERSION } = require('../../package.json')
@@ -43,19 +44,22 @@ function portFromUrl(url) {
  * Collect status information. Exposed for testing.
  * @param {object} [deps]
  * @param {function} [deps.readConnectionInfo]
+ * @param {function} [deps.readConnectionState] - `{ info, reason }`; preferred over readConnectionInfo
  * @param {function} [deps.fetchFn]
  * @param {number}   [deps.defaultPort]
  */
 export async function collectStatus(deps = {}) {
-  const readConnectionInfo =
-    deps.readConnectionInfo ||
-    (await import('../connection-info.js')).readConnectionInfo
   const fetchFn = deps.fetchFn || globalThis.fetch
   const defaultPort = deps.defaultPort || 8765
 
   const out = {
     version: CLI_VERSION,
     running: false,
+    // #9229: true when connection.json exists but its pid could not be verified. The
+    // record's token is NOT used in that case; `running` is then decided by the
+    // unauthenticated health ping alone.
+    livenessUnverified: false,
+    connectionReason: null, // raw reader reason (alive|no_record|dead|liveness_unverified|...)
     pid: null,
     port: null,
     tunnel: null,
@@ -65,7 +69,9 @@ export async function collectStatus(deps = {}) {
     counters: null, // populated by --verbose via /metrics
   }
 
-  const info = readConnectionInfo()
+  const { info, reason } = await readCliConnectionState(deps)
+  out.connectionReason = reason ?? null
+  out.livenessUnverified = !info && withheldReason({ reason }) === 'liveness_unverified'
   if (info) {
     out.pid = info.pid ?? null
     out.port =
@@ -145,13 +151,21 @@ function printHuman(status) {
   lines.push(`Chroxy v${status.version}`)
   lines.push('')
   if (!status.running) {
-    lines.push('Status:   Not running')
+    if (status.livenessUnverified) {
+      lines.push('Status:   Could not verify')
+      lines.push(LIVENESS_UNVERIFIED_MESSAGE)
+    } else {
+      lines.push('Status:   Not running')
+    }
     lines.push('')
     return lines.join('\n')
   }
   lines.push(
     `Status:   Running${status.pid ? ` (pid ${status.pid})` : ''}`
   )
+  if (status.livenessUnverified) {
+    lines.push('          The connection record could not be verified; its token was not used, so metrics are unavailable.')
+  }
   if (status.port != null) lines.push(`Port:     ${status.port}`)
   if (status.tunnel?.url) {
     lines.push(`Tunnel:   ${status.tunnel.url} (${status.tunnel.type})`)

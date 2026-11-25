@@ -17,6 +17,7 @@
  * contacting the daemon, and no token is generated anywhere.
  */
 import { PRINCIPALS_NOT_ENABLED_MESSAGE } from '../principal-store.js'
+import { LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 const out = (s) => process.stdout.write(`${s}\n`)
 const err = (s) => process.stderr.write(`${s}\n`)
@@ -25,9 +26,9 @@ const err = (s) => process.stderr.write(`${s}\n`)
 async function connectToLocalDaemon(deps = {}) {
   const resolveLocalConnection = deps.resolveLocalConnection || (await import('../agent-control/local-connection.js')).resolveLocalConnection
   const conn = resolveLocalConnection()
-  // #9074: keep "could not verify" distinct from "not running"; both refuse before
-  // any token is used.
-  if (!conn.ok) return { ok: false, reason: conn.reason === 'liveness_unverified' ? 'liveness_unverified' : 'not_running' }
+  // #9074/#9229: report the resolver's reason as it is. Every refusal happens before a
+  // credential-bearing connection is returned, so no token is used on any of them.
+  if (!conn.ok) return { ok: false, reason: conn.reason }
   if (!conn.token) return { ok: false, reason: 'no_token' }
   const { AgentControlClient } = deps.AgentControlClient ? { AgentControlClient: deps.AgentControlClient } : await import('../agent-control/client.js')
   const client = new AgentControlClient({ url: conn.url, token: conn.token, silent: true, deviceName: 'chroxy-agent-cli' })
@@ -46,7 +47,7 @@ async function connectToLocalDaemon(deps = {}) {
 function reportConnectFailure(result) {
   switch (result.reason) {
     case 'not_running': err('Chroxy server is not running. Start it with `chroxy start`.'); break
-    case 'liveness_unverified': err('Could not verify that the Chroxy daemon in connection.json is running: the record has no valid pid, or that pid could not be inspected from here (for example inside a sandbox). Its token was not used, and the record was left in place.'); break
+    case 'liveness_unverified': err(LIVENESS_UNVERIFIED_MESSAGE); break
     case 'no_token': err('Server is running without an auth token: agent management is unavailable.'); break
     default: err(`Could not reach the daemon: ${result.message || result.reason}`)
   }

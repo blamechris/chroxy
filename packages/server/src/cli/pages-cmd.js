@@ -12,6 +12,8 @@
  * daemon's public `httpUrl` (the tunnel/LAN base) so it opens on any device.
  */
 
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+
 import { basename } from 'path'
 
 function portFromUrl(url) {
@@ -26,13 +28,11 @@ function trimSlash(s) {
 }
 
 async function daemonRequest(method, path, deps, { body } = {}) {
-  const readConnectionInfo =
-    deps.readConnectionInfo || (await import('../connection-info.js')).readConnectionInfo
   const fetchFn = deps.fetchFn || globalThis.fetch
   const defaultPort = deps.defaultPort || 8765
 
-  const info = readConnectionInfo()
-  if (!info) return { ok: false, reason: 'not_running' }
+  const { info, ...state } = await readCliConnectionState(deps)
+  if (!info) return withheldResult(state)
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
   // Prefer the explicit local `port` (#5683) — in tunnel mode httpUrl/wsUrl are
   // public URLs with no :port to parse, so without this the loopback request
@@ -64,6 +64,8 @@ async function daemonRequest(method, path, deps, { body } = {}) {
 function reportFailure(result, writeErr) {
   if (result.reason === 'not_running') {
     writeErr('Chroxy server is not running. Start it with `chroxy start`.')
+  } else if (result.reason === 'liveness_unverified') {
+    writeErr(LIVENESS_UNVERIFIED_MESSAGE)
   } else if (result.reason === 'no_token') {
     writeErr('Server is running without an auth token — publishing is unavailable.')
   } else {

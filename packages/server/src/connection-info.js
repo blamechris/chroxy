@@ -39,31 +39,57 @@ export function writeConnectionInfo(info) {
  * transmits no credential. No claim is made here about what callers do next. Until
  * the daemon writes its record again, readers find none.
  *
- * Known debt (#9074, deferred): CLI callers get null for "unverified" exactly as for
- * "not running", so they fail closed but still word it as "not running". Reporting
- * unverified liveness truthfully in those CLIs and in `status` is follow-up work.
- * This reader does not claim to fix status semantics.
+ * This reader still collapses "unverified" and "not running" into null. A caller that
+ * must word them differently uses `readConnectionState()` below (#9229).
  *
  * @param {{ probePidLiveness?: (pid: unknown) => 'alive' | 'dead' | 'unverified' }} [deps]
  * @returns {object|null}
  */
 export function readConnectionInfo(deps = {}) {
+  return readConnectionState(deps).info
+}
+
+/**
+ * Why `readConnectionState()` returned no record (#9229). `info` is non-null only
+ * for `CONNECTION_ALIVE`.
+ */
+export const CONNECTION_ALIVE = 'alive'
+/** No file, an unreadable or unparseable file, or a non-object record. */
+export const CONNECTION_NO_RECORD = 'no_record'
+/** The recorded pid is proven gone (ESRCH); the stale record was removed. */
+export const CONNECTION_DEAD = 'dead'
+/** Liveness could not be established (EPERM, other probe error, missing/malformed pid). The record is kept. */
+export const CONNECTION_LIVENESS_UNVERIFIED = 'liveness_unverified'
+
+/**
+ * `readConnectionInfo()` plus the reason, so a CLI can word "no daemon" and "could not
+ * verify the daemon is running" differently. This is the ONE implementation:
+ * `readConnectionInfo()` returns `.info` of this, so the two cannot disagree about
+ * when a record (and with it the bearer token) is handed out. `info` is non-null ONLY
+ * when the probe says `alive`; `dead` and `unverified` both carry `info: null`.
+ * Deletion is unchanged: only `dead` unlinks.
+ *
+ * @param {{ probePidLiveness?: (pid: unknown) => 'alive' | 'dead' | 'unverified' }} [deps]
+ * @returns {{ info: object, reason: 'alive' } | { info: null, reason: 'no_record'|'dead'|'liveness_unverified' }}
+ */
+export function readConnectionState(deps = {}) {
   const probe = typeof deps.probePidLiveness === 'function' ? deps.probePidLiveness : probePidLiveness
   const connFile = getConnectionInfoPath()
-  if (!existsSync(connFile)) return null
+  if (!existsSync(connFile)) return { info: null, reason: CONNECTION_NO_RECORD }
   let info
   try {
     info = JSON.parse(readFileSync(connFile, 'utf-8'))
   } catch {
-    return null
+    return { info: null, reason: CONNECTION_NO_RECORD }
   }
-  if (!info || typeof info !== 'object') return null
+  if (!info || typeof info !== 'object') return { info: null, reason: CONNECTION_NO_RECORD }
   const liveness = probe(info.pid)
   if (liveness === PID_DEAD) {
     removeConnectionInfo() // the existing ESRCH cleanup, retained (see above)
-    return null
+    return { info: null, reason: CONNECTION_DEAD }
   }
-  return liveness === PID_ALIVE ? info : null
+  if (liveness === PID_ALIVE) return { info, reason: CONNECTION_ALIVE }
+  return { info: null, reason: CONNECTION_LIVENESS_UNVERIFIED }
 }
 
 export function removeConnectionInfo() {

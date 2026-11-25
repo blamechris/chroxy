@@ -11,15 +11,15 @@
  * approval can only ever originate from the host machine, never over the tunnel.
  */
 
+import { readCliConnectionState, withheldResult, LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
+
 async function approvalRequest(method, path, deps = {}) {
-  const readConnectionInfo =
-    deps.readConnectionInfo || (await import('../connection-info.js')).readConnectionInfo
   const readShellApprovalInfo =
     deps.readShellApprovalInfo || (await import('../shell-approval-info.js')).readShellApprovalInfo
   const fetchFn = deps.fetchFn || globalThis.fetch
 
-  const conn = readConnectionInfo()
-  if (!conn) return { ok: false, reason: 'not_running' }
+  const { info: conn, ...state } = await readCliConnectionState(deps)
+  if (!conn) return withheldResult(state)
   if (!conn.apiToken) return { ok: false, reason: 'no_token' }
   const approval = readShellApprovalInfo()
   if (!approval || !Number.isInteger(approval.port)) return { ok: false, reason: 'approval_disabled' }
@@ -46,6 +46,9 @@ function reportFailure(result, writeErr) {
   switch (result.reason) {
     case 'not_running':
       writeErr('Chroxy server is not running. Start it with `chroxy start`.')
+      break
+    case 'liveness_unverified':
+      writeErr(LIVENESS_UNVERIFIED_MESSAGE)
       break
     case 'no_token':
       writeErr('Server is running without an auth token — shell approval is unavailable.')
