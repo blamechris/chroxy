@@ -17,6 +17,7 @@
  * contacting the daemon, and no token is generated anywhere.
  */
 import { PRINCIPALS_NOT_ENABLED_MESSAGE } from '../principal-store.js'
+import { LIVENESS_UNVERIFIED_MESSAGE } from './connection-state.js'
 
 const out = (s) => process.stdout.write(`${s}\n`)
 const err = (s) => process.stderr.write(`${s}\n`)
@@ -46,7 +47,7 @@ async function connectToLocalDaemon(deps = {}) {
 function reportConnectFailure(result) {
   switch (result.reason) {
     case 'not_running': err('Chroxy server is not running. Start it with `chroxy start`.'); break
-    case 'liveness_unverified': err('Could not verify that the Chroxy daemon in connection.json is running: the record has no valid pid, or that pid could not be inspected from here (for example inside a sandbox). Its token was not used, and the record was left in place.'); break
+    case 'liveness_unverified': err(LIVENESS_UNVERIFIED_MESSAGE); break
     case 'no_token': err('Server is running without an auth token: agent management is unavailable.'); break
     default: err(`Could not reach the daemon: ${result.message || result.reason}`)
   }
