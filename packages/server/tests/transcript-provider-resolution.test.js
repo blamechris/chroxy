@@ -6,7 +6,7 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readdirSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readdirSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
@@ -195,28 +195,43 @@ describe('#7828 provider-aware transcript resolution', () => {
       assert.equal(messages.some((m) => m.content === 'EARLY'), false)
     })
 
-    it('releases the file descriptor on success and on every error path', { skip: process.platform === 'win32' }, async () => {
-      const openFds = () => readdirSync('/dev/fd').length
-      const okId = '00000000-0000-0000-0000-00000000c0cc'
-      const badId = '00000000-0000-0000-0000-00000000c0bf'
-      writeConv(claudeProjects, 'x', { id: badId, raw: `{nope\n${userLine('a')}\n` })
-      const ident = (id) => {
-        const r = resolveTranscriptSource({
-          provider: 'claude', conversationId: id, sourceLocator: `${PROJECT_KEY}/${id}.jsonl`,
-          sources: [{ provider: 'claude', projectsDir: claudeProjects }],
-        })
-        return r.identity
+    it('a file that is only one unterminated garbage line reads as an empty success (#8956)', async () => {
+      const id = '00000000-0000-0000-0000-00000000c0c1'
+      writeConv(claudeProjects, 'x', { id, raw: userLine('a').slice(0, 30) })
+      const { messages, truncated } = await readConversationTranscriptStrictAsync(fileOf(id))
+      assert.deepEqual(messages, [])
+      assert.equal(truncated, false)
+    })
+
+    it('CONTROL: the same single garbage line, newline-terminated, is still refused (#8956)', async () => {
+      const id = '00000000-0000-0000-0000-00000000c0c2'
+      writeConv(claudeProjects, 'x', { id, raw: `${userLine('a').slice(0, 30)}\n` })
+      await assert.rejects(readConversationTranscriptStrictAsync(fileOf(id)), (e) => e.code === 'corrupt')
+    })
+
+    it('releases the file descriptor on success and on every error path', { skip: process.platform === 'win32' && 'no fd directory on Windows' }, async (t) => {
+      const fdDir = ['/dev/fd', '/proc/self/fd'].find((d) => existsSync(d))
+      if (!fdDir) { t.skip('neither /dev/fd nor /proc/self/fd exists on this host'); return }
+      const openFds = () => readdirSync(fdDir).length
+      // Own fixtures in an own temp dir: this test must pass when run alone.
+      const own = mkdtempSync(join(tmpdir(), 'transcript-fd-'))
+      try {
+        const okFile = join(own, 'ok.jsonl')
+        const badFile = join(own, 'bad.jsonl')
+        writeFileSync(okFile, [userLine('a'), userLine('b'), userLine('c')].join('\n'))
+        writeFileSync(badFile, `{nope\n${userLine('a')}\n`)
+        const wrongIdentity = { dev: 0n, ino: 0n }
+        await readConversationTranscriptStrictAsync(okFile) // warm up
+        const before = openFds()
+        for (let i = 0; i < 25; i++) {
+          await readConversationTranscriptStrictAsync(okFile)
+          await assert.rejects(readConversationTranscriptStrictAsync(badFile))
+          await assert.rejects(readConversationTranscriptStrictAsync(okFile, undefined, { expectedIdentity: wrongIdentity }))
+        }
+        assert.equal(openFds(), before, 'no descriptor is left open by 75 reads across success, corrupt and identity-mismatch')
+      } finally {
+        rmSync(own, { recursive: true, force: true })
       }
-      const wrongIdentity = { dev: 0n, ino: 0n }
-      void ident
-      await readConversationTranscriptStrictAsync(fileOf(okId)) // warm up
-      const before = openFds()
-      for (let i = 0; i < 25; i++) {
-        await readConversationTranscriptStrictAsync(fileOf(okId))
-        await assert.rejects(readConversationTranscriptStrictAsync(fileOf(badId)))
-        await assert.rejects(readConversationTranscriptStrictAsync(fileOf(okId), undefined, { expectedIdentity: wrongIdentity }))
-      }
-      assert.equal(openFds(), before, 'no descriptor is left open by 75 reads across success, corrupt and identity-mismatch')
     })
 
     it('disallowed cwd for a bound client reads nothing', async () => {
