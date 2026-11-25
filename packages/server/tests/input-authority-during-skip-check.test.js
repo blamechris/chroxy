@@ -28,6 +28,20 @@ async function connect(port) {
 }
 const send = (ws, m) => ws.send(JSON.stringify(m))
 const seen = (ms, t) => waitFor(() => ms.find(m => m.type === t), { timeoutMs: 2000, label: t })
+// Condition wait for a frame a client has not yet received. A fixed tick is a tick-count wait: on a loaded host the
+// frame can land after it even though the server-side state already changed (#9339). `after` skips messages that
+// arrived before the action under test. Failure names the awaited type and what did arrive.
+const WAIT_MS = 10_000
+const waitForMessage = async (c, type, { after = 0, timeoutMs = WAIT_MS } = {}) => {
+  try {
+    return await waitFor(() => c.messages.slice(after).find(m => m.type === type), { timeoutMs, label: `no '${type}' frame arrived` })
+  } catch (err) {
+    // Snapshot what arrived at the moment the wait gave up, not when it started.
+    throw new Error(`${err.message}; got [${c.messages.slice(after).map(m => m.type).join(', ')}]`)
+  }
+}
+const waitForClose = (c, timeoutMs = WAIT_MS) =>
+  waitFor(() => c.closed(), { timeoutMs, label: 'connection never closed' })
 const tick = (ms = 80) => new Promise(r => setTimeout(r, ms))
 // The default 50 ms match deadline can run out on a loaded host; these tests assert dispatch, not the deadline.
 const patientMatcher = createBoundedRegexMatcher({ timeoutMs: 10_000 })
@@ -62,9 +76,7 @@ describe('a primary revoke reaches a live session-scoped connection', () => {
     assert.equal(rec.boundSessionId, 'session-1')
     const before = c.messages.length
     tm.revoke()
-    await tick()
-    const after1 = c.messages.slice(before)
-    const notice = after1.find(m => m.type === 'token_rotated')
+    const notice = await waitForMessage(c, 'token_rotated', { after: before })
     assert.ok(notice, 'bound got the notice')
     assert.equal(notice.reason, 'revoke')
     assert.equal('token' in notice, false)
@@ -92,11 +104,9 @@ describe('a primary revoke reaches a live session-scoped connection', () => {
     const dev = pm._deviceIdForToken(token)
     // re-auth with own still-valid bound token first
     send(c.ws, { type: 'auth', token, protocolVersion: 1 })
-    await tick()
-    const reAuth = c.messages.slice(n2)
+    const ok = await waitForMessage(c, 'auth_ok', { after: n2 })
     assert.equal(rec.authenticated, true)
     assert.equal(rec.boundSessionId, 'session-1')
-    const ok = reAuth.find(m => m.type === 'auth_ok')
     assert.ok(ok); assert.equal(ok.billingCanary, undefined); assert.equal(ok.webFeatures, undefined)
     // still scoped
     send(c.ws, { type: 'input', data: 'hello after reauth', sessionId: 'session-2' })
@@ -104,7 +114,7 @@ describe('a primary revoke reaches a live session-scoped connection', () => {
     assert.equal(b.made.sessionsMap.get('session-2').session.sendMessage.callCount, 0)
     prim.ws.close()
     assert.equal(pm.revokeSessionTokenById(dev).revoked, 1)
-    await tick()
+    await waitForClose(c)
     assert.equal(c.closed()?.code, 4401)
     assert.ok(c.messages.find(m => m.type === 'credential_invalidated'))
   })
@@ -113,8 +123,9 @@ describe('a primary revoke reaches a live session-scoped connection', () => {
     const b = await boot()
     const token = b.mint('session-1')
     const c = await b.auth(token)
-    tm.revoke(); await tick()
-    pm.revokeSessionTokenById(pm._deviceIdForToken(token)); await tick()
+    const n0 = c.messages.length
+    tm.revoke(); await waitForMessage(c, 'token_rotated', { after: n0 })
+    pm.revokeSessionTokenById(pm._deviceIdForToken(token)); await waitForClose(c)
     assert.equal(c.closed()?.code, 4401)
     assert.equal(server.clients.size, 0)
   })
