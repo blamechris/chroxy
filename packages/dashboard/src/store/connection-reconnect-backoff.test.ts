@@ -485,6 +485,8 @@ const ALL_SESSION_STATE_KEYS = {
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,
+  // #9069: locally-cleared follow-ups awaiting the server's interrupted dequeue.
+  interruptedQueued: true,
   // Dashboard-only fields (packages/dashboard/src/store/types.ts)
   terminalRawBuffer: true,
   terminalSize: true,

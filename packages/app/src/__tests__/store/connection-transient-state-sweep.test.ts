@@ -237,6 +237,8 @@ const ALL_BASE_SESSION_STATE_KEYS = {
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,
+  // #9069: locally-cleared follow-ups awaiting the server's interrupted dequeue.
+  interruptedQueued: true,
 } satisfies Record<keyof Required<BaseSessionState>, true>;
 
 /**

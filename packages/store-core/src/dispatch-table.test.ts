@@ -2394,6 +2394,43 @@ describe('shared dispatch table', () => {
   })
 
   describe('message_queued / message_dequeued (#5937)', () => {
+    it('#9069: interrupted dequeues coalesce into ONE "Not sent" notice; cancelled/flush add none', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1', messages: [],
+            queuedMessages: [
+              { clientMessageId: 'a', text: 'first', queuedAt: 1, status: 'confirmed' },
+              { clientMessageId: 'b', text: 'second', queuedAt: 2, status: 'confirmed' },
+              { clientMessageId: 'c', text: 'third', queuedAt: 3, status: 'confirmed' },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'c', queueLength: 2, reason: 'cancelled' })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'a', queueLength: 1, reason: 'interrupted' })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'b', queueLength: 0, reason: 'interrupted' })
+      const msgs = env.sessions.s1.messages as Array<{ content: string; type: string }>
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0]!.type).toBe('system')
+      expect(msgs[0]!.content).toBe('Not sent \u2014 Stop discarded 2 queued messages: \u201cfirst\u201d, \u201csecond\u201d')
+    })
+
+    it('#9069: names a locally-cleared entry from the stash and spends it', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1', messages: [], queuedMessages: [],
+            interruptedQueued: [{ clientMessageId: 'a', text: 'gone', queuedAt: 1, status: 'confirmed' }],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'a', queueLength: 0, reason: 'interrupted' })
+      expect((env.sessions.s1.messages as Array<{ content: string }>)[0]!.content)
+        .toBe('Not sent \u2014 Stop discarded 1 queued message: \u201cgone\u201d')
+      expect(env.sessions.s1.interruptedQueued).toEqual([])
+    })
+
     it('routes a late input acknowledgement to the matching session/request (#7822)', () => {
       const env = makeAdapter({
         sessions: {

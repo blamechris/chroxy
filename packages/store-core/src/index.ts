@@ -743,6 +743,8 @@ export {
   handleMessageDequeued,
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
+  // #9069 — remember what a local Stop cleared so the interrupted dequeue can name it
+  stashClearedQueue,
   // #5950 — orphan-badge safety net: reconcile local queue length to the
   // server's authoritative count so a dropped message_dequeued self-heals.
   reconcileQueueLength,

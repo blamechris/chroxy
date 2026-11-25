@@ -189,6 +189,7 @@ import {
   // immediately without waiting on the round-trip.
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
+  stashClearedQueue,
   // #7603: the one place the container-lost fields are cleared, shared with the
   // dashboard so a dismiss means the same thing on both clients.
   clearContainerLostPatch,
@@ -2154,6 +2155,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const queuedIds = new Set(queued.map((q) => q.clientMessageId).filter((id): id is string => !!id));
         updateSession(activeSessionId, (ss) => ({
           queuedMessages: [],
+          // #9069 — the server's interrupted dequeues carry no text; keep it for the notice.
+          interruptedQueued: stashClearedQueue(ss.interruptedQueued, queued),
           messages: ss.messages.filter((m) => !queuedIds.has(m.id)),
           inputDeliveries: [...queuedIds].reduce(
             (records, id) => cancelInputDelivery(records, id),
