@@ -124,8 +124,15 @@ describe('#7828 follow-ups', () => {
     })
 
     it('the strict reader refuses a non-regular file directly', { ...opts, skip: process.platform === 'win32' && 'no mkfifo on Windows' }, async () => {
-      const path = join(claudeProjects, KEY, `${fifoId}.jsonl`)
-      await assert.rejects(readConversationTranscriptStrictAsync(path), (e) => e.name === 'TranscriptDataError')
+      // Own FIFO in an own temp dir: independent of the previous test.
+      const own = mkdtempSync(join(tmpdir(), 'transcript-fifo-'))
+      try {
+        const path = join(own, `${fifoId}.jsonl`)
+        execFileSync('mkfifo', [path])
+        await assert.rejects(readConversationTranscriptStrictAsync(path), (e) => e.name === 'TranscriptDataError')
+      } finally {
+        rmSync(own, { recursive: true, force: true })
+      }
     })
 
     it('a symlink to a non-regular file is refused promptly', { ...opts, skip: process.platform === 'win32' && 'no /dev/null on Windows' }, async () => {

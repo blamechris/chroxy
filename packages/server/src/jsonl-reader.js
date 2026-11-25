@@ -242,6 +242,13 @@ function parseJsonlContent(raw, { byteTruncated = false, strict = false } = {}) 
       // and tolerated: the first line of a tail-only read (cut by construction)
       // and an unterminated final line (a crash, a kill mid-write, or a session
       // still being appended to) — everything before the cut still replays.
+      //
+      // Deliberate (#8956): the final-line tolerance does NOT require an earlier
+      // parsed record. A file whose ONLY content is one unterminated unparseable
+      // line reads as an empty SUCCESSFUL transcript. That is the right answer
+      // for a session caught mid-write of its first record (crashed or still
+      // active), and it is indistinguishable by shape from garbage; a terminated
+      // garbage line is still refused. Pinned in transcript-provider-resolution.
       const tailCutFirstLine = byteTruncated && i === 0
       const unterminatedFinalLine = i === rawLines.length - 1
       if (strict && !tailCutFirstLine && !unterminatedFinalLine) {
