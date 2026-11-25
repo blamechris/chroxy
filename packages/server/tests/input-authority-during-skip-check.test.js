@@ -32,8 +32,14 @@ const seen = (ms, t) => waitFor(() => ms.find(m => m.type === t), { timeoutMs: 2
 // frame can land after it even though the server-side state already changed (#9339). `after` skips messages that
 // arrived before the action under test. Failure names the awaited type and what did arrive.
 const WAIT_MS = 10_000
-const waitForMessage = (c, type, { after = 0, timeoutMs = WAIT_MS } = {}) =>
-  waitFor(() => c.messages.slice(after).find(m => m.type === type), { timeoutMs, label: `no '${type}' frame arrived; got [${c.messages.slice(after).map(m => m.type).join(', ')}]` })
+const waitForMessage = async (c, type, { after = 0, timeoutMs = WAIT_MS } = {}) => {
+  try {
+    return await waitFor(() => c.messages.slice(after).find(m => m.type === type), { timeoutMs, label: `no '${type}' frame arrived` })
+  } catch (err) {
+    // Snapshot what arrived at the moment the wait gave up, not when it started.
+    throw new Error(`${err.message}; got [${c.messages.slice(after).map(m => m.type).join(', ')}]`)
+  }
+}
 const waitForClose = (c, timeoutMs = WAIT_MS) =>
   waitFor(() => c.closed(), { timeoutMs, label: 'connection never closed' })
 const tick = (ms = 80) => new Promise(r => setTimeout(r, ms))
