@@ -2752,7 +2752,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
         if (crashedId && get().sessionStates[crashedId]) {
-          updateSession(crashedId, () => ({ health: 'crashed' as const }));
+          // #8931 — a crash ends that session's turn; settle any open thinking
+          // bubble like `result` does so an empty one stops animating.
+          updateSession(crashedId, (ss) => ({
+            health: 'crashed' as const,
+            messages: finalizeThinkingStreams([...ss.messages]),
+          }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
       } else if (parsed.category === 'input_conflict') {
@@ -4160,7 +4165,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       const errSessionId = serverError.sessionId;
       if (errSessionId && get().sessionStates[errSessionId]) {
         updateSession(errSessionId, (ss) => ({
-          messages: filterThinking([...ss.messages, errorMsg]),
+          messages: filterThinking(finalizeThinkingStreams([...ss.messages, errorMsg])),
           streamingMessageId: null,
           // #6302 — clearing the stream tears down any faked-fresh turn; drop its
           // owner so a stale id can't linger past the 'pending' window.
@@ -4170,7 +4175,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         const activeErrId = get().activeSessionId;
         if (activeErrId && get().sessionStates[activeErrId]) {
           updateActiveSession((ss) => ({
-            messages: filterThinking([...ss.messages, errorMsg]),
+            messages: filterThinking(finalizeThinkingStreams([...ss.messages, errorMsg])),
             streamingMessageId: null,
             pendingClientMessageId: null,
           }));
