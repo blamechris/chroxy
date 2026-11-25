@@ -840,6 +840,10 @@ describe('store lock: creation, lease, fencing', () => {
     await assert.rejects(withInterprocessLock(folderTrustStorePath(), async () => {}), /locked by another process/)
     assert.ok(readFileSync(lockPath(), 'utf8').includes('foreign-holder'), 'within its lease: not reclaimed')
     age(lockPath())
+    // The short wait above only bounds the "never while current" half. The reclaim itself is several
+    // file operations plus a 20 ms retry, and the acquire gives up once its deadline passes even after
+    // a reclaim made progress: on a loaded Windows runner a 150 ms budget was missed (#9329).
+    setLockWaitForTest()
     let runs = 0
     await withInterprocessLock(folderTrustStorePath(), async () => { runs += 1 })
     assert.equal(runs, 1, 'past its lease: reclaimed')
