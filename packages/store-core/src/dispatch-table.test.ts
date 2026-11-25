@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { formatActiveModelLabel, modelDisplayTarget } from './model-display'
 import {
   createDispatchTable,
@@ -2414,6 +2414,68 @@ describe('shared dispatch table', () => {
       expect(msgs).toHaveLength(1)
       expect(msgs[0]!.type).toBe('system')
       expect(msgs[0]!.content).toBe('Not sent \u2014 Stop discarded 2 queued messages: \u201cfirst\u201d, \u201csecond\u201d')
+    })
+
+    describe('#9069 notice coalescing + stash', () => {
+      const q = (id: string, text: string) => ({ clientMessageId: id, text, queuedAt: 1, status: 'confirmed' as const })
+      const deq = (env: ReturnType<typeof makeAdapter>, id: string | undefined) =>
+        dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: id, reason: 'interrupted' } as never)
+      const notices = (env: ReturnType<typeof makeAdapter>) =>
+        (env.sessions.s1.messages as Array<{ id: string; content: string }>).filter((m) => m.id.startsWith('queue-discarded-'))
+      beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000) })
+      afterEach(() => { vi.useRealTimers() })
+
+      it('two Stops separated by a new user message give two notices', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [q('a', 'one')] } } })
+        deq(env, 'a')
+        env.sessions.s1.messages = [...(env.sessions.s1.messages as unknown[]), { id: 'u2', type: 'user_input', content: 'again', timestamp: 1 }] as never
+        env.sessions.s1.queuedMessages = [q('b', 'two')]
+        vi.advanceTimersByTime(1000)
+        deq(env, 'b')
+        expect(notices(env).map((n) => n.content)).toEqual([
+          'Not sent \u2014 Stop discarded 1 queued message: \u201cone\u201d',
+          'Not sent \u2014 Stop discarded 1 queued message: \u201ctwo\u201d',
+        ])
+      })
+
+      it('one Stop whose frames arrive 3 s apart over 8 s stays ONE notice (sliding window)', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [q('a', 'one'), q('b', 'two'), q('c', 'three')] } } })
+        deq(env, 'a'); vi.advanceTimersByTime(3000)
+        deq(env, 'b'); vi.advanceTimersByTime(3000)
+        deq(env, 'c')
+        expect(notices(env)).toHaveLength(1)
+        expect(notices(env)[0]!.content).toBe('Not sent \u2014 Stop discarded 3 queued messages: \u201cone\u201d, \u201ctwo\u201d, \u201cthree\u201d')
+      })
+
+      it('a gap longer than the window starts a new notice', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [q('a', 'one'), q('b', 'two')] } } })
+        deq(env, 'a'); vi.advanceTimersByTime(6000)
+        deq(env, 'b')
+        expect(notices(env)).toHaveLength(2)
+      })
+
+      it('a duplicate frame is a no-op', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [q('a', 'one')] } } })
+        deq(env, 'a')
+        const before = env.sessions.s1.messages
+        deq(env, 'a')
+        expect(notices(env)).toHaveLength(1)
+        expect(notices(env)[0]!.content).toContain('discarded 1 queued message:')
+        expect(env.sessions.s1.messages).toEqual(before)
+      })
+
+      it('an id-less dequeue never consumes the stash: it reads (text unavailable)', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [], interruptedQueued: [q('a', 'kept')] } } })
+        deq(env, undefined)
+        expect(notices(env)[0]!.content).toBe('Not sent \u2014 Stop discarded 1 queued message: \u201c(text unavailable)\u201d')
+        expect(env.sessions.s1.interruptedQueued).toHaveLength(1)
+      })
+
+      it('an attachment-only message shows as (attachment)', () => {
+        const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [q('a', '')] } } })
+        deq(env, 'a')
+        expect(notices(env)[0]!.content).toContain('\u201c(attachment)\u201d')
+      })
     })
 
     it('#9069: names a locally-cleared entry from the stash and spends it', () => {

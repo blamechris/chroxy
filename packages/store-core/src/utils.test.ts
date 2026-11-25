@@ -65,6 +65,7 @@ describe('createEmptyBaseSessionState', () => {
       // #5937: outgoing-message queue — empty array on init, populated by
       // message_queued / optimistic enqueue.
       queuedMessages: [],
+      interruptedQueued: [],
       // #7822: correlated input acknowledgements are scoped to one session.
       inputDeliveries: {},
     })
@@ -177,6 +178,7 @@ describe('TRANSIENT_SESSION_SWEEP_FIELDS (#7411)', () => {
       'inactivityWarning',
       'sessionRole',
       'primaryClientId',
+      'interruptedQueued',
     ])
   })
 

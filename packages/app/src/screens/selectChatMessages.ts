@@ -30,7 +30,7 @@
  *   lives in the chat only and neither lists on the System tab nor counts toward
  *   its unread badge.
  */
-import { isTurnOutcomeMarker, isSystemTabMessage } from '@chroxy/store-core';
+import { isTurnOutcomeMarker, isDiscardNotice, isSystemTabMessage } from '@chroxy/store-core';
 import type { ChatMessage } from '../store/connection';
 
 export interface SelectChatMessagesOptions {
@@ -51,7 +51,7 @@ export function shouldShowInChat(
   // #7326: a turn-outcome chip ("Reply cut off") is positional like a compaction
   // marker -- it describes the turn above it -- so it passes too. ChatView gets
   // it from the shared buildChatViewMessages pipeline, which lets it through.
-  if (m.type === 'system') return m.compactMetadata != null || isTurnOutcomeMarker(m);
+  if (m.type === 'system') return m.compactMetadata != null || isTurnOutcomeMarker(m) || isDiscardNotice(m);
   if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
   return true;
 }

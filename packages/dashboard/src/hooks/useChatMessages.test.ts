@@ -56,6 +56,21 @@ describe('useChatMessages', () => {
     expect(ids).toEqual(['u1', 'r1'])
   })
 
+  it('#9069: lets the "Not sent" Stop notice into chat while other system rows stay out', () => {
+    const messages = [
+      msg({ id: 'u1', type: 'user_input', content: 'hi' }),
+      msg({ id: 's1', type: 'system', content: 'connected' }),
+      msg({
+        id: 'queue-discarded-1', type: 'system', content: 'Not sent \u2014 Stop discarded 1 queued message: \u201cx\u201d',
+        discardedFollowUps: [{ id: 'a', preview: 'x' }],
+      }),
+    ]
+    const { result } = renderHook(() =>
+      useChatMessages({ storeMessages: messages, streamingMessageId: null }),
+    )
+    expect(result.current.chatMessages.map(m => m.id)).toEqual(['u1', 'queue-discarded-1'])
+  })
+
   it('passes singleton tool_use through as `tool_use`, not collapsed', () => {
     const messages = [
       msg({ id: 'u1', type: 'user_input', content: 'do a thing' }),

@@ -27,6 +27,7 @@ import { describeTurnOutcome, isMarkedTurnOutcome } from '@chroxy/protocol'
 import type { MarkedTurnOutcome } from '@chroxy/protocol'
 import type { ChatMessage } from './types'
 import { nextMessageId } from './utils'
+import { isDiscardNotice } from './handlers/outgoing-queue'
 
 /** Test id both clients put on the chip, so one smoke script drives either. */
 export const TURN_OUTCOME_MARKER_TESTID = 'turn-outcome-marker'
@@ -94,11 +95,11 @@ export function isTurnOutcomeMarker(m: ChatMessage): boolean {
  * it lives in the chat flow only (the shared `buildChatViewMessages` pipeline
  * lets it through); listing it a second time on the System tab put the same
  * event on two tabs and bumped a badge for something the user was already
- * looking at. Both clients derive the System tab from this one predicate, so the
+ * looking at. The #9069 "Not sent" notice is positional the same way. Both clients derive the System tab from this one predicate, so the
  * live append and a replay rebuild cannot disagree about it (#8461).
  */
 export function isSystemTabMessage(m: ChatMessage): boolean {
-  return m.type === 'system' && !isTurnOutcomeMarker(m)
+  return m.type === 'system' && !isTurnOutcomeMarker(m) && !isDiscardNotice(m)
 }
 
 /**

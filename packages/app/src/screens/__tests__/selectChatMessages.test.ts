@@ -25,6 +25,26 @@ const marker = (id = 'compact1'): ChatMessage =>
 
 const opts = (chatFilterCompact: boolean) => ({ chatFilterCompact, isHiddenInCompactMode });
 
+describe('#9069 — the "Not sent" notice reaches the Chat tab, not the System tab', () => {
+  const notice = msg({
+    id: 'queue-discarded-1',
+    type: 'system',
+    content: 'Not sent \u2014 Stop discarded 1 queued message: \u201cx\u201d',
+    discardedFollowUps: [{ id: 'a', preview: 'x' }],
+  });
+  const plain = msg({ id: 'sys1', type: 'system', content: 'connected' });
+
+  it.each([false, true])('is shown in chat (compact %s) while a plain system row is not', (compact) => {
+    expect(shouldShowInChat(notice, opts(compact))).toBe(true);
+    expect(shouldShowInChat(plain, opts(compact))).toBe(false);
+    expect(selectChatMessages([plain, notice], opts(compact))).toEqual([notice]);
+  });
+
+  it('is excluded from the System tab set', () => {
+    expect(selectSystemMessages([plain, notice])).toEqual([plain]);
+  });
+});
+
 describe('selectChatMessages', () => {
   describe('INVARIANT 1 — compaction markers survive, compact mode included', () => {
     it('keeps a compaction marker with compact mode OFF', () => {

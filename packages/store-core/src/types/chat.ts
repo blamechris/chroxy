@@ -411,6 +411,8 @@ export interface ChatMessage {
    * notice instead of adding another. Built by `handleMessageDequeued`.
    */
   discardedFollowUps?: { id?: string; preview: string }[];
+  /** #9069 — when that notice was last extended; the coalescing window slides from it. */
+  discardedLastAt?: number;
 }
 
 /**
