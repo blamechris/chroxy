@@ -236,7 +236,7 @@ describe('an unverified record is worded as unverified, and still fails closed (
     assert.equal(sentBearer(calls), true)
   })
 
-  it('status: not running + unverified is reported as could-not-verify, JSON and human, with no request at all', async () => {
+  it('status: not running + unverified is reported as could-not-verify, JSON and human, with no bearer and no /metrics', async () => {
     // Mutation: drop the unverified branch in printHuman -> "Not running" is printed.
     const { runStatusCmd } = await import('../src/cli/status-cmd.js')
     const calls = []
@@ -288,6 +288,20 @@ describe('an unverified record is worded as unverified, and still fails closed (
       assert.equal(result.reason, 'liveness_unverified')
       assert.equal(result.connectionReason, state.reason ?? null)
       assert.equal(calls.length, 0)
+    })
+
+    it(`status: a ${label} reason is reported as could-not-verify, never "Not running", with no bearer`, async () => {
+      // Mutation: status classifies only an exact liveness_unverified as unverified -> red.
+      const { runStatusCmd } = await import('../src/cli/status-cmd.js')
+      const calls = []
+      const downFetch = async (url, init = {}) => { calls.push({ url: String(url), headers: { ...(init.headers || {}) } }); throw new Error('unreachable') }
+      const out = []
+      const status = await runStatusCmd({}, { readConnectionState: () => state, fetchFn: downFetch, write: (s) => out.push(s), defaultPort: 47999 })
+      assert.equal(status.livenessUnverified, true)
+      assert.equal(status.connectionReason, state.reason ?? null)
+      assert.ok(/Could not verify/.test(out.join('\n')))
+      assert.equal(/Status:\s+Not running/.test(out.join('\n')), false)
+      assert.equal(sentBearer(calls), false, 'no request carried a bearer')
     })
   }
 
