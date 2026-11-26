@@ -1978,7 +1978,8 @@ function applyIdentityRefusal(ctx: ConnectionContext, reason: string, message: s
     Alert.alert('Server Identity Changed', message);
   }
   try { ctx.socket.close(); } catch { /* already closing */ }
-  getStore().setState({ socket: null });
+  // Every pre-auth teardown clears the server default with the socket (#9159).
+  getStore().setState({ socket: null, serverDefaultProvider: null });
   // Consume the pairing identity so a subsequent dial doesn't reuse it.
   pendingPairingIdentityKey = null;
 }
@@ -2158,7 +2159,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         useConnectionLifecycleStore.getState().setConnectionError('This server must be updated before pairing this device.', 0);
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
-        set({ socket: null });
+        set({ socket: null, serverDefaultProvider: null });
         ctx.socket.close();
         break;
       }
@@ -2375,7 +2376,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
-          set({ socket: null });
+          set({ socket: null, serverDefaultProvider: null });
           useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
           _ctx.pendingKeyPair = null;
           _ctx.pendingSalt = null;
@@ -2454,7 +2455,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         forgetSavedConnectionFor(ctx, get);
       }
       ctx.socket.close();
-      set({ socket: null });
+      set({ socket: null, serverDefaultProvider: null });
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       // Surface the failure reason so the banner appears even on silent
       // (auto-)reconnect attempts where no Alert is shown (#2770).
@@ -2468,7 +2469,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
 
     case 'pair_fail': {
       ctx.socket.close();
-      set({ socket: null });
+      set({ socket: null, serverDefaultProvider: null });
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       if (!ctx.silent) {
         // Reason parse + friendly QR-flow copy shared via store-core (#5454).
