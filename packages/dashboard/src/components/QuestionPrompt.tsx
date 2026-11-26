@@ -85,6 +85,7 @@ export interface QuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
+  answeredAt?: number
   /**
    * #4685 — when true, an `AskUserQuestion` permission_request for the
    * owning session is still unresolved (the user has NOT clicked Allow
@@ -146,7 +147,7 @@ export interface QuestionPromptProps {
   onSelect: (answer: string | MultiQuestionAnswersMap | OtherFreeformAnswer) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, answeredAt, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
   // #4685 — gate ALL interactive question content (text, options, multi-question
   // form, deferred notice, free-text input) behind the `pendingPermission`
   // flag: nothing of the question can be answered until the user has clicked
@@ -200,6 +201,7 @@ export function QuestionPrompt({ question, options, answered, questions, allowMu
       question={question}
       options={options}
       answered={answered}
+      answeredAt={answeredAt}
       onSelect={onSelect}
     />
   )
@@ -344,10 +346,11 @@ interface SingleQuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
+  answeredAt?: number
   onSelect: (value: string | OtherFreeformAnswer) => void
 }
 
-function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQuestionPromptProps) {
+function SingleQuestionPrompt({ question, options, answered, answeredAt, onSelect }: SingleQuestionPromptProps) {
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
   // #4651 — when the user clicks the Other option button, stash the option's
@@ -442,7 +445,7 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
   // it). It is NOT answered, so it gets no "✓" and none of the answered-summary
   // chrome (the options it would list were never chosen): just the question and an
   // honest notice. Placed after every hook above, so the hook order is unchanged.
-  const ended = questionEndedNotice(answered)
+  const ended = questionEndedNotice(answered, answeredAt)
   if (ended) {
     return (
       <div className={`question-prompt question-prompt--${ended.kind}`} data-testid="question-prompt">

@@ -1622,7 +1622,7 @@ function truncateInput(input: Record<string, unknown>): string {
 
 /**
  * Push a notification for a background session event.
- * Identified questions keep one row per question. Other events replace by session and type.
+ * Native Codex questions keep one row per question. Other events replace by session and type.
  */
 function pushSessionNotification(
   sessionId: string,
@@ -1651,7 +1651,7 @@ function pushSessionNotification(
     ...(extra?.inputPreview ? { inputPreview: extra.inputPreview } : {}),
   };
   getStore().setState((s) => {
-    const filtered = s.sessionNotifications.filter(
+    const filtered = toolUseId ? s.sessionNotifications : s.sessionNotifications.filter(
       (n) => n.sessionId !== sessionId || n.eventType !== eventType || n.toolUseId !== undefined,
     );
     return { sessionNotifications: [...filtered, notification] };

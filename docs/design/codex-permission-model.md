@@ -102,17 +102,25 @@ Chroxy rule (see §4).
 
 ### Native user questions
 
-The Chroxy-owned app-server client handles `item/tool/requestUserInput` for
-its thread and requests relayed to that client by Codex workers. It presents
-one to three choice questions or a single free-text question. A single choice
-question can offer custom text when Codex allows it. Chroxy rejects secret
-fields, forms it cannot render, and malformed requests.
+The Chroxy-owned app-server client handles `item/tool/requestUserInput` on
+its existing connection. It presents one to three choice questions or a
+single free-text question. A single choice question can offer custom text
+when Codex allows it. Chroxy rejects secret fields, forms it cannot render,
+and malformed requests. Older clients can offer an Other choice when the
+provider disallows it. The server still validates each submitted answer.
+
+Codex CLI 0.163.0 limits its built-in `request_user_input` tool to the root
+thread. The `default_mode_request_user_input` feature is disabled by default
+in Codex's Default collaboration mode. Chroxy permission modes are separate
+from Codex collaboration modes. [Codex tool handler](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/src/tools/handlers/request_user_input.rs#L61-L77) · [Codex feature default](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/features/src/lib.rs#L1770-L1775)
 
 Only an explicit answer to the matching Chroxy question sends a result keyed
 by Codex question ID. Chroxy treats `autoResolutionMs` as metadata and waits
 for a human or for Codex to close the request. A matching
 `serverRequest/resolved` retires the question without sending an answer. A
 WebSocket reconnect can restore a still-pending question with the same ID.
+Codex scopes its own cancellation to a thread. Synthetic worker-shaped
+fixtures exercise this correlation in Chroxy. [Codex request lifecycle](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server/src/outgoing_message.rs#L201-L216)
 
 Codex Desktop owns its own app-server connection. This support applies to
 questions delivered to Chroxy's existing connection.

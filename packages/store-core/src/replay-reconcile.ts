@@ -1596,10 +1596,11 @@ export const QUESTION_RESOLVED_PLACEHOLDER = '(no longer pending)'
 /**
  * Is `answered` one of the non-decision tokens a QUESTION can end in without
  * anyone having answered it (as opposed to the replay sweep's '(resolved)', which
- * means "answered or expired, unknown which")?
+ * means "answered or expired, unknown which")? A timestamped answer may contain
+ * the same text verbatim.
  */
-export function isQuestionNoAnswerToken(answered: unknown): boolean {
-  return (
+export function isQuestionNoAnswerToken(answered: unknown, answeredAt?: number): boolean {
+  return answeredAt === undefined && (
     answered === QUESTION_INTERRUPTED_PLACEHOLDER ||
     answered === QUESTION_SUPERSEDED_PLACEHOLDER ||
     answered === QUESTION_NOT_DELIVERED_PLACEHOLDER ||

@@ -6,6 +6,7 @@
  *     reached nothing, so the card (marked answered on send) says so.
  */
 import { Alert } from 'react-native';
+import { questionEndedNotice } from '@chroxy/store-core';
 import { _testMessageHandler, setStore } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
@@ -81,10 +82,10 @@ describe('question cards that end with no answer (#8470)', () => {
     }));
     const dispatch = _testMessageHandler.handle;
     const pending = {
-      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-1',
       questions: [{ question: 'Select a layout', options: [{ label: 'List' }], allowOther: false }],
     };
-    const other = { ...pending, toolUseId: 'codex-ask-2' };
+    const other = { ...pending, toolUseId: 'ask-codex-2' };
     const notices = () => store.getState().sessionNotifications;
     const mobileNotices = () => useNotificationStore.getState().sessionNotifications;
     const workerCards = () => store.getState().sessionStates.worker.messages;
@@ -113,7 +114,7 @@ describe('question cards that end with no answer (#8470)', () => {
       type: 'permission_resolved', toolUseId: pending.toolUseId, decision: 'deny',
       reason: 'resolved', resolvedBy: { kind: 'cleared' }, sessionId: 'worker',
     };
-    dispatch({ ...clear, toolUseId: 'unknown' });
+    dispatch({ ...clear, toolUseId: 'ask-codex-unknown' });
     dispatch({ ...clear, sessionId: 's1' });
     dispatch({ ...clear, requestId: pending.toolUseId });
     expect(notices()).toHaveLength(3);
@@ -136,14 +137,57 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(workerCards()[2].answered).toBe('allow');
   });
 
-  it('preserves a real answer when a native question is cleared after a human response', () => {
-    const answer = { answered: 'A1', answeredAt: 5, answeredAnswers: { 'First?': 'A1' } };
-    seed([card(answer)]);
-    _testMessageHandler.handle({
-      type: 'permission_resolved', toolUseId: 'ask-1', decision: 'allow',
+  it('replaces the legacy notice in both mobile stores without touching native questions or permissions', () => {
+    store.setState((state) => ({
+      sessions: [...state.sessions, { sessionId: 'worker', name: 'Worker' } as ConnectionState['sessions'][number]],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }));
+    const dispatch = _testMessageHandler.handle;
+    const notices = () => store.getState().sessionNotifications;
+    const mobileNotices = () => useNotificationStore.getState().sessionNotifications;
+    const legacy = (n: number) => dispatch({
+      type: 'user_question', sessionId: 'worker', toolUseId: `ask-legacy-${n}`,
+      questions: [{ question: `Legacy question ${n}?` }],
+    });
+    const toolUseId = 'ask-codex-current';
+    legacy(1);
+    dispatch({ type: 'permission_request', requestId: 'permission-1', sessionId: 'worker', tool: 'Read' });
+    dispatch({ type: 'user_question', sessionId: 'worker', toolUseId, questions: [{ question: 'Native question?' }] });
+    expect(notices().map((n) => n.message)).toEqual(['Legacy question 1?', 'Read', 'Native question?']);
+    expect(mobileNotices()).toEqual(notices());
+    legacy(2);
+    legacy(3);
+    expect(notices().map((n) => [n.message, n.toolUseId, n.requestId])).toEqual([
+      ['Read', undefined, 'permission-1'],
+      ['Native question?', toolUseId, undefined],
+      ['Legacy question 3?', undefined, undefined],
+    ]);
+    expect(mobileNotices()).toEqual(notices());
+    dispatch({ type: 'permission_resolved', toolUseId, sessionId: 'worker', decision: 'deny', reason: 'resolved' });
+    expect(notices().map((n) => n.message)).toEqual(['Read', 'Legacy question 3?']);
+    expect(mobileNotices()).toEqual(notices());
+  });
+
+  it('preserves a real answer with literal closure text through native live clear and history replay', () => {
+    const answer = {
+      answered: '(no longer pending)', answeredAt: 5, answeredAnswers: { 'First?': '(no longer pending)' },
+    };
+    const toolUseId = 'ask-codex-1';
+    seed([card({ ...answer, toolUseId })]);
+    const dispatch = _testMessageHandler.handle;
+    dispatch({
+      type: 'permission_resolved', toolUseId, decision: 'allow',
       reason: 'resolved', resolvedBy: { kind: 'user' }, sessionId: 's1',
     });
     expect(messages()[0]).toMatchObject(answer);
+    dispatch({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    dispatch({
+      type: 'user_question', toolUseId, sessionId: 's1',
+      questions: [{ question: 'First?' }], resolved: true, historySeq: 2,
+    });
+    dispatch({ type: 'history_replay_end', sessionId: 's1' });
+    expect(messages()[0]).toMatchObject(answer);
+    expect(questionEndedNotice(messages()[0].answered, messages()[0].answeredAt)).toBeNull();
   });
 
   it('removes a notice after missed worker clear history and skips fresh historical notices', () => {
@@ -153,7 +197,7 @@ describe('question cards that end with no answer (#8470)', () => {
     }));
     const dispatch = _testMessageHandler.handle;
     const pending = {
-      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-1',
       questions: [{ question: 'Select a layout' }],
     };
     dispatch(pending);
@@ -162,7 +206,7 @@ describe('question cards that end with no answer (#8470)', () => {
 
     dispatch({ type: 'history_replay_start', sessionId: 'worker', fullHistory: false });
     dispatch({ ...pending, resolved: true, historySeq: 2 });
-    dispatch({ ...pending, toolUseId: 'codex-closed', resolved: true, historySeq: 3 });
+    dispatch({ ...pending, toolUseId: 'ask-codex-closed', resolved: true, historySeq: 3 });
     dispatch({ type: 'history_replay_end', sessionId: 'worker' });
     expect(store.getState().sessionStates.worker.messages.map((m) => m.answered)).toEqual([
       '(no longer pending)', '(no longer pending)',

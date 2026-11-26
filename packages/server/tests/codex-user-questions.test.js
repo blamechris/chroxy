@@ -12,7 +12,7 @@ import { QuestionRouteMap } from '../src/question-route-map.js'
 import { SessionManager } from '../src/session-manager.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
 import { setupForwarding } from '../src/ws-forwarding.js'
-import { CAPABILITY_HISTORY_QUESTION_RESOLVED, resendPendingQuestions, sendHistoryEntry } from '../src/ws-history.js'
+import { CAPABILITY_HISTORY_QUESTION_RESOLVED, resendPendingQuestions, resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
 
 const SESSION_ID = 'chroxy-session'
 const METHOD = 'item/tool/requestUserInput'
@@ -21,10 +21,12 @@ const QUESTION = {
   options: [{ label: 'Core', description: 'Inspect core' }, { label: 'UI', description: 'Inspect UI' }],
 }
 const PARAMS = { threadId: 'parent', turnId: 'parent-turn', itemId: 'parent-item', questions: [QUESTION], isBlocking: true, autoResolutionMs: null }
+const WORKER_PARAMS = { threadId: 'worker', turnId: 'worker-turn', itemId: 'worker-item' }
 
-async function setup(t, { active = true } = {}) {
+async function setup(t, { active = true, maxMessages, rejectInterrupt = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-codex-question-'))
   const replies = []
+  const requests = []
   const notices = []
   const senderFrames = []
   // A local fake stdio process. Session.start and the actual transport both
@@ -34,14 +36,20 @@ async function setup(t, { active = true } = {}) {
   })
   const receive = (frame) => child.stdout.emit('data', `${JSON.stringify({ jsonrpc: '2.0', ...frame })}\n`)
   child.stdin.write = (line) => {
-    const { id, method, ...reply } = JSON.parse(line)
-    if (!method) replies.push({ id, ...reply })
+    const frame = JSON.parse(line)
+    const { id, method } = frame
+    if (!method) replies.push(frame)
     else if (id !== undefined) {
+      requests.push(frame)
       const results = {
         initialize: { userAgent: 'codex_cli_rs/0.163.0 (synthetic) chroxy' },
         'thread/start': { thread: { id: 'parent' } },
       }
-      queueMicrotask(() => receive({ id, result: results[method] ?? {} }))
+      if (rejectInterrupt && method === 'turn/interrupt') {
+        queueMicrotask(() => receive({ id, error: { code: -32602, message: 'Interrupt refused by fixture' } }))
+      } else {
+        queueMicrotask(() => receive({ id, result: results[method] ?? {} }))
+      }
     }
     return false // writable backpressure still admits the write
   }
@@ -52,7 +60,7 @@ async function setup(t, { active = true } = {}) {
     bundledClientFinder: () => null,
     clientFactory: (config) => new CodexAppServerClient({ ...config, spawnFn: () => child }),
   })
-  const sessionManager = new SessionManager({ skipPreflight: true, stateFilePath: join(dir, 'state.json') })
+  const sessionManager = new SessionManager({ maxMessages, skipPreflight: true, stateFilePath: join(dir, 'state.json') })
   const questionSessionMap = new QuestionRouteMap()
   sessionManager._sessions.set(SESSION_ID, { session, name: SESSION_ID, cwd: dir })
   sessionManager._wireSessionEvents(SESSION_ID, session)
@@ -86,7 +94,7 @@ async function setup(t, { active = true } = {}) {
     resendPendingQuestions({ sessionManager, send: (_ws, frame) => frames.push(frame) }, socket, SESSION_ID)
     return frames
   }
-  return { session, sessionManager, child, receive, ask, resolve, answer, questions, resolutions, replayPending, replies, notices, senderFrames, questionSessionMap }
+  return { session, sessionManager, child, receive, ask, resolve, answer, questions, resolutions, replayPending, requests, replies, notices, senderFrames, questionSessionMap }
 }
 
 it('surfaces a native form separately from approvals and sends only a matching explicit human answer', async (t) => {
@@ -169,6 +177,20 @@ it('rejects malformed, ambiguous, secret and unrenderable requests without sendi
   assert.equal(replies.at(-1).error.code, -32601)
 })
 
+it('rejects the two display keys reserved for a single custom answer', async (t) => {
+  const { ask, answer, questions, replies } = await setup(t)
+  const labelQuestion = { ...QUESTION, id: 'label', header: '', question: 'otherLabel' }
+  const textQuestion = { ...QUESTION, id: 'text', header: '', question: 'freeformText' }
+  ask(1, { questions: [labelQuestion, textQuestion] })
+  assert.equal(questions().length, 0, 'the shared client would send this form as a single custom answer')
+  assert.equal(replies[0]?.error?.code, -32602)
+
+  ask(2, { questions: [labelQuestion, textQuestion, QUESTION] })
+  const [{ toolUseId }] = questions()
+  answer({ toolUseId, answer: 'Core, UI, Core', answers: { otherLabel: 'Core', freeformText: 'UI', ['Target\nWhich target?']: 'Core' } })
+  assert.deepEqual(replies[1]?.result, { answers: { label: { answers: ['Core'] }, text: { answers: ['UI'] }, target: { answers: ['Core'] } } })
+})
+
 it('clears a relayed worker question by exact typed request and thread while the parent remains active', async (t) => {
   const { session, ask, resolve, answer, questions, resolutions, replayPending, replies, notices, senderFrames } = await setup(t)
   const worker = { threadId: 'worker', turnId: 'worker-turn', itemId: 'worker-item' }
@@ -223,6 +245,45 @@ it('journals closures for full and cursor replay without reviving a closed quest
   assert.equal(out.length, 2, 'older clients receive no closed question replay')
   assert.deepEqual(replayPending(), [])
 })
+
+for (const answered of [false, true]) {
+  it(`replays one terminal row for an evicted native question ${answered ? 'answered by a person' : 'closed by Codex'}`, async (t) => {
+    const { ask, resolve, answer, sessionManager, questions, replayPending } = await setup(t, { maxMessages: 2 })
+    ask(1)
+    const [evicted] = questions()
+    ask(2, { itemId: 'second-item' })
+    ask(3, { itemId: 'third-item' })
+    assert.equal(sessionManager.getHistory(SESSION_ID).some(row => row.toolUseId === evicted.toolUseId), false)
+    assert.ok(replayPending().some(frame => frame.toolUseId === evicted.toolUseId))
+    const cursor = sessionManager.getLatestHistorySeq(SESSION_ID)
+
+    if (answered) answer({ toolUseId: evicted.toolUseId, answer: 'Core' })
+    resolve(1)
+    resolve(1)
+    const history = sessionManager.getHistory(SESSION_ID)
+    const matching = history.filter(row => row.toolUseId === evicted.toolUseId)
+    assert.equal(history.length, 2, 'the closure stays inside the bounded history ring')
+    assert.equal(matching.length, 1, 'an evicted question gets one new terminal row')
+    assert.equal(matching[0].answered === true, answered)
+    assert.equal(replayPending().some(frame => frame.toolUseId === evicted.toolUseId), false)
+
+    const capable = { clientCapabilities: new Set([CAPABILITY_HISTORY_QUESTION_RESOLVED]) }
+    for (const after of [0, cursor]) {
+      const out = []
+      const plan = resolveReplayPlan(sessionManager, history, SESSION_ID, after, sessionManager.getLatestHistorySeq(SESSION_ID))
+      assert.equal(plan.fullHistory, after === 0)
+      for (const row of history.slice(plan.startOffset)) {
+        sendHistoryEntry((_ws, frame) => out.push(frame), null, SESSION_ID, row, capable)
+      }
+      const verdicts = out.filter(frame => frame.toolUseId === evicted.toolUseId)
+      assert.equal(verdicts.length, 1, 'a replay can retire a retained client card')
+      assert.equal(verdicts[0].resolved, true)
+      assert.equal(verdicts[0].answered, undefined, 'the persisted acceptance flag stays server-side')
+      assert.deepEqual(verdicts[0].questions, evicted.questions)
+      assert.ok(verdicts[0].historySeq > cursor)
+    }
+  })
+}
 
 it('restoration closes a question that lost its native request while preserving a recorded human answer', async (t) => {
   const { ask, answer, sessionManager, questions } = await setup(t)
@@ -282,24 +343,58 @@ it('clearing a native question leaves the result timeout paused for a still-pend
   assert.ok(session._resultTimeout)
 })
 
-it('cleans pending questions on Stop, client loss, and teardown without a native result', async (t) => {
+for (const [label, options, expectedInterrupt] of [
+  ['a parent-only Stop', {}, true],
+  ['Stop with an idle parent', { active: false }, false],
+  ['a rejected parent interrupt', { rejectInterrupt: true }, true],
+]) {
+  it(`keeps the worker question answerable after ${label}`, async (t) => {
+    const { session, ask, answer, requests, questions, replayPending, resolutions, replies } = await setup(t, options)
+    ask('worker-question', WORKER_PARAMS)
+    const [{ toolUseId }] = questions()
+    await session.interrupt()
+    assert.deepEqual(requests.filter(frame => frame.method === 'turn/interrupt').map(frame => frame.params),
+      expectedInterrupt ? [{ threadId: 'parent', turnId: 'parent-turn' }] : [])
+    assert.deepEqual(replayPending().map(frame => frame.toolUseId), [toolUseId])
+    assert.deepEqual(resolutions(), [])
+    answer({ toolUseId, answer: 'UI' })
+    assert.deepEqual(replies.map(frame => [frame.id, frame.result]), [['worker-question', { answers: { target: { answers: ['UI'] } } }]])
+  })
+}
+
+it('keeps the worker question answerable after local parent failure', async (t) => {
+  const { session, ask, answer, questions, replayPending, resolutions, replies } = await setup(t)
+  ask('worker-question', WORKER_PARAMS)
+  const [{ toolUseId }] = questions()
+  session._failTurn('Local result watchdog timed out')
+  assert.equal(session._activeTurn, null)
+  assert.deepEqual(replayPending().map(frame => frame.toolUseId), [toolUseId])
+  assert.deepEqual(resolutions(), [])
+  answer({ toolUseId, answer: 'Core' })
+  assert.deepEqual(replies.map(frame => [frame.id, frame.result]), [['worker-question', { answers: { target: { answers: ['Core'] } } }]])
+})
+
+it('cleans pending questions on correlated turn completion, client loss, and teardown without a native result', async (t) => {
   const { session, child, ask, receive, replies, replayPending, resolutions } = await setup(t)
   ask(11)
   await session.interrupt()
-  assert.deepEqual(replayPending(), [])
+  assert.equal(replayPending().length, 1, 'the parent request stays bound until Codex confirms its turn ended')
   receive({ method: 'turn/completed', params: { threadId: 'parent', turn: { id: 'parent-turn', status: 'interrupted' } } })
+  assert.deepEqual(replayPending(), [])
   receive({ method: 'turn/started', params: { threadId: 'parent', turn: { id: 'next-turn' } } })
   ask(12, { turnId: 'next-turn' })
+  ask(13, WORKER_PARAMS)
   child.emit('exit', 1, null)
   assert.deepEqual(replayPending(), [])
-  assert.equal(resolutions().length, 2)
+  assert.equal(resolutions().length, 3)
   assert.deepEqual(replies, [])
 
   const idle = await setup(t, { active: false })
-  idle.ask(13)
+  idle.ask(14)
+  idle.ask(15, WORKER_PARAMS)
   await idle.session.destroy()
   assert.deepEqual(idle.replayPending(), [])
-  assert.equal(idle.resolutions().length, 1)
+  assert.equal(idle.resolutions().length, 2)
   assert.deepEqual(idle.replies, [])
 })
 

@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
 import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
+import { isCodexQuestionToolUseId } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS, reportInputAdmission } from './base-session.js'
 import { CODEX_APPSERVER_CUSTOMIZATION } from './provider-customization.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
@@ -10,7 +11,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
-import { buildCodexUserQuestionResponse, createCodexQuestionToolUseId, isCodexQuestionToolUseId, isCodexRequestId, parseCodexUserQuestion } from './codex-user-questions.js'
+import { buildCodexUserQuestionResponse, createCodexQuestionToolUseId, isCodexRequestId, parseCodexUserQuestion } from './codex-user-questions.js'
 import { parseCodexUserAgent, capabilitiesForVersion, parseSemver, compareSemver } from './codex-protocol-capabilities.js'
 import { findNewestBundledCodexClient } from './codex-bundled-client.js'
 import {
@@ -2082,7 +2083,6 @@ export class CodexAppServerSession extends BaseSession {
     if (wasIntentional) this.emit('stopped', {})
     else this.emit('error', code ? { message, code } : { message })
     this._activeTurn = null
-    this._clearNativeQuestions()
     this._endTurnAbort()
     this._clearMessageState()
     this._maybeDequeue()
@@ -2305,8 +2305,9 @@ export class CodexAppServerSession extends BaseSession {
       reason: 'resolved',
       decision: answered ? 'allow' : 'deny',
       resolvedBy: { kind: answered ? 'user' : 'cleared' },
+      historyQuestions: pending.questions,
     })
-    if (pending.isBlocking && !this._destroying && !this._permissions.hasPendingPrompt()) {
+    if (pending.isBlocking && this._processReady && !this._destroying && !this._permissions.hasPendingPrompt()) {
       this._resumeResultTimeoutForPermission()
     }
   }
@@ -2621,6 +2622,7 @@ export class CodexAppServerSession extends BaseSession {
     const detail = error ? error.message : `code=${code}${signal ? ` signal=${signal}` : ''}`
     ;(this._log || log).warn(`codex app-server exited unexpectedly (${detail})`)
     this._processReady = false
+    this._clearNativeQuestions()
     // #6708 — app-server has no respawn, so an unexpected exit IS the terminal
     // signal. If the child died because its binary was quarantined/removed out
     // from under the running daemon, name the cause + fix instead of a bare
@@ -2632,10 +2634,7 @@ export class CodexAppServerSession extends BaseSession {
     })
     const message = labeled || `Codex app-server exited (${detail})`
     if (this._activeTurn) this._failTurn(message)
-    else {
-      this._clearNativeQuestions()
-      this.emit('error', { message, recoverable: true })
-    }
+    else this.emit('error', { message, recoverable: true })
   }
 
   // ------------------------------------------------------------------
@@ -2650,7 +2649,8 @@ export class CodexAppServerSession extends BaseSession {
     // pending permission_request resolves (deny → decline) immediately, instead
     // of leaving the turn wedged until the 5-min timeout (#6611 review).
     this._endTurnAbort()
-    this._clearNativeQuestions()
+    // This RPC targets only the parent turn and can be refused. Native question
+    // bindings remain answerable until Codex confirms their own closure.
     if (this._client && this._activeTurn?.turnId) {
       try { await this._client.request('turn/interrupt', { threadId: this._threadId, turnId: this._activeTurn.turnId }) }
       catch (err) { (this._log || log).debug(`turn/interrupt failed: ${err.message}`) }

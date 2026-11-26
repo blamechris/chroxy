@@ -63,7 +63,7 @@ import type {
   Checkpoint,
 } from './types'
 import { nextMessageId } from './utils'
-import { DeclaredStatusSchema } from '@chroxy/protocol'
+import { DeclaredStatusSchema, isCodexQuestionToolUseId } from '@chroxy/protocol'
 import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
@@ -372,7 +372,7 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * Push a per-session notification for a BACKGROUND session event (#5618).
    * Used by the `user_question` case to surface a question raised in a session
    * that is not the active one. Each client backs this with its own
-   * `pushSessionNotification` — both key identified questions by `toolUseId` and
+   * `pushSessionNotification` — both key native Codex questions by `toolUseId` and
    * early-return when the target IS the active session; the APP additionally
    * mirrors the row into its mobile push-notification store. That extra
    * side-effect is platform-specific and lives in the app's impl, exactly like
@@ -2384,6 +2384,8 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // be written into the part of the array about to be discarded and the
   // question would vanish from the transcript entirely.
   const toolUseId = chatMessage.toolUseId
+  const nativeQuestionId = toolUseId && isCodexQuestionToolUseId(toolUseId) ? toolUseId : undefined
+  const providerClosed = chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER
   // #8336 — a REPLAYED frame for a question this client already holds is the
   // same question, delivered again. That happens on any cursor-honoured delta
   // replay: the client got the question LIVE (no `historySeq`, so no cursor
@@ -2454,7 +2456,7 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
             m.type === 'prompt' &&
             !m.requestId &&
             m.toolUseId === toolUseId &&
-            (!deliveredByReplay || chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER || sameQuestions(m.questions, chatMessage.questions))
+            (!deliveredByReplay || providerClosed || sameQuestions(m.questions, chatMessage.questions))
           ) {
             matches.push(i + offset)
           }
@@ -2463,10 +2465,10 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       if (matches.length === 0) {
         // Keep a real answer or more specific ending from the prefix a full
         // replay replaces. Native history records closure without answer text.
-        const held = chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER && offset > 0
+        const held = providerClosed && offset > 0
           ? ss.messages.slice(0, offset).find((m) =>
               m.type === 'prompt' && !m.requestId && m.toolUseId === toolUseId &&
-              m.answered !== undefined && m.answered !== REPLAY_RESOLVED_PLACEHOLDER)
+              m.answered !== undefined && (m.answered !== REPLAY_RESOLVED_PLACEHOLDER || m.answeredAt !== undefined))
           : undefined
         const message = held
           ? { ...chatMessage, answered: held.answered, answeredAt: held.answeredAt, answeredAnswers: held.answeredAnswers }
@@ -2480,7 +2482,7 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         const held = ss.messages[idx] as ChatMessage
         survivingIds = [held.id]
         const heldAnswered = held.answered
-        if (chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER && toolUseId) {
+        if (providerClosed && toolUseId) {
           const messages = markQuestionEnded(ss.messages, toolUseId, 'resolved')
           return (messages ? { messages } : {}) as Partial<S>
         }
@@ -2501,7 +2503,7 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         const verdict = chatMessage.answered
         if (
           (verdict === QUESTION_INTERRUPTED_PLACEHOLDER || verdict === QUESTION_SUPERSEDED_PLACEHOLDER) &&
-          (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER) &&
+          (heldAnswered === undefined || (heldAnswered === REPLAY_RESOLVED_PLACEHOLDER && held.answeredAt === undefined)) &&
           !wasPromptLiveDuringReplay(sessionId, held.id)
         ) {
           const next = ss.messages.slice()
@@ -2543,12 +2545,13 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         const held = ss.messages[idx] as ChatMessage
         survivingIds.push(held.id)
         const heldAnswered = held.answered
+        const heldNoAnswer = isQuestionNoAnswerToken(heldAnswered, held.answeredAt)
         // A provider-closed question id is final even if a pending resend raced it.
-        if (heldAnswered === QUESTION_RESOLVED_PLACEHOLDER) continue
+        if (heldAnswered === QUESTION_RESOLVED_PLACEHOLDER && heldNoAnswer) continue
         const keepAnswered =
           heldAnswered !== undefined &&
-          heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
-          !isQuestionNoAnswerToken(heldAnswered)
+          (heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER || held.answeredAt !== undefined) &&
+          !heldNoAnswer
         const revived = reviveHeldPrompt(held, chatMessage, { keepAnswered })
         // #7509 N1 — `answeredAnswers` is keyed by question TEXT. The held-base
         // merge carries it across with the kept answer, but a re-send that rewords
@@ -2581,10 +2584,10 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // #7509 F6 — and a supersede is the same kind of correction: the server re-asserts
   // every pending question after EVERY replay, so a flapping connection would
   // otherwise re-raise the ping once per pending question per reconnect.
-  if (sessionId && toolUseId && chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER) {
-    adapter.clearQuestionNotification?.(sessionId, toolUseId)
-  } else if (appended && sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
-    adapter.pushSessionNotification(sessionId, 'question', questionText, toolUseId)
+  if (sessionId && nativeQuestionId && providerClosed) {
+    adapter.clearQuestionNotification?.(sessionId, nativeQuestionId)
+  } else if (appended && sessionId && !isQuestionNoAnswerToken(chatMessage.answered, chatMessage.answeredAt)) {
+    adapter.pushSessionNotification(sessionId, 'question', questionText, nativeQuestionId)
   }
 }
 

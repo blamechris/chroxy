@@ -40,6 +40,13 @@ export const CODEX_DEFAULT_SANDBOX: CodexSandboxMode = 'workspace-write'
  * control on exactly this string. */
 export const CODEX_PROVIDER = 'codex'
 
+/** Namespace for Chroxy question IDs minted from native Codex input requests. */
+export const CODEX_QUESTION_ID_PREFIX = 'ask-codex-'
+
+export function isCodexQuestionToolUseId(value: unknown): boolean {
+  return typeof value === 'string' && value.startsWith(CODEX_QUESTION_ID_PREFIX)
+}
+
 /**
  * UI-facing metadata for the sandbox selector: a short label and a one-line
  * description per mode. Kept next to the canonical list so a new mode can't be

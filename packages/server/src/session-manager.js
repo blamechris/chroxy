@@ -6774,7 +6774,7 @@ export class SessionManager extends EventEmitter {
           // question's history entry so full and cursor replays agree.
           if (event === 'permission_resolved' && typeof data?.toolUseId === 'string'
               && (data.reason === 'superseded' || data.reason === 'resolved')) {
-            if (this._history.markQuestionClosed(sessionId, data.toolUseId, data.reason)) this._schedulePersist()
+            if (this._history.markQuestionClosed(sessionId, data.toolUseId, data.reason, data.historyQuestions)) this._schedulePersist()
           }
         }
         // Not journaled yet: a BYOK Task subagent's prompts, which reach this

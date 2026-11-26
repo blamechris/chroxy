@@ -2,10 +2,9 @@ import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
 import { redactBounded, sanitizeToolInput, isSanitizedToolInput, MAX_INPUT_CHARS, RECORD_DESCRIPTION_MAX } from './redaction.js'
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { isCodexQuestionToolUseId, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
-import { isCodexQuestionToolUseId } from './codex-user-questions.js'
 
 /**
  * #8259: how far past the seq being issued a persisted reservation reaches. See
@@ -541,9 +540,10 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {string} sessionId
    * @param {string} toolUseId - the question's id (the `ask-...` id on its frame)
    * @param {'superseded'|'resolved'} reason
+   * @param {object[]} [historyQuestions] - the validated Codex form, if the original row was evicted
    * @returns {boolean} true when an entry was newly marked (the caller persists)
    */
-  markQuestionClosed(sessionId, toolUseId, reason) {
+  markQuestionClosed(sessionId, toolUseId, reason, historyQuestions) {
     if (reason !== 'superseded' && reason !== 'resolved') return false
     const history = this._messageHistory.get(sessionId)
     if (!Array.isArray(history) || typeof toolUseId !== 'string') return false
@@ -556,7 +556,11 @@ export class SessionMessageHistory extends EventEmitter {
       this._pushHistory(history, copy, sessionId)
       return true
     }
-    return false
+    // A reconnecting client may still hold a card that aged out of our ring.
+    // Append its verdict with a new sequence even when the original row is gone.
+    if (reason !== 'resolved' || !isCodexQuestionToolUseId(toolUseId) || !Array.isArray(historyQuestions)) return false
+    this._pushHistory(history, { type: 'user_question', toolUseId, questions: historyQuestions, timestamp: Date.now(), resolved: true }, sessionId)
+    return true
   }
 
   /**

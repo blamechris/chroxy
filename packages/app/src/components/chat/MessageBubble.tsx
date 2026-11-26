@@ -339,7 +339,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // before anyone answered, a newer question replaced it, or this client's answer
   // was not delivered. Not an answer: no check icon, and the status line below
   // says so instead of echoing the token. One wording, shared with the dashboard.
-  const endedNotice = isPrompt ? questionEndedNotice(message.answered) : null;
+  const endedNotice = isPrompt ? questionEndedNotice(message.answered, message.answeredAt) : null;
   const answeredNoAnswer = endedNotice !== null;
   const showMultiQuestionFallbackSummary =
     useMultiForm &&

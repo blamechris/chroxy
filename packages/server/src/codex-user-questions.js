@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { CODEX_QUESTION_ID_PREFIX } from '@chroxy/protocol'
 
 // Bounds for native question payloads stored in the session and its history.
 const MAX_QUESTIONS = 3
@@ -6,7 +7,6 @@ const MAX_OPTIONS = 8
 const MAX_ID_LENGTH = 256
 const MAX_TEXT_LENGTH = 4_096
 const OTHER_OPTION_VALUE = '__chroxy_other__'
-const CODEX_QUESTION_ID_PREFIX = 'ask-codex-'
 
 function nonEmptyString(value, maxLength) {
   return typeof value === 'string' && value.length <= maxLength && value.trim().length > 0
@@ -18,10 +18,6 @@ export function isCodexRequestId(value) {
 
 export function createCodexQuestionToolUseId() {
   return `${CODEX_QUESTION_ID_PREFIX}${randomUUID()}`
-}
-
-export function isCodexQuestionToolUseId(value) {
-  return typeof value === 'string' && value.startsWith(CODEX_QUESTION_ID_PREFIX)
 }
 
 // Codex CLI's generated ToolRequestUserInputParams. Keep the native ids and
@@ -70,6 +66,9 @@ export function parseCodexUserQuestion(params) {
     fields.push({ id, question: displayText, labels, allowOther })
     form.push({ question: displayText, options: choices, allowOther })
   }
+  // Both clients reserve this exact two-key answer object for a single Other
+  // response. A form with those display keys cannot submit two choice answers.
+  if (texts.size === 2 && texts.has('otherLabel') && texts.has('freeformText')) return null
   return { threadId, turnId, itemId, isBlocking, fields, questions: form }
 }
 

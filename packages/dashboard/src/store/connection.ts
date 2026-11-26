@@ -156,7 +156,7 @@ import {
 import type { EvaluatorResultPayload, ArchivePolicy } from './types';
 // #6871: the scheduled-task create/update payload shape (wire contract).
 import type { ScheduledTaskInput } from '@chroxy/protocol';
-import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
+import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER, isCodexQuestionToolUseId } from '@chroxy/protocol';
 import {
   migrateSessionDefaults,
   persistSessionDefault,
@@ -5095,7 +5095,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // any in-flight tools.
     // Native Codex questions can stay pending while the session is idle.
     // Their dedicated IDs identify an answer that does not start a turn.
-    const nativeCodexQuestion = toolUseId?.startsWith('ask-codex-');
+    const nativeCodexQuestion = isCodexQuestionToolUseId(toolUseId);
     if (!nativeCodexQuestion && activeSessionId && sessionStates[activeSessionId]) {
       updateActiveSession((ss) => {
         const patch: Partial<typeof ss> = {

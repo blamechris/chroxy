@@ -11,7 +11,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import { ServerPermissionResolvedSchema } from '@chroxy/protocol'
+import { isCodexQuestionToolUseId, ServerPermissionResolvedSchema } from '@chroxy/protocol'
 import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
@@ -268,6 +268,7 @@ export function matchesQuestionNotice(
   sessionId?: string,
 ): boolean {
   return notice.eventType === 'question' &&
+    isCodexQuestionToolUseId(toolUseId) &&
     notice.toolUseId === toolUseId &&
     (sessionId === undefined || notice.sessionId === sessionId)
 }
@@ -309,8 +310,9 @@ export function markQuestionEnded(
   let changed = false
   const next = messages.map((m) => {
     if (m.type !== 'prompt' || m.requestId || m.toolUseId !== toolUseId) return m
-    if (isQuestionNoAnswerToken(m.answered)) return m
-    if (kind !== 'notDelivered' && m.answered != null && m.answered !== REPLAY_RESOLVED_PLACEHOLDER) return m
+    if (isQuestionNoAnswerToken(m.answered, m.answeredAt)) return m
+    if (kind !== 'notDelivered' && m.answered != null &&
+        (m.answered !== REPLAY_RESOLVED_PLACEHOLDER || m.answeredAt !== undefined)) return m
     changed = true
     const { answeredAnswers: _dropped, ...rest } = m
     return {
@@ -352,7 +354,9 @@ export function endQuestionInSessions(
  */
 export function questionEndedNotice(
   answered: unknown,
+  answeredAt?: number,
 ): { kind: 'interrupted' | QuestionEndKind; label: string } | null {
+  if (!isQuestionNoAnswerToken(answered, answeredAt)) return null
   if (answered === QUESTION_INTERRUPTED_PLACEHOLDER) {
     return { kind: 'interrupted', label: 'Interrupted — chroxy restarted before this was answered' }
   }

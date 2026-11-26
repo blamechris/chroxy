@@ -304,6 +304,22 @@ describe('MessageBubble question that ended with no answer (#8470)', () => {
     expect(present(tree, 'question-notDelivered')).toBe(true);
     expect(JSON.stringify(tree.toJSON())).not.toContain('(not delivered)');
   });
+
+  it('renders literal closure text as a recorded human answer', () => {
+    const answer = '(no longer pending)';
+    const tree = render(multiQuestionPrompt({
+      toolUseId: 'ask-codex-1', answered: answer, answeredAt: 0,
+      answeredAnswers: {
+        'Q1 — deploy to production?': answer,
+        'Q2 — which areas to verify?': ['app'],
+        'Q3 — rollback strategy?': 'auto-rollback',
+      },
+    }), { allowMultiQuestion: true });
+    expect(present(tree, 'question-resolved')).toBe(false);
+    expect(present(tree, 'question-multi-summary-0')).toBe(true);
+    expect(JSON.stringify(tree.toJSON())).toContain(answer);
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+  });
 });
 
 describe('MessageBubble single-question multiSelect (#5776)', () => {

@@ -8,6 +8,7 @@
  *     reached nothing, so the card (marked answered on send) says so.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { questionEndedNotice } from '@chroxy/store-core'
 import { setStore, handleMessage, setConnectionContext } from './message-handler'
 import type { ConnectionState } from './types'
 import { createEmptySessionState } from './utils'
@@ -88,10 +89,10 @@ describe('question cards that end with no answer (#8470)', () => {
       sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
     }))
     const pending = {
-      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-1',
       questions: [{ question: 'Select a layout', options: [{ label: 'List', description: 'Show one row per item' }], allowOther: false }],
     }
-    const other = { ...pending, toolUseId: 'codex-ask-2' }
+    const other = { ...pending, toolUseId: 'ask-codex-2' }
     const clear = {
       type: 'permission_resolved', toolUseId: pending.toolUseId, decision: 'deny',
       reason: 'resolved', resolvedBy: { kind: 'cleared' }, sessionId: 'worker',
@@ -117,7 +118,7 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(notices()).toBe(originalNotices)
 
     handleMessage({ type: 'permission_request', requestId: pending.toolUseId, sessionId: 'worker', tool: 'Read' })
-    handleMessage({ ...clear, toolUseId: 'unknown' })
+    handleMessage({ ...clear, toolUseId: 'ask-codex-unknown' })
     handleMessage({ ...clear, sessionId: 'sess-1' })
     handleMessage({ ...clear, requestId: pending.toolUseId })
     expect(workerCards().every((m) => m.answered === undefined)).toBe(true)
@@ -141,19 +142,49 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(workerCards()[2]?.answered).toBe('allow')
   })
 
-  it('uses history to retire a missed worker clear without overwriting human answers', () => {
+  it('replaces the legacy notice while retaining an independent native question and permission', () => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }))
+    const notices = () => store.getState().sessionNotifications
+    const legacy = (n: number) => handleMessage({
+      type: 'user_question', sessionId: 'worker', toolUseId: `ask-legacy-${n}`,
+      questions: [{ question: `Legacy question ${n}?` }],
+    })
+    const toolUseId = 'ask-codex-current'
+    legacy(1)
+    handleMessage({ type: 'permission_request', requestId: 'permission-1', sessionId: 'worker', tool: 'Read' })
+    handleMessage({ type: 'user_question', sessionId: 'worker', toolUseId, questions: [{ question: 'Native question?' }] })
+    expect(notices().map((n) => n.message)).toEqual(['Legacy question 1?', 'Read', 'Native question?'])
+    legacy(2)
+    legacy(3)
+    expect(notices().map((n) => [n.message, n.toolUseId, n.requestId])).toEqual([
+      ['Read', undefined, 'permission-1'],
+      ['Native question?', toolUseId, undefined],
+      ['Legacy question 3?', undefined, undefined],
+    ])
+    handleMessage({ type: 'permission_resolved', toolUseId, sessionId: 'worker', decision: 'deny', reason: 'resolved' })
+    expect(notices().filter((n) => n.readAt === undefined).map((n) => n.message)).toEqual(['Read', 'Legacy question 3?'])
+  })
+
+  it('uses history to retire a missed worker clear and preserves a human answer with literal closure text', () => {
     store.setState((state) => ({
       sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
       sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
     }))
     const pending = {
-      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-1',
       questions: [{ question: 'Select a layout' }],
     }
     handleMessage(pending)
     const notice = store.getState().sessionNotifications[0]!
     const worker = () => store.getState().sessionStates.worker!
-    const humanAnswer = { answered: 'List', answeredAnswers: { 'Select a layout': 'List' }, answeredAt: 123 }
+    const humanAnswer = {
+      answered: '(no longer pending)',
+      answeredAnswers: { 'Select a layout': '(no longer pending)' },
+      answeredAt: 123,
+    }
     store.setState((state) => ({
       sessionStates: {
         ...state.sessionStates, worker: { ...worker(), messages: [{ ...worker().messages[0]!, ...humanAnswer }] },
@@ -162,10 +193,12 @@ describe('question cards that end with no answer (#8470)', () => {
     handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true })
     handleMessage({ ...pending, resolved: true, historySeq: 2 })
     handleMessage({ type: 'history_replay_end', sessionId: 'worker' })
-    expect(worker().messages[0]).toMatchObject(humanAnswer)
+    const answered = worker().messages[0]!
+    expect(answered).toMatchObject(humanAnswer)
+    expect(questionEndedNotice(answered.answered, answered.answeredAt)).toBeNull()
     expect(store.getState().sessionNotifications[0]).toMatchObject({ id: notice.id, readAt: expect.any(Number) })
 
-    handleMessage({ ...pending, toolUseId: 'codex-closed', resolved: true, historySeq: 3 })
+    handleMessage({ ...pending, toolUseId: 'ask-codex-closed', resolved: true, historySeq: 3 })
     expect(worker().messages[1]?.answered).toBe('(no longer pending)')
     expect(store.getState().sessionNotifications).toHaveLength(1)
   })
