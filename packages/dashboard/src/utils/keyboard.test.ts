@@ -1,5 +1,4 @@
-import { describe, it, expect } from 'vitest'
-import { vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { isFreshKeyPress, suppressRepeatedActivation } from './keyboard'
 
 describe('isFreshKeyPress', () => {
