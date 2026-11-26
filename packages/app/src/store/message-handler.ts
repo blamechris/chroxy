@@ -156,6 +156,8 @@ import {
   handleResultUsage as sharedResultUsage,
   handleResultQueueReconcile,
   handleServerError as sharedServerError,
+  serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
@@ -4163,23 +4165,25 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       // dashboard's handler. Order: explicit `serverError.sessionId` →
       // active session → notification-only fallback.
       const errSessionId = serverError.sessionId;
-      if (errSessionId && get().sessionStates[errSessionId]) {
-        updateSession(errSessionId, (ss) => ({
-          messages: filterThinking(finalizeThinkingStreams([...ss.messages, errorMsg])),
-          streamingMessageId: null,
-          // #6302 — clearing the stream tears down any faked-fresh turn; drop its
-          // owner so a stale id can't linger past the 'pending' window.
-          pendingClientMessageId: null,
-        }));
-      } else {
-        const activeErrId = get().activeSessionId;
-        if (activeErrId && get().sessionStates[activeErrId]) {
-          updateActiveSession((ss) => ({
+      const errTagged = !!(errSessionId && get().sessionStates[errSessionId]);
+      const errTargetId = errTagged ? errSessionId : get().activeSessionId;
+      const errTarget = errTargetId ? get().sessionStates[errTargetId] : undefined;
+      if (errTargetId && errTarget) {
+        // #9336: a sessionless informational error must not end a live turn.
+        if (serverErrorEndsTurn(serverError, { tagged: errTagged, streamingMessageId: errTarget.streamingMessageId, turnStarted: pendingTurnHasStarted(errTarget.messages, errTarget.pendingClientMessageId) })) {
+          updateSession(errTargetId, (ss) => ({
             messages: filterThinking(finalizeThinkingStreams([...ss.messages, errorMsg])),
             streamingMessageId: null,
+            // #6302 — clearing the stream tears down any faked-fresh turn; drop its
+            // owner so a stale id can't linger past the 'pending' window.
             pendingClientMessageId: null,
           }));
+        } else {
+          updateSession(errTargetId, (ss) => ({
+            messages: [...ss.messages, errorMsg],
+          }));
         }
+      } else {
         // No session context on app — the error is already surfaced via
         // `useNotificationStore.addServerError` and the unrecoverable Alert
         // below. App's ConnectionState has no top-level `messages` array

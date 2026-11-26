@@ -163,6 +163,8 @@ import {
   appendTurnOutcomeMarker,
   isStopTurnOutcome,
   handleServerError as sharedServerError,
+  serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
@@ -3290,27 +3292,27 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     serverErrors: [...state.serverErrors, serverError].slice(-10),
   }));
   const errSessionId = serverError.sessionId;
-  if (errSessionId && get().sessionStates[errSessionId]) {
-    // Scoped error — route to the specific session only
-    updateSession(errSessionId, (ss) => ({
-      messages: filterThinking([...ss.messages, errorMsg]),
-      streamingMessageId: null,
-      // #6302 — clear the pending-turn owner with the sentinel (parity with the
-      // app's server_error clear) so a stale owner can't mis-gate a reconcile.
-      pendingClientMessageId: null,
-    }));
-  } else {
-    const activeErrId = get().activeSessionId;
-    if (activeErrId && get().sessionStates[activeErrId]) {
-      updateActiveSession((ss) => ({
+  const errTagged = !!(errSessionId && get().sessionStates[errSessionId]);
+  const errTargetId = errTagged ? errSessionId : get().activeSessionId;
+  const errTarget = errTargetId ? get().sessionStates[errTargetId] : undefined;
+  if (errTargetId && errTarget) {
+    // #9336: a sessionless informational error must not end a live turn.
+    if (serverErrorEndsTurn(serverError, { tagged: errTagged, streamingMessageId: errTarget.streamingMessageId, turnStarted: pendingTurnHasStarted(errTarget.messages, errTarget.pendingClientMessageId) })) {
+      updateSession(errTargetId, (ss) => ({
         messages: filterThinking([...ss.messages, errorMsg]),
         streamingMessageId: null,
+        // #6302 — clear the pending-turn owner with the sentinel (parity with the
+        // app's server_error clear) so a stale owner can't mis-gate a reconcile.
         pendingClientMessageId: null,
       }));
     } else {
-      set({ streamingMessageId: null });
-      get().addMessage(errorMsg);
+      updateSession(errTargetId, (ss) => ({
+        messages: [...ss.messages, errorMsg],
+      }));
     }
+  } else {
+    set({ streamingMessageId: null });
+    get().addMessage(errorMsg);
   }
   if (!serverError.recoverable) {
     _adapters.alert.alert('Server Error', serverError.message);

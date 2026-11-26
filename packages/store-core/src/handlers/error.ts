@@ -194,6 +194,71 @@ export function handleServerError(
   return { serverError, chatMessage }
 }
 
+/**
+ * #9336: has the server visibly started the turn a `'pending'` send owns?
+ *
+ * The thinking stream-start deliberately leaves `streamingMessageId` at
+ * `'pending'`, so the sentinel alone cannot tell "send not yet answered" from
+ * "model is thinking". True iff `pendingClientMessageId` names a message in
+ * `messages` and some message AFTER it is server turn output: a `thinking`,
+ * `response` or `tool_use` row that is not the send placeholder (fixed id
+ * `'thinking'`). Client-appended rows (errors, system notices, outcome markers)
+ * do not count, and neither does anything before the user message.
+ */
+export function pendingTurnHasStarted(
+  messages: readonly ChatMessage[],
+  pendingClientMessageId: string | null | undefined,
+): boolean {
+  if (!pendingClientMessageId) return false
+  const at = messages.findIndex((m) => m.id === pendingClientMessageId)
+  if (at < 0) return false
+  for (let i = at + 1; i < messages.length; i++) {
+    const m = messages[i]!
+    if (m.id === 'thinking') continue
+    if (m.type === 'thinking' || m.type === 'response' || m.type === 'tool_use') return true
+  }
+  return false
+}
+
+/**
+ * #9336: does this `server_error` end the turn of the session it is routed to?
+ *
+ * - `tagged` (the error's `sessionId` named a known session): true. A session's
+ *   own turn-ending error carries its id.
+ * - untagged `tunnel`: false. Tunnel state is connection-level and
+ *   informational; it says nothing about the active session's turn.
+ * - untagged, any other category: true only while the target holds the
+ *   optimistic `'pending'` send placeholder and the server has not visibly
+ *   started the turn (`turnStarted`, see {@link pendingTurnHasStarted}); the
+ *   error may be that send failing. A real streaming id, no turn, or a turn
+ *   already thinking/answering means a sessionless request error (its
+ *   `correlationId` is server-generated, so the client cannot match it to a
+ *   request) must not end it.
+ *
+ * The `'pending'` window is deliberately conservative: any untagged non-tunnel
+ * error during a pending send the server has not visibly started (including
+ * one from an unrelated request, e.g. a failed repo listing) settles that send,
+ * as before this change, and the send's own safety-net timer would clear it
+ * anyway. The guard covers the window before that safety-net timer, which
+ * clears a still-'pending' turn after the stall window regardless of a visible
+ * thinking bubble (pre-existing behaviour, unchanged here).
+ *
+ * When false the caller appends the error row only: it leaves
+ * `streamingMessageId`, `pendingClientMessageId` and thinking blocks alone.
+ */
+export function serverErrorEndsTurn(
+  serverError: ServerError,
+  target: {
+    tagged: boolean
+    streamingMessageId: string | null | undefined
+    turnStarted: boolean
+  },
+): boolean {
+  if (target.tagged) return true
+  if (serverError.category === 'tunnel') return false
+  return target.streamingMessageId === 'pending' && !target.turnStarted
+}
+
 // ---------------------------------------------------------------------------
 // server_shutdown
 //

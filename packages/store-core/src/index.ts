@@ -878,6 +878,8 @@ export {
   handleCostUpdate,
   handleSessionUsage,
   handleServerError,
+  serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerShutdown,
   handleServerStatusLegacy,
   handleRateLimited,
