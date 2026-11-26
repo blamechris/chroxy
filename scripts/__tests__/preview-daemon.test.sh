@@ -21,6 +21,9 @@
 #   - --config-patch merges into the scratch config (0600 kept), refuses every
 #     non-allowlisted key / invalid JSON / non-object before creating anything; and
 #     --stub-provider registers the keyless smoke-stub provider (#9189)
+#   - --stub-acp (#9345) registers only the repo's scripted ACP agent (absolute node +
+#     fixture paths, no env), refuses a missing fixture, and a patch still cannot
+#     set providers.acp
 #   - sweep (#8742) reaps by AGE (and cleans a dead daemon); a gone/reused launcher
 #     is report-only unless --force past PREVIEW_DAEMON_FORCE_MIN_AGE; a PID now
 #     owned by another process is never signalled (its stale dir is just removed);
@@ -39,7 +42,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=150
+EXPECTED_CASES=159
 
 PASS=0
 FAIL=0
@@ -490,6 +493,62 @@ SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.length)" = 2 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.1.id)" = '"smoke-stub"' ] \
   && pass "--stub-provider appends after the --config-patch providers" || fail "--stub-provider appends after the --config-patch providers"
 [ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+# --- --stub-acp (#9345): a keyless ACP stub that queues mid-turn input ---------
+ACP_FIX="$REPO_ROOT/packages/server/tests/fixtures/fake-acp-agent.js"
+OUT="$(pd start --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+node -e '
+  const { isAbsolute, basename } = require("path"), fs = require("fs")
+  const [, f, fix] = process.argv
+  const l = JSON.parse(fs.readFileSync(f, "utf8")).providers.acp
+  const e = l[0]
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const ok = l.length === 1 && same(Object.keys(e).sort(), ["args", "command", "id", "label"])
+    && e.id === "smoke-acp" && e.label === "Smoke ACP stub"
+    && isAbsolute(e.command) && basename(e.command) === "node" && fs.statSync(e.command).isFile()
+    && same(e.args, [fix]) && isAbsolute(e.args[0]) && fs.existsSync(e.args[0])
+  process.exit(ok ? 0 : 1)' "$ACFG" "$ACP_FIX" 2>"$WORK/acp.cmp"; CRC=$?
+[ "$RC" -eq 0 ] && [ "$CRC" -eq 0 ] && pass "--stub-acp writes exactly one smoke-acp entry: absolute node, existing absolute fixture, no env" \
+  || fail "--stub-acp writes exactly one smoke-acp entry: absolute node, existing absolute fixture, no env" "rc=$RC $(cat "$WORK/acp.err" "$WORK/acp.cmp") $(cat "$ACFG" 2>&1)"
+[ "$(mode_of "$ACFG")" = 600 ] && pass "--stub-acp: the config.json stays mode 0600" || fail "--stub-acp: the config.json stays mode 0600" "mode=$(mode_of "$ACFG")"
+[ "$(cfg_get "$ACFG" provider)" = null ] && pass "--stub-acp registers but does not select the provider (no default provider set)" || fail "--stub-acp registers but does not select the provider (no default provider set)" "$(cfg_get "$ACFG" provider)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+OUT="$(pd start --config-patch "$PATCH_DIR/other.json" --stub-provider 18473 --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.length)" = 2 ] \
+  && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.0.id)" = '"other"' ] && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.1.id)" = '"smoke-stub"' ] \
+  && [ "$(cfg_get "$ACFG" providers.acp.length)" = 1 ] && [ "$(cfg_get "$ACFG" providers.acp.0.id)" = '"smoke-acp"' ] \
+  && pass "--stub-acp coexists with --config-patch providers and --stub-provider" || fail "--stub-acp coexists with --config-patch providers and --stub-provider" "rc=$RC $(cat "$WORK/acp.err") $(cat "$ACFG" 2>&1)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+printf '%s' '{"provider":"smoke-acp"}' >"$PATCH_DIR/sel.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/sel.json" --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$ACFG" provider)" = '"smoke-acp"' ] && [ "$(cfg_get "$ACFG" providers.acp.0.id)" = '"smoke-acp"' ] \
+  && pass "--stub-acp with a provider patch selects smoke-acp explicitly" || fail "--stub-acp with a provider patch selects smoke-acp explicitly" "rc=$RC $(cat "$WORK/acp.err")"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+OUT="$(pd start 2>/dev/null)"; SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$(cfg_get "$SP/config/config.json" providers)" = null ] && pass "without --stub-acp no providers.acp entry is registered" || fail "without --stub-acp no providers.acp entry is registered" "$(cfg_get "$SP/config/config.json" providers)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+# A checkout without the fixture: run a copy of the script from a tree that lacks it.
+NOFIX="$WORK/nofix"; mkdir -p "$NOFIX/scripts"; cp "$PD" "$NOFIX/scripts/preview-daemon.sh"
+BEFORE="$(count_smoke_dirs)"
+env HOME="$HOME_T" PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_CLI="$STUB_OK" bash "$NOFIX/scripts/preview-daemon.sh" start --stub-acp </dev/null >/dev/null 2>"$WORK/acp.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "fixture not found" "$WORK/acp.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+  && pass "--stub-acp refuses a missing fixture (exit 2, names it, no scratch dir)" || fail "--stub-acp refuses a missing fixture (exit 2, names it, no scratch dir)" "rc=$RC $(cat "$WORK/acp.err")"
+
+# The allowlist did not widen: a patch still cannot register an ACP command.
+printf '%s' '{"providers":{"acp":[{"id":"smoke-acp","command":"/bin/sh","args":["-c","id"]}]}}' >"$PATCH_DIR/acp-inject.json"
+BEFORE="$(count_smoke_dirs)"
+pd start --config-patch "$PATCH_DIR/acp-inject.json" --stub-acp </dev/null >/dev/null 2>"$WORK/acp.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "may only contain anthropicCompatible, not: acp" "$WORK/acp.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+  && pass "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" || fail "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/acp.err")"
+ok "usage documents --stub-acp and the HANG_UNTIL_CANCEL way to hold a turn busy" "usage text" -- \
+  bash -c 'u="$(bash "$1" start --bogus 2>&1)"; case "$u" in *"--stub-acp"*HANG_UNTIL_CANCEL*) exit 0 ;; *) exit 1 ;; esac' _ "$PD"
 
 # =========================================================================
 # 6c. sweep: reap abandoned previews (#8742)

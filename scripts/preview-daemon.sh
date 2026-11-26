@@ -12,7 +12,7 @@
 #
 # Usage:
 #   scripts/preview-daemon.sh start [--expect-head <sha>] [--config-patch <file.json>]
-#                                   [--stub-provider <port>]
+#                                   [--stub-provider <port>] [--stub-acp]
 #       Prints SMOKE=<dir>, URL=<origin> and HEAD=<sha>. Pass the SMOKE dir to
 #       the other subcommands (or export PREVIEW_DAEMON_DIR).
 #       --config-patch  deep-merges a JSON object into the scratch config.json
@@ -36,6 +36,23 @@
 #       --stub-provider registers a keyless providers.anthropicCompatible entry
 #                       named smoke-stub at http://127.0.0.1:<port> (appended after
 #                       any --config-patch entries). The stub server is yours to run.
+#       --stub-acp      registers a keyless providers.acp entry, id smoke-acp, that
+#                       spawns this checkout's scripted ACP agent
+#                       (packages/server/tests/fixtures/fake-acp-agent.js) with the
+#                       resolved Node binary, both as absolute paths. No network, no
+#                       credentials. Unlike smoke-stub (a BYOK session, which refuses
+#                       mid-turn input) an ACP session QUEUES input sent while a turn
+#                       runs, so queued badges, the auto-flush and Stop discarding
+#                       queued follow-ups (message_dequeued reason interrupted) can
+#                       be smoked. It is registered, not selected: pass
+#                       --config-patch with {"provider":"smoke-acp"} (or create the
+#                       session with provider smoke-acp). To hold a turn busy, send a
+#                       prompt containing HANG_UNTIL_CANCEL; the agent then waits
+#                       until session/cancel (Stop). Queue follow-ups, then press
+#                       Stop. Any other prompt streams a short reply and ends. A
+#                       --config-patch still cannot set providers.acp; only this
+#                       flag registers it, and only this fixture. Refused (exit 2,
+#                       nothing created) if the fixture file is missing.
 #   scripts/preview-daemon.sh url    <smoke-dir>   print the daemon origin
 #   scripts/preview-daemon.sh status <smoke-dir>   exit 0 only if it is up and healthy
 #   scripts/preview-daemon.sh stop   <smoke-dir>   SIGTERM the recorded PID, PID-guarded
@@ -468,12 +485,13 @@ check_patch() {
 }
 
 cmd_start() {
-  local expect_head='' head parent smoke port token cfg log pid timeout cli rc deadline patch='' stub_port=''
+  local expect_head='' head parent smoke port token cfg log pid timeout cli rc deadline patch='' stub_port='' stub_acp=0 acp_fixture=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --expect-head) [ $# -ge 2 ] || usage; expect_head="$2"; shift 2 ;;
       --config-patch) [ $# -ge 2 ] || usage; patch="$2"; shift 2 ;;
       --stub-provider) [ $# -ge 2 ] || usage; stub_port="$2"; shift 2 ;;
+      --stub-acp) stub_acp=1; shift ;;
       *) usage ;;
     esac
   done
@@ -487,6 +505,10 @@ cmd_start() {
   validate_port_override
   NODE_BIN="$(resolve_node_dir)" || die "no Node 22 found (install node@22 or set PREVIEW_DAEMON_NODE_DIR)" 1
   [ -z "$patch" ] || check_patch "$patch"
+  if [ "$stub_acp" -eq 1 ]; then
+    acp_fixture="$ROOT/packages/server/tests/fixtures/fake-acp-agent.js"
+    [ -f "$acp_fixture" ] || die "--stub-acp: fixture not found: $acp_fixture" 2
+  fi
   head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" || die "cannot read git HEAD of $ROOT" 1
   if [ -n "$expect_head" ]; then
     case "$expect_head" in ''|*[!0-9a-fA-F]*) die "--expect-head must be a hex sha: $expect_head" 2 ;; esac
@@ -578,11 +600,11 @@ cmd_start() {
 
   # Overlay: deep-merge the (already validated) patch, then the stub provider.
   # Written through a temp file in the same 0600 dir, then renamed and re-chmodded.
-  if [ -n "$patch" ] || [ -n "$stub_port" ]; then
+  if [ -n "$patch" ] || [ -n "$stub_port" ] || [ "$stub_acp" -eq 1 ]; then
     ( umask 077
       "$NODE_BIN/node" -e '
         const fs = require("fs")
-        const [, cfg, patch, stub] = process.argv
+        const [, cfg, patch, stub, acpFixture, acpNode] = process.argv
         const isObj = v => v !== null && typeof v === "object" && !Array.isArray(v)
         const merge = (a, b) => { for (const k of Object.keys(b)) {
           if (k === "__proto__") continue
@@ -596,8 +618,14 @@ cmd_start() {
             id: "smoke-stub", label: "smoke-stub", baseUrl: "http://127.0.0.1:" + stub,
             defaultModel: "stub", models: ["stub"] }])
         }
+        if (acpFixture) {
+          c.providers = isObj(c.providers) ? c.providers : {}
+          const list = Array.isArray(c.providers.acp) ? c.providers.acp : []
+          c.providers.acp = list.filter(e => !e || e.id !== "smoke-acp").concat([{
+            id: "smoke-acp", label: "Smoke ACP stub", command: acpNode, args: [acpFixture] }])
+        }
         fs.writeFileSync(cfg + ".tmp", JSON.stringify(c, null, 2) + "\n", { mode: 0o600 })
-        fs.renameSync(cfg + ".tmp", cfg)' "$cfg" "$patch" "$stub_port" ) \
+        fs.renameSync(cfg + ".tmp", cfg)' "$cfg" "$patch" "$stub_port" "$acp_fixture" "$NODE_BIN/node" ) \
       || die "could not apply the config overlay" 1
     chmod 600 "$cfg"
   fi
