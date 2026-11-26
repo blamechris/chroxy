@@ -514,4 +514,16 @@ describe('detectStrandedState identity compare is exact on a lossy-stat platform
     assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl }).relocated, true)
     assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/src', statImpl }).relocated, false)
   })
+
+  it('reads the same exact ino on a different dev as different directories', () => {
+    const statImpl = (p, opts) => ({ dev: p === '/fake/src' ? 1n : 2n, ino: A })
+    const d = detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl })
+    assert.equal(d.relocated, true)
+  })
+
+  it('falls through to the path compare when the stat throws', () => {
+    const statImpl = () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }) }
+    assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl }).relocated, true)
+    assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/src', statImpl }).relocated, false)
+  })
 })
