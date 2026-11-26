@@ -252,7 +252,9 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
   it('an assistant reply quoting the sentence (even for the session\'s own model) with no hook, then Stop, completes normally', async () => {
     const { s, events, replyAppended } = turnSession({ firstOutputTimeoutMs: 0, reply: quotedReply() })
     const turn = s.sendMessage('explain that error')
-    await replyAppended
+    // If the turn ends (or fails) before the reply is printed, fail here instead of waiting
+    // on replyAppended until the runner's timeout.
+    await Promise.race([replyAppended, turn.then(() => { throw new Error('the turn ended before its reply was printed') })])
     assert.equal(s._isBusy, true, 'quoted text did not tear the turn down')
     writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
     await turn
