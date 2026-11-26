@@ -115,7 +115,9 @@ import {
   reviveHeldPrompt,
   // #8470 — a question that ended with no answer: replaced by a newer one
   // (permission_resolved, question variant) or answered into nothing (error).
-  QUESTION_SUPERSEDED_REASON,
+  parseQuestionResolution,
+  matchesQuestionNotice,
+  type QuestionEndKind,
   handleQuestionNotDelivered,
   endQuestionInSessions,
   handlePermissionExpired as sharedPermissionExpired,
@@ -1459,8 +1461,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   getCheckpoints: () => getStore().getState().checkpoints,
   // #5618 — user_question raises a background-session notification via the
   // app's own helper (which also mirrors the row into the mobile push store).
-  pushSessionNotification: (sessionId, eventType, message) =>
-    pushSessionNotification(sessionId, eventType, message),
+  pushSessionNotification: (sessionId, eventType, message, toolUseId) =>
+    pushSessionNotification(sessionId, eventType, message, undefined, { toolUseId }),
+  clearQuestionNotification,
   // #5618 — permission_mode_changed clears the app's pending optimistic-revert
   // tracker for the broadcast's target session (the dashboard has no equivalent
   // per-session tracker and omits this hook).
@@ -1619,38 +1622,54 @@ function truncateInput(input: Record<string, unknown>): string {
 
 /**
  * Push a notification for a background session event.
- * Deduplicates by (sessionId, eventType) — replaces existing rather than stacking.
+ * Identified questions keep one row per question. Other events replace by session and type.
  */
 function pushSessionNotification(
   sessionId: string,
   eventType: SessionNotification['eventType'],
   message: string,
   requestId?: string,
-  extra?: { tool?: string; description?: string; inputPreview?: string },
+  extra?: { tool?: string; description?: string; inputPreview?: string; toolUseId?: string },
 ): void {
   const state = getStore().getState();
   if (sessionId === state.activeSessionId) return;
+  const toolUseId = extra?.toolUseId;
+  if (toolUseId && state.sessionNotifications.some((n) => matchesQuestionNotice(n, toolUseId, sessionId))) return;
   const sessionInfo = state.sessions.find((s) => s.sessionId === sessionId);
   const sessionName = sessionInfo?.name || sessionId;
   const notification: SessionNotification = {
-    id: `${sessionId}-${eventType}-${Date.now()}`,
+    id: `${sessionId}-${eventType}-${Date.now()}${toolUseId ? `-${toolUseId}` : ''}`,
     sessionId,
     sessionName,
     eventType,
     message,
     timestamp: Date.now(),
     ...(requestId ? { requestId } : {}),
+    ...(toolUseId ? { toolUseId } : {}),
     ...(extra?.tool ? { tool: extra.tool } : {}),
     ...(extra?.description ? { description: extra.description } : {}),
     ...(extra?.inputPreview ? { inputPreview: extra.inputPreview } : {}),
   };
   getStore().setState((s) => {
     const filtered = s.sessionNotifications.filter(
-      (n) => !(n.sessionId === sessionId && n.eventType === eventType),
+      (n) => n.sessionId !== sessionId || n.eventType !== eventType || n.toolUseId !== undefined,
     );
     return { sessionNotifications: [...filtered, notification] };
   });
   useNotificationStore.getState().addSessionNotification(notification);
+}
+
+function clearQuestionNotification(sessionId: string | undefined, toolUseId: string): void {
+  const matches = (n: SessionNotification) => matchesQuestionNotice(n, toolUseId, sessionId);
+  getStore().setState((state) => {
+    const notifications = state.sessionNotifications ?? [];
+    if (!notifications.some(matches)) return {};
+    return { sessionNotifications: notifications.filter((n) => !matches(n)) };
+  });
+  const notifications = useNotificationStore.getState();
+  for (const notice of notifications.sessionNotifications.filter(matches)) {
+    notifications.dismissSessionNotification(notice.id);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,8 +2034,8 @@ function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: s
  * transcript). Reports whether a card changed, so a caller can fall back to an
  * alert when no card holds the question.
  */
-function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered', get: () => ConnectionState): boolean {
-  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind);
+function endQuestionCard(toolUseId: string, kind: QuestionEndKind, get: () => ConnectionState, sessionId?: string): boolean {
+  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind, sessionId);
   if (!hit) return false;
   updateSession(hit.sessionId, () => ({ messages: hit.messages }));
   return true;
@@ -3693,17 +3712,20 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
     }
 
     case 'permission_resolved': {
+      if (msg.toolUseId !== undefined) {
+        const question = parseQuestionResolution(msg);
+        if (question) {
+          const { toolUseId, sessionId, reason } = question;
+          endQuestionCard(toolUseId, reason, get, sessionId);
+          clearQuestionNotification(sessionId, toolUseId);
+        }
+        break;
+      }
       // Another client resolved this permission — dismiss the prompt on this client.
       // The permission_request may have been stored in ANY session state (whichever tab
       // was active when it arrived), so search all session states for the matching requestId.
       const resolved = sharedPermissionResolved(msg);
       const { requestId: resolvedRequestId } = resolved;
-      // #8470: the question variant. Only a SUPERSEDED question is announced
-      // (nobody answered it, so no round-trip will dismiss its card).
-      if (!resolvedRequestId && resolved.toolUseId && resolved.reason === QUESTION_SUPERSEDED_REASON) {
-        endQuestionCard(resolved.toolUseId, 'superseded', get);
-        break;
-      }
       if (resolvedRequestId) {
         // #8374: a prompt Stop cancelled becomes a `stopped` record, not an
         // answered deny. Shared with the dashboard, so the two cannot disagree.

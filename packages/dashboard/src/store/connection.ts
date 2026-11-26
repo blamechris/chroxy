@@ -5093,7 +5093,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Skipped when toolUseId is absent (free-text question prompts that
     // didn't carry a tool pairing) so the server stays authoritative for
     // any in-flight tools.
-    if (activeSessionId && sessionStates[activeSessionId]) {
+    // Native Codex questions can stay pending while the session is idle.
+    // Their dedicated IDs identify an answer that does not start a turn.
+    const nativeCodexQuestion = toolUseId?.startsWith('ask-codex-');
+    if (!nativeCodexQuestion && activeSessionId && sessionStates[activeSessionId]) {
       updateActiveSession((ss) => {
         const patch: Partial<typeof ss> = {
           isIdle: false,

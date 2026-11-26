@@ -3818,7 +3818,7 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', decision: 'deny' }).success, false, 'a frame naming neither a prompt nor a question is malformed')
     })
 
-    it('#8470: ServerPermissionResolvedSchema needs EXACTLY ONE NON-EMPTY id, and the toolUseId variant is the superseded shape', async () => {
+    it('ServerPermissionResolvedSchema needs one non-empty id and a supported question resolution', async () => {
       const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
       const ok = (m) => ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', ...m }).success
       assert.equal(ok({ requestId: 'r', toolUseId: 'ask-1', decision: 'deny', reason: 'superseded' }), false, 'both ids')
@@ -3830,6 +3830,9 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny' }), false, 'a question variant with no reason')
       assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny', reason: 'timeout' }), false, 'a question variant for any other reason')
       assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny', reason: 'superseded' }), true)
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny', reason: 'resolved', resolvedBy: { kind: 'cleared' } }), true)
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'allow', reason: 'resolved', resolvedBy: { kind: 'user' } }), true)
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'allowSession', reason: 'resolved' }), false)
       assert.equal(ok({ requestId: 'r', decision: 'deny', reason: 'timeout' }), true, 'the permission-prompt variant keeps every reason')
     })
 
@@ -3839,6 +3842,15 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(r.success)
       assert.equal(r.data.superseded, true, 'not stripped')
       assert.ok(ServerUserQuestionSchema.safeParse({ type: 'user_question', toolUseId: 'ask-1', questions: [] }).success)
+    })
+
+    it('ServerUserQuestionSchema carries a native question resolution through history parsing', async () => {
+      const { ServerUserQuestionSchema } = await import('../src/schemas/server/stream.ts')
+      const replay = { type: 'user_question', toolUseId: 'ask-1', questions: [], resolved: true, historySeq: 7 }
+      const parsed = ServerUserQuestionSchema.safeParse(replay)
+      assert.ok(parsed.success)
+      assert.equal(parsed.data.resolved, true)
+      assert.equal(parsed.data.historySeq, 7)
     })
 
     it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {

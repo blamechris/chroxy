@@ -682,6 +682,7 @@ export declare const ServerUserQuestionSchema: z.ZodObject<{
     historySeq: z.ZodOptional<z.ZodNumber>;
     interrupted: z.ZodOptional<z.ZodBoolean>;
     superseded: z.ZodOptional<z.ZodBoolean>;
+    resolved: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerAgentBusySchema: z.ZodObject<{
     type: z.ZodLiteral<"agent_busy">;

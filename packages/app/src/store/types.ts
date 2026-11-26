@@ -331,6 +331,7 @@ export interface SessionNotification {
   message: string;
   timestamp: number;
   requestId?: string;
+  toolUseId?: string;
   tool?: string;
   description?: string;
   inputPreview?: string;

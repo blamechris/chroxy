@@ -18,7 +18,8 @@ Everything under **Current state** is grounded in the code as of this writing;
 - The **app-server driver** (`CodexAppServerSession`) is the canonical, approval-capable Codex path and the default. The legacy `codex exec` path (`CHROXY_CODEX_APPSERVER=0`) has **no** Chroxy approval surface — treat it as a fallback only.
 - Codex surfaces its approvals through the same `PermissionManager` the Claude providers use: shell commands, file edits, sandbox scope-escalations (#6610), and connector elicitations (#6635).
 - Codex **does not** support Chroxy session rules ("Allow for Session" persisted per-tool). "Always allow" maps to Codex's *own* per-turn/per-session grant vocabulary, not a Chroxy rule.
-- **MCP connector elicitations** (e.g. a GitHub write approval) now surface as accept/decline (#6635); structured form-content / url-mode / execution-item rendering remain (#6684).
+- **MCP connector elicitations** (e.g. a GitHub write approval) surface as accept/decline (#6635). Structured form content and interactive URL flows remain open (#6684).
+- **Native Codex questions** surface in Chroxy's question form. A person can answer from a client viewing the session in any permission mode (#6684, #7721 PAR-8).
 - The **sandbox** (`read-only` / `workspace-write` / `danger-full-access`) is env-only (`CHROXY_CODEX_SANDBOX`), not per-session in the UI/API.
 
 ---
@@ -98,6 +99,23 @@ A "session" grant is detected via a sentinel `suggestions` marker on the
 `allow-always` result (`respondToPermission` only echoes `updatedPermissions`
 when suggestions were provided). This is a **local marker**, not a persisted
 Chroxy rule (see §4).
+
+### Native user questions
+
+The Chroxy-owned app-server client handles `item/tool/requestUserInput` for
+its thread and requests relayed to that client by Codex workers. It presents
+one to three choice questions or a single free-text question. A single choice
+question can offer custom text when Codex allows it. Chroxy rejects secret
+fields, forms it cannot render, and malformed requests.
+
+Only an explicit answer to the matching Chroxy question sends a result keyed
+by Codex question ID. Chroxy treats `autoResolutionMs` as metadata and waits
+for a human or for Codex to close the request. A matching
+`serverRequest/resolved` retires the question without sending an answer. A
+WebSocket reconnect can restore a still-pending question with the same ID.
+
+Codex Desktop owns its own app-server connection. This support applies to
+questions delivered to Chroxy's existing connection.
 
 ---
 
@@ -192,7 +210,7 @@ Both clients render these via the existing `PermissionPrompt` (`<tool>:
 
 | Gap | Detail | Related |
 |---|---|---|
-| **MCP connector elicitation — partially addressed (#6635)** | A connector eliciting the user (`mcpServer/elicitation/request`, e.g. a GitHub write approval) is now surfaced as an **accept/decline** prompt (previously `-32601`-declined, so the approval was "missed"). The `mcpToolCall` execution item itself is now surfaced as a `tool_start`/`tool_result` too (#6684 part 4 — labelled `server/tool`, failures flagged `isError`). Still open: structured `content` collection for `form`/`openai/form` modes and interactive `url`-mode flows (accept currently answers action-only), and the experimental `item/tool/requestUserInput`. | #6635, #6684 |
+| **MCP connector elicitation — partially addressed (#6635)** | A connector eliciting the user (`mcpServer/elicitation/request`, e.g. a GitHub write approval) is now surfaced as an **accept/decline** prompt (previously `-32601`-declined, so the approval was "missed"). The `mcpToolCall` execution item itself is now surfaced as a `tool_start`/`tool_result` too (#6684 part 4 — labelled `server/tool`, failures flagged `isError`). Still open: structured `content` collection for `form`/`openai/form` modes and interactive `url`-mode flows (accept currently answers action-only). | #6635, #6684 |
 | **No session rules** | "Allow for Session" persists a rule for Claude SDK/BYOK; for Codex it's a Codex-side grant only (§4). | — |
 | **Provider-generic mode copy** | Mode labels/descriptions and `skipPermissions` (= `--dangerously-skip-permissions`) are Claude/TUI-oriented; `skipPermissions` is a no-op for Codex, and `plan` is a no-op alias for `approve`. | — |
 | **Sandbox not per-session** | `CHROXY_CODEX_SANDBOX` is env-only; a per-session selector would need protocol + UI. | — |
@@ -219,7 +237,7 @@ Each carries a recommendation, but the call is yours.
    *Update:* command + cwd ship today, and the **`apply_patch` diff preview shipped** (#6638) — the fileChange item's `changes` are correlated into the approval by `itemId`: the prompt always names the files, and the raw `changes` ride along for a client that renders a diff (bounded by the broadcast `sanitizeToolInput` ~10K cap; a very large patch truncates, so the file summary is the guaranteed part). Still open: a scope drilldown for escalations. Env is sensitive — keep redacted/omitted by default.
 
 6. **MCP / connector approval path (the #6635 gap) — the elicitation approval shipped.**
-   Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. The `mcpToolCall` execution item now renders as a `tool_start`/`tool_result` (#6684 part 4). *Remaining:* structured `content` collection for `form`/`openai/form` elicitations, interactive `url`-mode flows, and the experimental `item/tool/requestUserInput` — tracked in #6684.
+   Connector elicitations (`mcpServer/elicitation/request`) now surface as an accept/decline prompt via the `mcp_elicitation` tool (`NEVER_AUTO_ALLOW`), fixing the "missed approval → rejected tool call" case. The `mcpToolCall` execution item now renders as a `tool_start`/`tool_result` (#6684 part 4). Structured `content` collection for `form`/`openai/form` elicitations and interactive `url`-mode flows remain tracked in #6684.
 
 7. **How should timeout/interrupt/auto-switch appear to the user?**
    *Recommendation:* surface a resolved state on the prompt (timed-out / cancelled / auto-approved) rather than silently dropping it — same UX work as #6627 (queued/permission resolved-state rendering).

@@ -6770,11 +6770,11 @@ export class SessionManager extends EventEmitter {
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
           if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? permissionDecisionToken(data.decision, data.scope) : undefined)
-          // #8470: a question a newer one replaced has no requestId, so the outcome
-          // journal above never sees it. Its verdict is recorded on the question's
-          // own history entry instead.
-          if (event === 'permission_resolved' && data?.reason === 'superseded' && typeof data.toolUseId === 'string') {
-            if (this._history.markQuestionSuperseded(sessionId, data.toolUseId)) this._schedulePersist()
+          // Question closures have no requestId. Keep their verdict on the
+          // question's history entry so full and cursor replays agree.
+          if (event === 'permission_resolved' && typeof data?.toolUseId === 'string'
+              && (data.reason === 'superseded' || data.reason === 'resolved')) {
+            if (this._history.markQuestionClosed(sessionId, data.toolUseId, data.reason)) this._schedulePersist()
           }
         }
         // Not journaled yet: a BYOK Task subagent's prompts, which reach this

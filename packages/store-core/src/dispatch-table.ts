@@ -143,6 +143,7 @@ import {
   buildPermissionOutcomeMessage,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
+  markQuestionEnded,
   reviveHeldPrompt,
   OTHER_OPTION_VALUE,
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
@@ -188,6 +189,7 @@ import {
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
   QUESTION_SUPERSEDED_PLACEHOLDER,
+  QUESTION_RESOLVED_PLACEHOLDER,
   isQuestionNoAnswerToken,
   noteTurnEnded,
 } from './replay-reconcile'
@@ -370,14 +372,16 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * Push a per-session notification for a BACKGROUND session event (#5618).
    * Used by the `user_question` case to surface a question raised in a session
    * that is not the active one. Each client backs this with its own
-   * `pushSessionNotification` — both dedup by `(sessionId, eventType)` and
+   * `pushSessionNotification` — both key identified questions by `toolUseId` and
    * early-return when the target IS the active session; the APP additionally
    * mirrors the row into its mobile push-notification store. That extra
    * side-effect is platform-specific and lives in the app's impl, exactly like
    * the app's `activityState` derivation — it is OUTSIDE the shared store-state
    * contract, so the dispatch handler stays platform-agnostic.
    */
-  pushSessionNotification(sessionId: string, eventType: SessionNotificationEventType, message: string): void
+  pushSessionNotification(sessionId: string, eventType: SessionNotificationEventType, message: string, toolUseId?: string): void
+  /** Retire a resolved question's notice when its history corrects the live view. */
+  clearQuestionNotification?(sessionId: string, toolUseId: string): void
   /**
    * Resolve a one-shot imperative callback by name (#5653). Used by the
    * file-ops / git wrapper cases, whose only effect is to invoke a callback the
@@ -1067,6 +1071,7 @@ export interface DispatchMessageMap {
     // #8336 — set on a REPLAYED question whose tool was in flight when the
     // daemon shut down (see `handleUserQuestion`). Never on a live frame.
     interrupted?: boolean
+    resolved?: boolean
   }
   // --- permission_outcome (#8348) ---
   // How a permission prompt ended, recorded by the server in history and
@@ -2447,14 +2452,27 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         searchable.forEach((m, i) => {
           if (
             m.type === 'prompt' &&
+            !m.requestId &&
             m.toolUseId === toolUseId &&
-            (!deliveredByReplay || sameQuestions(m.questions, chatMessage.questions))
+            (!deliveredByReplay || chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER || sameQuestions(m.questions, chatMessage.questions))
           ) {
             matches.push(i + offset)
           }
         })
       }
-      if (matches.length === 0) return { messages: [...ss.messages, chatMessage] } as Partial<S>
+      if (matches.length === 0) {
+        // Keep a real answer or more specific ending from the prefix a full
+        // replay replaces. Native history records closure without answer text.
+        const held = chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER && offset > 0
+          ? ss.messages.slice(0, offset).find((m) =>
+              m.type === 'prompt' && !m.requestId && m.toolUseId === toolUseId &&
+              m.answered !== undefined && m.answered !== REPLAY_RESOLVED_PLACEHOLDER)
+          : undefined
+        const message = held
+          ? { ...chatMessage, answered: held.answered, answeredAt: held.answeredAt, answeredAnswers: held.answeredAnswers }
+          : chatMessage
+        return { messages: [...ss.messages, message] } as Partial<S>
+      }
       appended = false
       if (deliveredByReplay) {
         // A replayed copy only ever adjusts the first held bubble (see below).
@@ -2462,6 +2480,10 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         const held = ss.messages[idx] as ChatMessage
         survivingIds = [held.id]
         const heldAnswered = held.answered
+        if (chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER && toolUseId) {
+          const messages = markQuestionEnded(ss.messages, toolUseId, 'resolved')
+          return (messages ? { messages } : {}) as Partial<S>
+        }
         // The held bubble stays as it is — its id, its age, and above all its
         // `answered`, which may be a real decision the replay knows nothing of.
         // The one thing a replayed copy may add is the server's verdict that the
@@ -2521,6 +2543,8 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         const held = ss.messages[idx] as ChatMessage
         survivingIds.push(held.id)
         const heldAnswered = held.answered
+        // A provider-closed question id is final even if a pending resend raced it.
+        if (heldAnswered === QUESTION_RESOLVED_PLACEHOLDER) continue
         const keepAnswered =
           heldAnswered !== undefined &&
           heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
@@ -2557,8 +2581,10 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // #7509 F6 — and a supersede is the same kind of correction: the server re-asserts
   // every pending question after EVERY replay, so a flapping connection would
   // otherwise re-raise the ping once per pending question per reconnect.
-  if (appended && sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
-    adapter.pushSessionNotification(sessionId, 'question', questionText)
+  if (sessionId && toolUseId && chatMessage.answered === QUESTION_RESOLVED_PLACEHOLDER) {
+    adapter.clearQuestionNotification?.(sessionId, toolUseId)
+  } else if (appended && sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
+    adapter.pushSessionNotification(sessionId, 'question', questionText, toolUseId)
   }
 }
 

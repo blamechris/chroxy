@@ -235,10 +235,10 @@ describe('QuestionPrompt', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
-  // #8470 — the two more ways a question ends with no answer.
   it.each([
     ['(superseded)', 'question-superseded', /Replaced by a newer question/],
     ['(not delivered)', 'question-notDelivered', /Answer not delivered/],
+    ['(no longer pending)', 'question-resolved', /Question is no longer pending/],
   ])('reads as ended, not answered, for %s (#8470)', (token, testId, label) => {
     render(
       <QuestionPrompt question="Which shape?" options={options} answered={token} onSelect={vi.fn()} />

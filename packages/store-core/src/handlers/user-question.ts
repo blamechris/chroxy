@@ -11,6 +11,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
+import { ServerPermissionResolvedSchema } from '@chroxy/protocol'
 import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
@@ -18,6 +19,7 @@ import {
   QUESTION_INTERRUPTED_PLACEHOLDER,
   QUESTION_SUPERSEDED_PLACEHOLDER,
   QUESTION_NOT_DELIVERED_PLACEHOLDER,
+  QUESTION_RESOLVED_PLACEHOLDER,
   REPLAY_RESOLVED_PLACEHOLDER,
   isQuestionNoAnswerToken,
 } from '../replay-reconcile'
@@ -82,25 +84,37 @@ export function normalizeUserQuestion(rawQ: unknown): ChatMessageQuestion | null
   const rawOptions = Array.isArray(qq.options)
     ? (qq.options as unknown[])
         .filter(
-          (o: unknown): o is { label: string } =>
+          (o: unknown): o is { label: string; description?: unknown } =>
             !!o &&
             typeof o === 'object' &&
             typeof (o as Record<string, unknown>).label === 'string',
         )
-        .map((o: { label: string }) => ({ label: o.label, value: o.label }))
     : []
+  const isMultiSelect = qq.multiSelect === true
+  if (typeof qq.allowOther === 'boolean') {
+    const options = rawOptions
+      .filter((o) => o.label !== OTHER_OPTION_VALUE)
+      .map(({ label, description }) => ({
+        label: typeof description === 'string' && description ? `${label} — ${description}` : label,
+        value: label,
+      }))
+    if (qq.allowOther && !isMultiSelect && options.length > 0) {
+      options.push({ label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE })
+    }
+    return { question: qq.question, options, ...(isMultiSelect ? { multiSelect: true } : {}) }
+  }
+  const legacyOptions = rawOptions.map(({ label }) => ({ label, value: label }))
   // #3752: dedup against the synthetic sentinel BEFORE appending it.
-  const baseOptions = rawOptions.filter(
+  const baseOptions = legacyOptions.filter(
     (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
   )
-  const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
+  const modelSuppliedOther = legacyOptions.find((o) => o.label === OTHER_OPTION_LABEL)
   const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
   // #4604 Chunk B: only append the Other sentinel for single-select
   // questions. Multi-select questions render as checkboxes and the
   // free-text escape hatch doesn't compose cleanly with that UI;
   // multi-select forms produced by claude SDK never include a
   // free-text fallback anyway.
-  const isMultiSelect = qq.multiSelect === true
   const options = !hasUsableOptions
     ? []
     : isMultiSelect
@@ -200,6 +214,9 @@ export function handleUserQuestion(
     // already marked for the same reason: the replay-end sweep would otherwise
     // stamp it "(resolved)", which reads as answered.
     chatMessage.answered = QUESTION_SUPERSEDED_PLACEHOLDER
+  } else if (msg.resolved === true && chatMessage.toolUseId &&
+      typeof msg.historySeq === 'number' && Number.isFinite(msg.historySeq)) {
+    chatMessage.answered = QUESTION_RESOLVED_PLACEHOLDER
   }
   const msgSessionId =
     typeof msg.sessionId === 'string' && msg.sessionId.length > 0
@@ -213,9 +230,11 @@ export function handleUserQuestion(
 // ---------------------------------------------------------------------------
 // A question that ended with no answer (#8470)
 //
-// Two server signals end a card without anyone having answered it:
+// Server signals can end a card without a recorded answer:
 //   - `permission_resolved { toolUseId, reason: 'superseded' }`, broadcast to the
 //     session: a newer question replaced this one, so it is no longer waiting.
+//   - `permission_resolved { toolUseId, reason: 'resolved' }`: the native provider
+//     is no longer waiting for this input.
 //   - `error { code: 'QUESTION_NOT_DELIVERED', toolUseId }`, sent to the ANSWERING
 //     client only: it marked the card answered when it sent, and the server says
 //     the answer reached nothing.
@@ -225,6 +244,33 @@ export function handleUserQuestion(
 
 /** The `error` frame code the server sends when it drops a question answer. */
 export const QUESTION_NOT_DELIVERED_CODE = 'QUESTION_NOT_DELIVERED'
+
+export type QuestionEndKind = 'superseded' | 'resolved' | 'notDelivered'
+
+const questionEndTokens: Record<QuestionEndKind, string> = {
+  superseded: QUESTION_SUPERSEDED_PLACEHOLDER,
+  resolved: QUESTION_RESOLVED_PLACEHOLDER,
+  notDelivered: QUESTION_NOT_DELIVERED_PLACEHOLDER,
+}
+
+/** Parse the question variant through the same contract used on the wire. */
+export function parseQuestionResolution(msg: Record<string, unknown>) {
+  const parsed = ServerPermissionResolvedSchema.safeParse(msg)
+  if (!parsed.success) return null
+  const { toolUseId, sessionId, reason } = parsed.data
+  if (!toolUseId || (reason !== 'superseded' && reason !== 'resolved')) return null
+  return { toolUseId, sessionId, reason } as const
+}
+
+export function matchesQuestionNotice(
+  notice: { eventType: string; toolUseId?: string; sessionId: string },
+  toolUseId: string,
+  sessionId?: string,
+): boolean {
+  return notice.eventType === 'question' &&
+    notice.toolUseId === toolUseId &&
+    (sessionId === undefined || notice.sessionId === sessionId)
+}
 
 /**
  * Parse a `QUESTION_NOT_DELIVERED` error frame: the question id the answer was
@@ -244,7 +290,7 @@ export function handleQuestionNotDelivered(
  * when no card changed (no such question, or the card already says something
  * truer), so a caller writes the store only on a change.
  *
- *   - `superseded`: only a card still waiting (no `answered`, or the replay
+ *   - `superseded` / `resolved`: only a card still waiting (no `answered`, or the replay
  *     sweep's '(resolved)') changes. A card that holds a real answer keeps it: the
  *     person did answer it; and one already ended keeps its first reason.
  *   - `notDelivered`: the card DOES hold an answer (the client marked it on send);
@@ -258,18 +304,18 @@ export function handleQuestionNotDelivered(
 export function markQuestionEnded(
   messages: ChatMessage[],
   toolUseId: string,
-  kind: 'superseded' | 'notDelivered',
+  kind: QuestionEndKind,
 ): ChatMessage[] | null {
   let changed = false
   const next = messages.map((m) => {
     if (m.type !== 'prompt' || m.requestId || m.toolUseId !== toolUseId) return m
     if (isQuestionNoAnswerToken(m.answered)) return m
-    if (kind === 'superseded' && m.answered != null && m.answered !== REPLAY_RESOLVED_PLACEHOLDER) return m
+    if (kind !== 'notDelivered' && m.answered != null && m.answered !== REPLAY_RESOLVED_PLACEHOLDER) return m
     changed = true
     const { answeredAnswers: _dropped, ...rest } = m
     return {
       ...rest,
-      answered: kind === 'superseded' ? QUESTION_SUPERSEDED_PLACEHOLDER : QUESTION_NOT_DELIVERED_PLACEHOLDER,
+      answered: questionEndTokens[kind],
       answeredAt: undefined,
     }
   })
@@ -286,9 +332,11 @@ export function markQuestionEnded(
 export function endQuestionInSessions(
   sessions: Record<string, { messages: ChatMessage[] } | undefined>,
   toolUseId: string,
-  kind: 'superseded' | 'notDelivered',
+  kind: QuestionEndKind,
+  targetSessionId?: string,
 ): { sessionId: string; messages: ChatMessage[] } | null {
-  for (const sessionId of Object.keys(sessions)) {
+  const sessionIds = targetSessionId === undefined ? Object.keys(sessions) : [targetSessionId]
+  for (const sessionId of sessionIds) {
     const ss = sessions[sessionId]
     if (!ss) continue
     const messages = markQuestionEnded(ss.messages, toolUseId, kind)
@@ -304,7 +352,7 @@ export function endQuestionInSessions(
  */
 export function questionEndedNotice(
   answered: unknown,
-): { kind: 'interrupted' | 'superseded' | 'notDelivered'; label: string } | null {
+): { kind: 'interrupted' | QuestionEndKind; label: string } | null {
   if (answered === QUESTION_INTERRUPTED_PLACEHOLDER) {
     return { kind: 'interrupted', label: 'Interrupted — chroxy restarted before this was answered' }
   }
@@ -313,6 +361,9 @@ export function questionEndedNotice(
   }
   if (answered === QUESTION_NOT_DELIVERED_PLACEHOLDER) {
     return { kind: 'notDelivered', label: 'Answer not delivered — this question was no longer waiting' }
+  }
+  if (answered === QUESTION_RESOLVED_PLACEHOLDER) {
+    return { kind: 'resolved', label: 'Question is no longer pending' }
   }
   return null
 }

@@ -54,6 +54,8 @@ export const CLIENT_CAPABILITIES = {
   // replayed `user_question` (a newer question replaced it) and shows it as replaced.
   // A client without it is not sent that question, because an older build would
   // render it as a live, answerable card and then as "(resolved)".
+  // `history_question_resolved_v1`: the client reads `resolved: true` on a
+  // replayed native input request and clears its pending notice.
   // `history_inflight_reply_v1` (#9022): the client reconciles a replayed `response` entry
   // that is the text an OPEN stream has produced so far (no `historySeq`) with the
   // bubbles it already holds, and keeps its stream marker. A client without it is not
@@ -66,8 +68,8 @@ export const CLIENT_CAPABILITIES = {
   // card, no running tool, no terminal line). A delta replay sends one for a card the
   // client received before the server learned the input. A client without it is sent
   // none, so its card stays without the input until a full replay, as before.
-  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
-  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
+  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_question_resolved_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
+  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'history_question_resolved_v1', 'history_inflight_reply_v1', 'paired_credential_confirmation_v1', 'history_tool_input_backfill_v1'] as const,
 } as const
 
 /**

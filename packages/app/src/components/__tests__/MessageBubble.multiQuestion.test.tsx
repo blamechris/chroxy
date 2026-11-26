@@ -286,11 +286,11 @@ describe('MessageBubble question cut off by a restart (#8336)', () => {
   });
 });
 
-// #8470 -- the two more ways a question ends with no answer.
 describe('MessageBubble question that ended with no answer (#8470)', () => {
   it.each([
     ['(superseded)', 'question-superseded', 'Replaced by a newer question'],
     ['(not delivered)', 'question-notDelivered', 'Answer not delivered'],
+    ['(no longer pending)', 'question-resolved', 'Question is no longer pending'],
   ])('%s: says so, instead of echoing the token or showing an answer chip', (token, testId, text) => {
     const tree = render(multiQuestionPrompt({ answered: token }), { allowMultiQuestion: true });
     expect(String(first(tree, testId).props.children)).toContain(text);

@@ -340,6 +340,10 @@ export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
  */
 export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_superseded_v1'
 
+// Like superseded questions, closed native questions must not appear live on
+// older clients that do not recognize the replay verdict.
+export const CAPABILITY_HISTORY_QUESTION_RESOLVED = 'history_question_resolved_v1'
+
 /**
  * #9022: the client capability that says "the text an open stream has produced so far
  * may be replayed to me as an unnumbered `response` entry". A client build from before
@@ -439,6 +443,12 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBu
   if (
     entry && entry.type === 'user_question' && entry.superseded === true
     && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_SUPERSEDED) ?? false)
+  ) {
+    return
+  }
+  if (
+    entry && entry.type === 'user_question' && entry.resolved === true
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_RESOLVED) ?? false)
   ) {
     return
   }

@@ -817,27 +817,16 @@ Object.assign(EVENT_MAP, {
       })
       out.registrations = [{ map: 'permission', key: data.requestId, action: 'delete' }]
     } else if (data.toolUseId) {
-      // AskUserQuestion variant — there is no `permission_resolved` wire
-      // contract for questions (clients dismiss the prompt via the
-      // user_question_response round-trip, not via a broadcast), so don't
-      // synthesise a bogus message with `requestId`/`decision` both
-      // undefined. Only emit the cleanup registration so questionSessionMap
-      // is pruned. Pre-#3736 the sdk-session re-emit was gated on
-      // `requestId` and dropped the question variant entirely, so the
-      // normalizer never saw it; widening the gate would now have emitted
-      // a malformed broadcast if we kept the unconditional messages entry.
+      // Ordinary AskUserQuestion resolutions only prune the route. A replaced
+      // question or a closed Codex request also needs to retire every live card.
       out.registrations = [{ map: 'question', key: data.toolUseId, action: 'delete' }]
-      // #8470: the one exception. A question a NEWER one replaced was not
-      // answered by anyone, so no round-trip is coming to dismiss its card on any
-      // client: say so, keyed by the question's `toolUseId`. Every other reason
-      // (answered / timeout / aborted / cleared) still emits nothing here.
-      if (data.reason === 'superseded') {
+      if (data.reason === 'superseded' || data.reason === 'resolved') {
         out.messages.push({
           msg: {
             type: 'permission_resolved',
             toolUseId: data.toolUseId,
-            decision: 'deny',
-            reason: 'superseded',
+            decision: data.reason === 'resolved' && data.decision === 'allow' ? 'allow' : 'deny',
+            reason: data.reason,
             ...resolvedByField(data.resolvedBy),
             sessionId: ctx.sessionId,
           },

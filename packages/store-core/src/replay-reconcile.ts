@@ -1590,17 +1590,20 @@ export const QUESTION_SUPERSEDED_PLACEHOLDER = '(superseded)'
  */
 export const QUESTION_NOT_DELIVERED_PLACEHOLDER = '(not delivered)'
 
+/** The native provider is no longer waiting for input on this question. */
+export const QUESTION_RESOLVED_PLACEHOLDER = '(no longer pending)'
+
 /**
  * Is `answered` one of the non-decision tokens a QUESTION can end in without
  * anyone having answered it (as opposed to the replay sweep's '(resolved)', which
- * means "answered or expired, unknown which")? A live `user_question` re-delivery
- * clears these, because it proves the question is pending again.
+ * means "answered or expired, unknown which")?
  */
 export function isQuestionNoAnswerToken(answered: unknown): boolean {
   return (
     answered === QUESTION_INTERRUPTED_PLACEHOLDER ||
     answered === QUESTION_SUPERSEDED_PLACEHOLDER ||
-    answered === QUESTION_NOT_DELIVERED_PLACEHOLDER
+    answered === QUESTION_NOT_DELIVERED_PLACEHOLDER ||
+    answered === QUESTION_RESOLVED_PLACEHOLDER
   )
 }
 

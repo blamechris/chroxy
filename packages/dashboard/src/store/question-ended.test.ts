@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setStore, handleMessage, setConnectionContext } from './message-handler'
 import type { ConnectionState } from './types'
+import { createEmptySessionState } from './utils'
 
 function createMockStore(initialState: Partial<ConnectionState>) {
   let state = initialState as ConnectionState
@@ -79,6 +80,94 @@ describe('question cards that end with no answer (#8470)', () => {
   it('any other question resolution reason changes no card (they emit no frame today)', () => {
     handleMessage({ type: 'permission_resolved', toolUseId: 'ask-1', decision: 'deny', reason: 'timeout' })
     expect(sessionMessages()[0].answered).toBeUndefined()
+  })
+
+  it('keeps one notice per pending worker question across reconnect, then clears the exact question', () => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'sess-1', name: 'Parent' }, { sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }))
+    const pending = {
+      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      questions: [{ question: 'Select a layout', options: [{ label: 'List', description: 'Show one row per item' }], allowOther: false }],
+    }
+    const other = { ...pending, toolUseId: 'codex-ask-2' }
+    const clear = {
+      type: 'permission_resolved', toolUseId: pending.toolUseId, decision: 'deny',
+      reason: 'resolved', resolvedBy: { kind: 'cleared' }, sessionId: 'worker',
+    }
+    const notices = () => store.getState().sessionNotifications
+    const workerCards = () => store.getState().sessionStates.worker!.messages
+    handleMessage(pending)
+    handleMessage(pending)
+    handleMessage(other)
+    expect(notices().map((notice) => notice.toolUseId)).toEqual([pending.toolUseId, other.toolUseId])
+    const originalNotices = notices()
+    expect(workerCards()[0]?.options).toEqual([{ label: 'List — Show one row per item', value: 'List' }])
+
+    handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true })
+    handleMessage({ ...pending, historySeq: 1 })
+    handleMessage({ ...other, historySeq: 2 })
+    handleMessage({ type: 'history_replay_end', sessionId: 'worker' })
+    handleMessage(pending)
+    handleMessage(other)
+    expect(workerCards().map((m) => [m.toolUseId, m.answered])).toEqual([
+      [pending.toolUseId, undefined], [other.toolUseId, undefined],
+    ])
+    expect(notices()).toBe(originalNotices)
+
+    handleMessage({ type: 'permission_request', requestId: pending.toolUseId, sessionId: 'worker', tool: 'Read' })
+    handleMessage({ ...clear, toolUseId: 'unknown' })
+    handleMessage({ ...clear, sessionId: 'sess-1' })
+    handleMessage({ ...clear, requestId: pending.toolUseId })
+    expect(workerCards().every((m) => m.answered === undefined)).toBe(true)
+    expect(notices().every((n) => n.readAt === undefined)).toBe(true)
+
+    handleMessage(clear)
+    expect(workerCards().map((m) => m.answered)).toEqual(['(no longer pending)', undefined, undefined])
+    expect(sessionMessages().map((m) => m.answered)).toEqual([undefined, undefined])
+    expect(store.getState().activeSessionId).toBe('sess-1')
+    expect(notices()[0]?.readAt).toEqual(expect.any(Number))
+    expect(notices().slice(1).map((n) => [n.eventType, n.readAt])).toEqual([
+      ['question', undefined], ['permission', undefined],
+    ])
+    const clearedNotices = notices()
+    handleMessage(clear)
+    handleMessage(pending)
+    expect(workerCards()[0]?.answered).toBe('(no longer pending)')
+    expect(notices()).toBe(clearedNotices)
+
+    handleMessage({ type: 'permission_resolved', requestId: pending.toolUseId, decision: 'allow', sessionId: 'worker' })
+    expect(workerCards()[2]?.answered).toBe('allow')
+  })
+
+  it('uses history to retire a missed worker clear without overwriting human answers', () => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }))
+    const pending = {
+      type: 'user_question', sessionId: 'worker', toolUseId: 'codex-ask-1',
+      questions: [{ question: 'Select a layout' }],
+    }
+    handleMessage(pending)
+    const notice = store.getState().sessionNotifications[0]!
+    const worker = () => store.getState().sessionStates.worker!
+    const humanAnswer = { answered: 'List', answeredAnswers: { 'Select a layout': 'List' }, answeredAt: 123 }
+    store.setState((state) => ({
+      sessionStates: {
+        ...state.sessionStates, worker: { ...worker(), messages: [{ ...worker().messages[0]!, ...humanAnswer }] },
+      },
+    }))
+    handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true })
+    handleMessage({ ...pending, resolved: true, historySeq: 2 })
+    handleMessage({ type: 'history_replay_end', sessionId: 'worker' })
+    expect(worker().messages[0]).toMatchObject(humanAnswer)
+    expect(store.getState().sessionNotifications[0]).toMatchObject({ id: notice.id, readAt: expect.any(Number) })
+
+    handleMessage({ ...pending, toolUseId: 'codex-closed', resolved: true, historySeq: 3 })
+    expect(worker().messages[1]?.answered).toBe('(no longer pending)')
+    expect(store.getState().sessionNotifications).toHaveLength(1)
   })
 
   it('QUESTION_NOT_DELIVERED retracts the answer the card was marked with on send', () => {

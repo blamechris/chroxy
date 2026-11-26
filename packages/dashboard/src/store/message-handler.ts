@@ -119,7 +119,9 @@ import {
   reviveHeldPrompt,
   // #8470 — a question that ended with no answer: replaced by a newer one
   // (permission_resolved, question variant) or answered into nothing (error).
-  QUESTION_SUPERSEDED_REASON,
+  parseQuestionResolution,
+  matchesQuestionNotice,
+  type QuestionEndKind,
   handleQuestionNotDelivered,
   endQuestionInSessions,
   markQuestionEnded,
@@ -1803,9 +1805,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 — search_results staleness gate reads the live flat searchQuery.
   getSearchQuery: () => getStore().getState().searchQuery,
   // #5618 — user_question raises a background-session notification via the
-  // dashboard's own helper (dedup by (sessionId, eventType); no push store).
-  pushSessionNotification: (sessionId, eventType, message) =>
-    pushSessionNotification(sessionId, eventType, message),
+  // dashboard's own helper (no push store).
+  pushSessionNotification: (sessionId, eventType, message, toolUseId) =>
+    pushSessionNotification(sessionId, eventType, message, undefined, toolUseId),
+  clearQuestionNotification,
   // #5618 — generic no-session fallback: mirror a session-targeted patch into FLAT
   // state (the dashboard UI reads flat streamingMessageId/isIdle/permissionMode; the
   // app omits this hook). Used by agent_idle and permission_mode_changed.
@@ -1874,32 +1877,47 @@ const _dispatchTable = createDispatchTable<SessionState>();
 
 /**
  * Push a notification for a background session event.
- * Deduplicates by (sessionId, eventType) — replaces existing rather than stacking.
+ * Identified questions keep one row per question. Other events replace by session and type.
  */
 function pushSessionNotification(
   sessionId: string,
   eventType: SessionNotification['eventType'],
   message: string,
   requestId?: string,
+  toolUseId?: string,
 ): void {
   const state = getStore().getState();
   if (sessionId === state.activeSessionId) return;
+  if (toolUseId && state.sessionNotifications.some((n) => matchesQuestionNotice(n, toolUseId, sessionId))) return;
   const sessionInfo = state.sessions.find((s) => s.sessionId === sessionId);
   const sessionName = sessionInfo?.name || sessionId;
   const notification: SessionNotification = {
-    id: `${sessionId}-${eventType}-${Date.now()}`,
+    id: `${sessionId}-${eventType}-${Date.now()}${toolUseId ? `-${toolUseId}` : ''}`,
     sessionId,
     sessionName,
     eventType,
     message,
     timestamp: Date.now(),
     ...(requestId ? { requestId } : {}),
+    ...(toolUseId ? { toolUseId } : {}),
   };
   getStore().setState((s) => {
     const filtered = s.sessionNotifications.filter(
-      (n) => !(n.sessionId === sessionId && n.eventType === eventType),
+      (n) => n.sessionId !== sessionId || n.eventType !== eventType || n.toolUseId !== undefined,
     );
     return { sessionNotifications: [...filtered, notification] };
+  });
+}
+
+function clearQuestionNotification(sessionId: string | undefined, toolUseId: string): void {
+  getStore().setState((state) => {
+    const notifications = state.sessionNotifications ?? [];
+    const matches = (n: SessionNotification) => n.readAt === undefined && matchesQuestionNotice(n, toolUseId, sessionId);
+    if (!notifications.some(matches)) return {};
+    const readAt = Date.now();
+    return {
+      sessionNotifications: notifications.map((n) => matches(n) ? { ...n, readAt } : n),
+    };
   });
 }
 
@@ -3167,12 +3185,13 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
  * session state, then the flat `messages` (sessions not in `sessionStates`), and
  * reports whether any card changed so a caller can fall back to a toast.
  */
-function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered', get: MsgGet, set: MsgSet): boolean {
-  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind);
+function endQuestionCard(toolUseId: string, kind: QuestionEndKind, get: MsgGet, set: MsgSet, sessionId?: string): boolean {
+  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind, sessionId);
   if (hit) {
     updateSession(hit.sessionId, () => ({ messages: hit.messages }));
     return true;
   }
+  if (sessionId !== undefined && get().activeSessionId !== sessionId) return false;
   const flat = markQuestionEnded(get().messages, toolUseId, kind);
   if (flat) {
     set({ messages: flat });
@@ -3182,6 +3201,15 @@ function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered',
 }
 
 function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  if (msg.toolUseId !== undefined) {
+    const question = parseQuestionResolution(msg);
+    if (question) {
+      const { toolUseId, sessionId, reason } = question;
+      endQuestionCard(toolUseId, reason, get, set, sessionId);
+      clearQuestionNotification(sessionId, toolUseId);
+    }
+    return;
+  }
   // Another client resolved this permission — dismiss the prompt on this client.
   // The permission_request may have been stored in ANY session state (whichever tab
   // was active when it arrived), so search all session states for the matching requestId.
@@ -3190,13 +3218,6 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // dashboard-specific.
   const resolved = sharedPermissionResolved(msg);
   const { requestId: resolvedRequestId } = resolved;
-  // #8470: the question variant. Only a SUPERSEDED question is announced (nobody
-  // answered it, so no round-trip will dismiss its card); it carries a toolUseId
-  // and no requestId.
-  if (!resolvedRequestId && resolved.toolUseId && resolved.reason === QUESTION_SUPERSEDED_REASON) {
-    endQuestionCard(resolved.toolUseId, 'superseded', get, set);
-    return;
-  }
   if (resolvedRequestId) {
     // #8374: a prompt Stop cancelled becomes a `stopped` record, not an answered
     // deny. Shared with the app, so the two cannot disagree.

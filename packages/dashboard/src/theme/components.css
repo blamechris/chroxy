@@ -5064,6 +5064,16 @@ button.sidebar-token-view-session-row:hover {
   gap: 8px;
 }
 
+.question-option,
+.question-multi-submit,
+.question-freetext-input,
+.question-freetext-send,
+.question-freetext-cancel,
+.question-answered-summary {
+  min-height: 44px;
+  min-width: 44px;
+}
+
 .question-option {
   padding: 5px 16px;
   border-radius: 6px;

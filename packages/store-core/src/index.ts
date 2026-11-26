@@ -899,6 +899,9 @@ export {
   // #8470 — a question that ended with no answer, and the notice both clients show.
   QUESTION_NOT_DELIVERED_CODE,
   handleQuestionNotDelivered,
+  parseQuestionResolution,
+  matchesQuestionNotice,
+  type QuestionEndKind,
   markQuestionEnded,
   endQuestionInSessions,
   questionEndedNotice,
