@@ -17,7 +17,7 @@ import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge, type C
 import { PastedTextChip } from './PastedTextChip'
 import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 import { isImeComposing } from '../utils/ime'
-import { isFreshKeyPress } from '../utils/keyboard'
+import { isFreshKeyPress, suppressRepeatedActivation } from '../utils/keyboard'
 
 /**
  * Convert a clipboard HTML payload to plain text. Used as a fallback when
@@ -1525,6 +1525,8 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
               data-testid="interrupt-button"
               className="btn-interrupt"
               onClick={onInterrupt}
+              // #9271: a held Enter must not click once per auto-repeat.
+              onKeyDown={suppressRepeatedActivation}
               type="button"
               aria-label="Stop generation"
             >

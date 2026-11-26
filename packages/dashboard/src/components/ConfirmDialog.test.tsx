@@ -95,4 +95,35 @@ describe('ConfirmDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
+
+  // #9271 — a held key must never answer a confirmation. Browsers click a
+  // focused button on every auto-repeated Enter keydown; jsdom does not model
+  // that, so this pins the guard on the real rendered buttons.
+  describe.each(['confirm-dialog-cancel', 'confirm-dialog-confirm'])('%s held key (#9271)', (testId) => {
+    const setup = () => {
+      const onConfirm = vi.fn()
+      const onCancel = vi.fn()
+      render(<ConfirmDialog open title="t" message="m" onConfirm={onConfirm} onCancel={onCancel} />)
+      return { onConfirm, onCancel, btn: screen.getByTestId(testId) }
+    }
+
+    it.each(['Enter', ' '])('prevents default on a repeated %j and answers nothing', (key) => {
+      const { onConfirm, onCancel, btn } = setup()
+      expect(fireEvent.keyDown(btn, { key, repeat: true })).toBe(false)
+      expect(onConfirm).not.toHaveBeenCalled()
+      expect(onCancel).not.toHaveBeenCalled()
+    })
+
+    it('does not prevent default on a fresh Enter', () => {
+      const { btn } = setup()
+      expect(fireEvent.keyDown(btn, { key: 'Enter', repeat: false })).toBe(true)
+    })
+
+    it('a click calls its handler exactly once', () => {
+      const { onConfirm, onCancel, btn } = setup()
+      fireEvent.click(btn)
+      const handler = testId.endsWith('cancel') ? onCancel : onConfirm
+      expect(handler).toHaveBeenCalledTimes(1)
+    })
+  })
 })

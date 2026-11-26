@@ -168,4 +168,18 @@ describe('one press, one Stop (#9243)', () => {
     expect(screen.queryByText('Stop this turn?')).toBeNull()
     expect(interrupts()).toHaveLength(0)
   })
+
+  it('a repeated Enter on the focused Keep running / Stop turn buttons does not answer the confirm dialog (#9271)', async () => {
+    seed([msg('u1', 'user_input'), msg('thinking', 'thinking', '')])
+    render(<App />)
+    fireEvent.click(screen.getByTestId('interrupt-button'))
+    expect(screen.getByText('Stop this turn?')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 20))
+    for (const id of ['confirm-dialog-cancel', 'confirm-dialog-confirm']) {
+      // jsdom does not click on keydown; the prevented default is what stops the browser's click.
+      expect(fireEvent.keyDown(screen.getByTestId(id), { key: 'Enter', repeat: true })).toBe(false)
+    }
+    expect(screen.getByText('Stop this turn?')).toBeInTheDocument()
+    expect(interrupts()).toHaveLength(0)
+  })
 })

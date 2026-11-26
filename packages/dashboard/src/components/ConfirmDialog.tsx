@@ -11,6 +11,7 @@
  * cancel (they call `onCancel`).
  */
 import { Modal } from './Modal'
+import { suppressRepeatedActivation } from '../utils/keyboard'
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -46,12 +47,15 @@ export function ConfirmDialog({
         <div className="confirm-dialog-message" data-testid="confirm-dialog-message">
           {message}
         </div>
+        {/* #9271: a held key (the Enter that opened this dialog) must never
+            answer it; repeats are swallowed, a fresh press still activates. */}
         <div className="modal-buttons">
           <button
             type="button"
             className="btn-modal-cancel"
             data-testid="confirm-dialog-cancel"
             onClick={onCancel}
+            onKeyDown={suppressRepeatedActivation}
           >
             {cancelLabel}
           </button>
@@ -60,6 +64,7 @@ export function ConfirmDialog({
             className={danger ? 'btn-modal-danger' : 'btn-modal-create'}
             data-testid="confirm-dialog-confirm"
             onClick={onConfirm}
+            onKeyDown={suppressRepeatedActivation}
           >
             {confirmLabel}
           </button>

@@ -519,6 +519,40 @@ describe('InputBar', () => {
     expect(onInterrupt).toHaveBeenCalled()
   })
 
+  // #9271 — a browser fires `click` on EVERY Enter keydown of a focused
+  // <button>, auto-repeats included (Space activates once, on keyup).
+  // jsdom does not model that activation; this pins the guard that
+  // preventDefault()s an auto-repeated Enter/Space so a held key is one Stop.
+  describe('Stop button held key (#9271)', () => {
+    const renderStop = () => {
+      const onInterrupt = vi.fn()
+      render(<InputBar onSend={vi.fn()} onInterrupt={onInterrupt} isBusy />)
+      return { onInterrupt, stop: screen.getByTestId('interrupt-button') }
+    }
+
+    it.each(['Enter', ' '])('prevents default on an auto-repeated %j keydown', (key) => {
+      const { onInterrupt, stop } = renderStop()
+      expect(fireEvent.keyDown(stop, { key, repeat: true })).toBe(false)
+      expect(onInterrupt).not.toHaveBeenCalled()
+    })
+
+    it.each(['Enter', ' '])('does not prevent default on a fresh %j keydown', (key) => {
+      const { stop } = renderStop()
+      expect(fireEvent.keyDown(stop, { key, repeat: false })).toBe(true)
+    })
+
+    it.each(['a', 'Escape'])('does not prevent default on a repeated %j keydown', (key) => {
+      const { stop } = renderStop()
+      expect(fireEvent.keyDown(stop, { key, repeat: true })).toBe(true)
+    })
+
+    it('a click still calls onInterrupt exactly once', () => {
+      const { onInterrupt, stop } = renderStop()
+      fireEvent.click(stop)
+      expect(onInterrupt).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('Stop tap target (#8601)', () => {
     // jsdom has no layout engine. Resolve the minimum through the complete
     // stylesheet cascade on the real control; painted geometry is smoke-tested
