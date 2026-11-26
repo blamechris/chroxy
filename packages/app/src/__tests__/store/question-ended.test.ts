@@ -285,7 +285,7 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(useNotificationStore.getState().sessionNotifications).toEqual(state.sessionNotifications);
   });
 
-  it.each([undefined, null, {}, ['ask-codex-pending', 42], ['ask-legacy']].map((value) => ({ value })))(
+  it.each([undefined, null, {}, ['ask-codex-pending', 42], ['ask-legacy'], ['ask-codex-' + 'x'.repeat(257)]].map((value) => ({ value })))(
     'keeps native notices and cards when the pending snapshot is unknown or malformed ($value)',
     ({ value: pendingQuestionToolUseIds }) => {
       store.setState((state) => ({
@@ -304,6 +304,35 @@ describe('question cards that end with no answer (#8470)', () => {
       expect(useNotificationStore.getState().sessionNotifications).toHaveLength(1);
     },
   );
+
+  it.each([false, true])('carries an answer made on the visible prefix after a pending row replayed (close row: %s)', (closeRow) => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }));
+    const dispatch = _testMessageHandler.handle;
+    const pending = {
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-interleaved',
+      questions: [{ question: 'Select a layout' }],
+    };
+    dispatch(pending);
+    const originalId = store.getState().sessionStates.worker.messages[0].id;
+    dispatch({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true });
+    dispatch({ ...pending, historySeq: 1 });
+    expect(store.getState().sessionStates.worker.messages).toHaveLength(2);
+    const answer = { answered: '(no longer pending)', answeredAt: 0, answeredAnswers: { 'Select a layout': '(no longer pending)' } };
+    store.setState((state) => ({ sessionStates: { ...state.sessionStates, worker: {
+      ...state.sessionStates.worker,
+      messages: state.sessionStates.worker.messages.map((m) => m.id === originalId ? { ...m, ...answer } : m),
+    } } }));
+    dispatch({ type: 'permission_resolved', sessionId: 'worker', toolUseId: pending.toolUseId, reason: 'resolved', decision: 'allow', resolvedBy: { kind: 'user' } });
+    if (closeRow) dispatch({ ...pending, historySeq: 2, resolved: true });
+    dispatch({ type: 'history_replay_end', sessionId: 'worker', pendingQuestionToolUseIds: [] });
+    const kept = store.getState().sessionStates.worker.messages;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject(answer);
+    expect(questionEndedNotice(kept[0].answered, kept[0].answeredAt)).toBeNull();
+  });
 
   it('QUESTION_NOT_DELIVERED retracts the answer the card was marked with on send, without an alert', () => {
     seed([card({ answered: 'A1', answeredAt: 5, answeredAnswers: { 'First?': 'A1' } })]);

@@ -1989,7 +1989,12 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
     ? sessionManager.getLatestHistorySeq(sessionId)
     : 0
-  const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
+  // With no retained transcript this exchange only synchronizes live state.
+  // Replacing the transcript with an empty slice would discard held questions
+  // even when the provider cannot tell us whether they are still pending.
+  const { fullHistory, startOffset } = history.length === 0
+    ? { fullHistory: false, startOffset: 0 }
+    : resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
 
   send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory, latestSeq })
 

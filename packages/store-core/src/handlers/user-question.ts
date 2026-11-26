@@ -11,7 +11,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import { formatCodexQuestionOptionLabel, isCodexQuestionToolUseId, ServerPermissionResolvedSchema } from '@chroxy/protocol'
+import { formatCodexQuestionOptionLabel, isCodexQuestionToolUseId, ServerHistoryReplayEndSchema, ServerPermissionResolvedSchema } from '@chroxy/protocol'
 import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
@@ -290,12 +290,9 @@ export function retiredNativeQuestionIds(
   messages: readonly ChatMessage[],
   notices: readonly QuestionNotice[],
 ): string[] {
-  if (!Array.isArray(pendingIds)) return []
-  const pending = new Set<string>()
-  for (const id of pendingIds) {
-    if (!isCodexQuestionToolUseId(id)) return []
-    pending.add(id)
-  }
+  const snapshot = ServerHistoryReplayEndSchema.shape.pendingQuestionToolUseIds.safeParse(pendingIds)
+  if (!snapshot.success || snapshot.data === undefined) return []
+  const pending = new Set(snapshot.data)
   const retired = new Set<string>()
   const consider = (id: string | undefined) => {
     if (id && isCodexQuestionToolUseId(id) && !pending.has(id)) retired.add(id)

@@ -1372,9 +1372,35 @@ export function reconcileReplayEnd(
   // #8960 — an in-flight response is not in server history, so the replay never
   // re-delivers it and the cut above would discard it with the prefix.
   const discardedPrefix = messages.slice(0, cut)
-  const freshened = freshenInFlightReplies(discardedPrefix, ordered, live, inFlightResponseIds)
+  const freshened = freshenInFlightReplies(discardedPrefix, carryNativeQuestionAnswers(discardedPrefix, ordered), live, inFlightResponseIds)
   const carried = carriedLiveMessages(discardedPrefix, freshened, live, inFlightResponseIds)
   return { swappedMessages: carried.length === 0 ? freshened : [...freshened, ...carried] }
+}
+
+/** Carry human replies made on still-visible native cards into the kept replay tail. */
+function carryNativeQuestionAnswers(prefix: readonly unknown[], kept: readonly unknown[]): unknown[] {
+  type Question = {
+    type?: string; requestId?: string; toolUseId?: string;
+    answered?: string; answeredAt?: number; answeredAnswers?: unknown
+  }
+  const answers = new Map<string, Question>()
+  for (const raw of prefix) {
+    const question = raw as Question | null
+    if (question?.type === 'prompt' && !question.requestId && isCodexQuestionToolUseId(question.toolUseId) &&
+        typeof question.answered === 'string' && typeof question.answeredAt === 'number') {
+      const previous = answers.get(question.toolUseId!)
+      if (!previous || previous.answeredAt! <= question.answeredAt) answers.set(question.toolUseId!, question)
+    }
+  }
+  if (answers.size === 0) return kept as unknown[]
+  return kept.map((raw) => {
+    const question = raw as Question | null
+    const answer = question?.type === 'prompt' && !question.requestId && question.toolUseId
+      ? answers.get(question.toolUseId) : undefined
+    // A reply already present in the kept tail is the newer local record.
+    if (!answer || question?.answeredAt !== undefined) return raw
+    return { ...question, answered: answer.answered, answeredAt: answer.answeredAt, answeredAnswers: answer.answeredAnswers }
+  })
 }
 
 /**

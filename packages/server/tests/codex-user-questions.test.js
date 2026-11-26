@@ -172,6 +172,50 @@ it('rejects two options whose canonical labels render as the same choice', async
   assert.deepEqual(replies[1]?.result, { answers: { target: { answers: [second.label] } } })
 })
 
+it('rejects options that differ only by displayed whitespace while preserving an unambiguous wire label', async (t) => {
+  const { ask, answer, questions, replies } = await setup(t)
+  const canonical = { label: 'API  stable', description: '' }
+  const duplicate = { label: '  API\tstable  ', description: '' }
+  ask(1, { questions: [{ ...QUESTION, options: [canonical, duplicate] }] })
+  assert.equal(questions().length, 0, 'collapsed whitespace makes these choices indistinguishable')
+  assert.equal(replies[0]?.error?.code, -32602)
+
+  ask(2, { questions: [{ ...QUESTION, options: [canonical, { label: 'API preview', description: '' }] }] })
+  const [{ toolUseId, questions: [form] }] = questions()
+  assert.equal(form.options[0].label, canonical.label)
+  answer({ toolUseId, answer: canonical.label })
+  assert.deepEqual(replies[1]?.result, { answers: { target: { answers: [canonical.label] } } })
+})
+
+it('rejects a literal choice that looks like synthesized Other when custom answers are allowed', async (t) => {
+  const { ask, answer, questions, replies } = await setup(t)
+  const other = { label: '  Other', description: '' }
+  ask(1, { questions: [{ ...QUESTION, options: [other] }] })
+  assert.equal(questions().length, 0, 'the literal and synthesized Other choices render alike')
+  assert.equal(replies[0]?.error?.code, -32602)
+
+  ask(2, { questions: [{ ...QUESTION, options: [other], isOther: false }] })
+  const [{ toolUseId }] = questions()
+  answer({ toolUseId, answer: other.label })
+  assert.deepEqual(replies[1]?.result, { answers: { target: { answers: [other.label] } } })
+})
+
+it('rejects questions that differ only by displayed whitespace while preserving the exact response keys', async (t) => {
+  const { ask, answer, questions, replies } = await setup(t)
+  const first = { ...QUESTION, id: 'first' }
+  const duplicate = { ...QUESTION, id: 'second', header: '', question: 'Target  Which target?' }
+  ask(1, { questions: [first, duplicate] })
+  assert.equal(questions().length, 0, 'collapsed whitespace makes the two question displays indistinguishable')
+  assert.equal(replies[0]?.error?.code, -32602)
+
+  const distinct = { ...duplicate, question: 'Target  Which scope?' }
+  ask(2, { questions: [first, distinct] })
+  const [{ toolUseId, questions: form }] = questions()
+  assert.deepEqual(form.map(q => q.question), ['Target\nWhich target?', 'Target  Which scope?'])
+  answer({ toolUseId, answer: 'Core, UI', answers: { ['Target\nWhich target?']: 'Core', 'Target  Which scope?': 'UI' } })
+  assert.deepEqual(replies[1]?.result, { answers: { first: { answers: ['Core'] }, second: { answers: ['UI'] } } })
+})
+
 it('leaves the exact route pending when a human response is invalid and refuses unentitled callers', async (t) => {
   const { ask, answer, questions, replies, senderFrames, questionSessionMap } = await setup(t)
   ask(1, { questions: [{ ...QUESTION, isOther: false }] })

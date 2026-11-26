@@ -126,6 +126,34 @@ describe('authoritative native question IDs at replay end', () => {
     assert.deepEqual(ctx._sends.find(frame => frame.type === 'history_replay_end')?.pendingQuestionToolUseIds, [])
   })
 
+  for (const [name, read, expected] of [
+    ['throws', () => { throw new Error('Question provider unavailable') }, undefined],
+    ['returns invalid data', () => null, undefined],
+    ['reports no questions', () => [], []],
+    ['reports a pending question', () => [{ toolUseId: 'ask-codex-held', questions: QUESTIONS }], ['ask-codex-held']],
+  ]) {
+    it(`exchanges an empty replay without replacing held cards when the provider ${name}`, () => {
+      const manager = managerWithPending([], [])
+      let reads = 0
+      manager.getSession('sess-1').session.getPendingQuestions = () => {
+        reads++
+        return read()
+      }
+      const ctx = makeCtx({ sessionManager: manager })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, capable)
+      replayHistory(ctx, ws, 'sess-1', { forceFull: true })
+      const [start, end, ...after] = ctx._sends.filter(frame => ['history_replay_start', 'history_replay_end', 'user_question'].includes(frame.type))
+      assert.equal(start?.type, 'history_replay_start')
+      assert.equal(start.fullHistory, false, 'empty history must not replace the client’s retained transcript')
+      assert.equal(end?.type, 'history_replay_end')
+      assert.equal(Object.hasOwn(end, 'pendingQuestionToolUseIds'), expected !== undefined)
+      assert.deepEqual(end.pendingQuestionToolUseIds, expected)
+      assert.deepEqual(after.map(frame => frame.toolUseId), expected ?? [])
+      assert.equal(reads, 1, 'replay end and any resend share the same provider read')
+    })
+  }
+
   it('omits the snapshot for an old client or an unavailable or malformed provider result', () => {
     const providers = [
       { connected: false, read: () => [] },

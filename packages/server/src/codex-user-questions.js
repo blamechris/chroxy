@@ -12,6 +12,12 @@ function nonEmptyString(value, maxLength) {
   return typeof value === 'string' && value.length <= maxLength && value.trim().length > 0
 }
 
+// Compare the text a viewer can distinguish after whitespace collapse. The
+// original question keys and option labels still go over the wire unchanged.
+function displayedTextKey(value) {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
 export function isCodexRequestId(value) {
   return Number.isSafeInteger(value) || nonEmptyString(value, MAX_ID_LENGTH)
 }
@@ -30,7 +36,8 @@ export function parseCodexUserQuestion(params) {
       || !Array.isArray(questions) || questions.length === 0 || questions.length > MAX_QUESTIONS) return null
 
   const ids = new Set()
-  const texts = new Set()
+  const questionKeys = new Set()
+  const displayTexts = new Set()
   const fields = []
   const form = []
   const single = questions.length === 1
@@ -43,7 +50,8 @@ export function parseCodexUserQuestion(params) {
         || (options !== null && (!Array.isArray(options) || options.length > MAX_OPTIONS))) return null
 
     const displayText = header.trim() ? `${header}\n${question}` : question
-    if (texts.has(displayText) || (!single && Object.hasOwn(Object.prototype, displayText))) return null
+    const displayKey = displayedTextKey(displayText)
+    if (displayTexts.has(displayKey) || (!single && Object.hasOwn(Object.prototype, displayText))) return null
 
     const labels = new Set()
     const displayLabels = new Set()
@@ -52,7 +60,7 @@ export function parseCodexUserQuestion(params) {
       const { label, description } = option ?? {}
       if (!nonEmptyString(label, MAX_TEXT_LENGTH) || label === OTHER_OPTION_VALUE || labels.has(label)
           || typeof description !== 'string' || description.length > MAX_TEXT_LENGTH) return null
-      const displayLabel = formatCodexQuestionOptionLabel(label, description)
+      const displayLabel = displayedTextKey(formatCodexQuestionOptionLabel(label, description))
       if (displayLabels.has(displayLabel)) return null
       labels.add(label)
       displayLabels.add(displayLabel)
@@ -62,17 +70,19 @@ export function parseCodexUserQuestion(params) {
     // such a form could never be completed. Single-question forms support both.
     if (!single && labels.size === 0) return null
     const allowOther = single && isOther
-    // A literal Other choice would hide the existing free-text control.
-    if (allowOther && labels.has('Other')) return null
+    // Keep the literal Other label reserved and reject aliases viewers would
+    // see as the same as the synthesized custom-answer choice.
+    if (allowOther && (labels.has('Other') || displayLabels.has('Other'))) return null
 
     ids.add(id)
-    texts.add(displayText)
+    questionKeys.add(displayText)
+    displayTexts.add(displayKey)
     fields.push({ id, question: displayText, labels, allowOther })
     form.push({ question: displayText, options: choices, allowOther })
   }
   // Both clients reserve this exact two-key answer object for a single Other
   // response. A form with those display keys cannot submit two choice answers.
-  if (texts.size === 2 && texts.has('otherLabel') && texts.has('freeformText')) return null
+  if (questionKeys.size === 2 && questionKeys.has('otherLabel') && questionKeys.has('freeformText')) return null
   return { threadId, turnId, itemId, isBlocking, fields, questions: form }
 }
 

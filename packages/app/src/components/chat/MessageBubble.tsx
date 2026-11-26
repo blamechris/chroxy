@@ -143,7 +143,8 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // from a Write/Edit pre-write-diff review — sent on an Approve so the server
   // writes only the kept hunks. `null`/omitted = no narrowing (a plain response);
   // the store's sendPermissionResponse drops it for a deny regardless.
-  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: PermissionEditedInput | null) => void;
+  // Return false only when the response definitely did not send.
+  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: PermissionEditedInput | null) => boolean | void;
   /**
    * #4973 — submit handler for the multi-question form. Fires with the
    * per-question answers map (`Record<string, string | string[]>`) plus
@@ -386,7 +387,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
     submittedRef.current = true;
     const trimmed = otherText.trim();
     const payload: SelectOptionValue = otherActive ? { otherLabel, freeformText: trimmed } : trimmed;
-    onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
+    if (onSelectOption?.(payload, message.id, message.requestId, message.toolUseId) === false) {
+      submittedRef.current = false;
+    }
   };
   // #5699 — when an unanswered, non-expired prompt is showing but we're offline,
   // explain why the (disabled) answer controls can't be used.
