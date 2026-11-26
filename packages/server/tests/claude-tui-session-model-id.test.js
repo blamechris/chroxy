@@ -264,7 +264,8 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
   // cannot tell a quoted own-model sentence from the TUI's real rejection screen (the scan is a
   // substring match on the post-prompt output), so it reports model_unavailable. The control
   // above is what proves quoted text alone never tears a turn down. This case waits for the
-  // watchdog instead of racing it.
+  // watchdog instead of racing it. #8941 (detect the rejection from a structured signal, not
+  // PTY text) is expected to flip this to stream_stall; update it there.
   it('the same quoted reply with no Stop reaches the watchdog and is classified model_unavailable (current behaviour, pinned)', async () => {
     const { s, events } = turnSession({ reply: quotedReply() })
     await s.sendMessage('explain that error')
