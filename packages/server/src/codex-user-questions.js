@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { CODEX_QUESTION_ID_PREFIX } from '@chroxy/protocol'
+import { CODEX_QUESTION_ID_PREFIX, formatCodexQuestionOptionLabel } from '@chroxy/protocol'
 
 // Bounds for native question payloads stored in the session and its history.
 const MAX_QUESTIONS = 3
@@ -46,12 +46,16 @@ export function parseCodexUserQuestion(params) {
     if (texts.has(displayText) || (!single && Object.hasOwn(Object.prototype, displayText))) return null
 
     const labels = new Set()
+    const displayLabels = new Set()
     const choices = []
     for (const option of options ?? []) {
       const { label, description } = option ?? {}
       if (!nonEmptyString(label, MAX_TEXT_LENGTH) || label === OTHER_OPTION_VALUE || labels.has(label)
           || typeof description !== 'string' || description.length > MAX_TEXT_LENGTH) return null
+      const displayLabel = formatCodexQuestionOptionLabel(label, description)
+      if (displayLabels.has(displayLabel)) return null
       labels.add(label)
+      displayLabels.add(displayLabel)
       choices.push({ label, description })
     }
     // Existing multi-question forms render choices only. A free-text field in

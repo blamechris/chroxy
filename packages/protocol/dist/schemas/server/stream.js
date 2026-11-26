@@ -6,6 +6,7 @@
  */
 import { z } from 'zod';
 import { MAX_SANE_DURATION_MS } from "./connection.js";
+import { isCodexQuestionToolUseId } from "../../codex.js";
 import { TURN_OUTCOMES } from "../../turn-outcome.js";
 import { PermissionScopeSchema, CreateSessionRequestIdSchema } from "../client.js";
 // #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
@@ -1079,6 +1080,14 @@ export function buildPermissionRequestMessage(fields) {
     }
     return result.data;
 }
+export const ServerHistoryReplayEndSchema = z.object({
+    type: z.literal('history_replay_end'),
+    sessionId: z.string().min(1),
+    latestSeq: z.number().int().nonnegative().optional(),
+    // The native questions still awaiting a response for this exact session.
+    // [] is authoritative. Omission is unknown or unsupported by the client.
+    pendingQuestionToolUseIds: z.array(z.string().max(256).refine(isCodexQuestionToolUseId)).optional(),
+});
 export const ServerUserQuestionSchema = z.object({
     type: z.literal('user_question'),
     toolUseId: z.string(),

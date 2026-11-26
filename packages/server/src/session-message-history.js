@@ -595,9 +595,11 @@ export class SessionMessageHistory extends EventEmitter {
    *   - history with no tool_start entries or all tool_starts already matched
    *
    * @param {Array} history
+   * @param {{nativeQuestionCorrections?: Array}} [options] - collect native question
+   *   tail copies separately when the caller must first restore the old seq reservation
    * @returns {Array}
    */
-  static sweepUnresolvedToolStarts(history) {
+  static sweepUnresolvedToolStarts(history, { nativeQuestionCorrections } = {}) {
     if (!Array.isArray(history) || history.length === 0) return history
     const resolved = new Set()
     for (const entry of history) {
@@ -645,7 +647,10 @@ export class SessionMessageHistory extends EventEmitter {
       } else if (typeof questionToolId === 'string' && interruptedIds.has(questionToolId)) {
         entry = { ...rawEntry, interrupted: true }
       }
-      if (entry !== rawEntry) redelivered.push({ ...entry })
+      if (entry !== rawEntry) {
+        const tail = entry.resolved === true && nativeQuestionCorrections ? nativeQuestionCorrections : redelivered
+        tail.push({ ...entry })
+      }
       out.push(entry)
       if (
         entry
@@ -702,6 +707,16 @@ export class SessionMessageHistory extends EventEmitter {
     // price of never losing the verdict.
     for (const copy of redelivered) out.push(copy)
     return out
+  }
+
+  /** Append native closure copies after the caller restores the old reservation. */
+  appendRestoredQuestionCorrections(sessionId, corrections) {
+    if (corrections.length === 0) return
+    const history = this._messageHistory.get(sessionId)
+    if (!this._seqReserved.has(sessionId)) {
+      this._seqCounters.set(sessionId, (this._seqCounters.get(sessionId) || 1) + RESTART_SEQ_GAP)
+    }
+    for (const { _seq: _oldSeq, ...entry } of corrections) this._pushHistory(history, entry, sessionId)
   }
 
   /**

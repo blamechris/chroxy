@@ -73,6 +73,7 @@
  * prefix shrinks underneath it.
  */
 
+import { isCodexQuestionToolUseId } from '@chroxy/protocol'
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 import { clearPendingCreateFailures } from './handlers/session-lifecycle'
 import { isResponseStreamBubbleId } from './replay-dedup'
@@ -1614,6 +1615,7 @@ interface SweepablePrompt {
   type: string
   answered?: unknown
   requestId?: unknown
+  toolUseId?: unknown
 }
 
 /**
@@ -1766,7 +1768,7 @@ export function wasPromptLiveDuringReplay(
  * when there is nothing to stamp, so the caller can return a no-op patch and
  * avoid a re-render.
  *
- * Three exclusions, each for its own reason:
+ * Exclusions:
  *
  *   - `m.answered` already set — a real decision, or an earlier sweep.
  *   - `m.requestId` present (#7410/#7419) — only `permission_request` sets it,
@@ -1783,6 +1785,8 @@ export function wasPromptLiveDuringReplay(
  *     buffer and its ChatMessage sets neither `requestId` nor `expiresAt`, so
  *     shape alone cannot tell a live one from a replayed one; only the arriving
  *     frame could, and this is where that observation is kept.
+ *   - native Codex question ids: the replay-end pending snapshot determines
+ *     their status when available. An unavailable snapshot leaves them alone.
  *
  * Everything else — replayed prompts, and prompts that pre-date the window — is
  * stamped, which is the sweep's original premise.
@@ -1804,7 +1808,8 @@ export function sweepUnansweredPromptsAtReplayEnd<T extends SweepablePrompt>(
   if (!sessionId) return null
   const live = ledgerFor(sessionId)
   const isStampable = (m: T): boolean =>
-    m.type === 'prompt' && !m.answered && !m.requestId && !(live?.has(m.id) === true)
+    m.type === 'prompt' && !m.answered && !m.requestId &&
+    !isCodexQuestionToolUseId(m.toolUseId) && !(live?.has(m.id) === true)
   if (!messages.some(isStampable)) return null
   return messages.map((m) =>
     isStampable(m) ? ({ ...m, answered: REPLAY_RESOLVED_PLACEHOLDER } as T) : m,

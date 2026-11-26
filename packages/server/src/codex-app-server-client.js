@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { EventEmitter } from 'events'
+import { StringDecoder } from 'node:string_decoder'
 import { createLogger } from './logger.js'
 
 const log = createLogger('codex-app-server')
@@ -56,6 +57,7 @@ export class CodexAppServerClient extends EventEmitter {
     this._spawn = typeof spawnFn === 'function' ? spawnFn : spawn
     this._child = null
     this._buf = ''
+    this._stdoutDecoder = new StringDecoder('utf8')
     this._nextId = 1
     this._pending = new Map() // id -> { resolve, reject }
     this._closed = false
@@ -129,7 +131,8 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   _onData(d) {
-    this._buf += String(d)
+    if (this._closed) return
+    this._buf += typeof d === 'string' ? d : this._stdoutDecoder.write(d)
     let nl
     while ((nl = this._buf.indexOf('\n')) >= 0) {
       // trim() strips a trailing '\r' too, so CRLF-framed lines parse cleanly
@@ -184,6 +187,9 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   _rejectAllPending(err) {
+    // Closing the transport abandons an incomplete last line or code point.
+    this._buf = ''
+    this._stdoutDecoder.end()
     for (const { reject } of this._pending.values()) reject(err)
     this._pending.clear()
   }

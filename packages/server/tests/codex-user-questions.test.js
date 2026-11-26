@@ -141,6 +141,37 @@ it('maps single-question free text and Other through the same human response pat
   ])
 })
 
+it('preserves exact native choice labels when stdio splits a UTF-8 code point', async (t) => {
+  const { child, answer, questions, replies } = await setup(t)
+  const label = 'Résumé 🦊'
+  const params = { ...PARAMS, questions: [{ ...QUESTION, options: [{ label, description: '' }] }] }
+  const frame = Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: 'utf-8', method: METHOD, params })}\n`, 'utf8')
+  const first = frame.indexOf(Buffer.from('é')) + 1
+  const second = frame.indexOf(Buffer.from('🦊')) + 2
+  assert.ok(first > 1 && second > first)
+  for (const chunk of [frame.subarray(0, first), frame.subarray(first, second), frame.subarray(second)]) {
+    child.stdout.emit('data', chunk)
+  }
+  const [prompt] = questions()
+  assert.equal(prompt?.questions[0]?.options[0]?.label, label)
+  answer({ toolUseId: prompt.toolUseId, answer: label })
+  assert.deepEqual(replies.map(reply => [reply.id, reply.result]), [['utf-8', { answers: { target: { answers: [label] } } }]])
+})
+
+it('rejects two options whose canonical labels render as the same choice', async (t) => {
+  const { ask, answer, questions, replies } = await setup(t)
+  const first = { label: 'API', description: 'client — stable' }
+  const second = { label: 'API — client', description: 'stable' }
+  ask(1, { questions: [{ ...QUESTION, options: [first, second] }] })
+  assert.equal(questions().length, 0, 'identical displayed choices cannot identify the intended answer')
+  assert.equal(replies[0]?.error?.code, -32602)
+
+  ask(2, { questions: [{ ...QUESTION, options: [first, { ...second, description: 'preview' }] }] })
+  const [{ toolUseId }] = questions()
+  answer({ toolUseId, answer: second.label })
+  assert.deepEqual(replies[1]?.result, { answers: { target: { answers: [second.label] } } })
+})
+
 it('leaves the exact route pending when a human response is invalid and refuses unentitled callers', async (t) => {
   const { ask, answer, questions, replies, senderFrames, questionSessionMap } = await setup(t)
   ask(1, { questions: [{ ...QUESTION, isOther: false }] })

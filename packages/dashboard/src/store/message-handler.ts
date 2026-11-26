@@ -121,6 +121,7 @@ import {
   // (permission_resolved, question variant) or answered into nothing (error).
   parseQuestionResolution,
   matchesQuestionNotice,
+  retiredNativeQuestionIds,
   type QuestionEndKind,
   handleQuestionNotDelivered,
   endQuestionInSessions,
@@ -6253,6 +6254,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
             const swept = sweepUnansweredPromptsAtReplayEnd(endTargetId, ss.messages);
             return swept ? { messages: swept } : {};
           });
+        }
+        // Only an explicitly named session can inherit the provider snapshot.
+        // Include unread notices whose cards were discarded by a full rebuild.
+        if (typeof msg.sessionId === 'string' && msg.sessionId && msg.pendingQuestionToolUseIds !== undefined) {
+          const sessionId = msg.sessionId;
+          const state = get();
+          const messages = state.sessionStates[sessionId]?.messages ??
+            (state.activeSessionId === sessionId ? state.messages : []);
+          const notices = (state.sessionNotifications ?? []).filter((n) => n.readAt === undefined);
+          for (const toolUseId of retiredNativeQuestionIds(msg.pendingQuestionToolUseIds, sessionId, messages, notices)) {
+            endQuestionCard(toolUseId, 'resolved', get, set, sessionId);
+            clearQuestionNotification(sessionId, toolUseId);
+          }
         }
       }
       break;

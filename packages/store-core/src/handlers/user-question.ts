@@ -11,7 +11,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import { isCodexQuestionToolUseId, ServerPermissionResolvedSchema } from '@chroxy/protocol'
+import { formatCodexQuestionOptionLabel, isCodexQuestionToolUseId, ServerPermissionResolvedSchema } from '@chroxy/protocol'
 import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
@@ -95,7 +95,7 @@ export function normalizeUserQuestion(rawQ: unknown): ChatMessageQuestion | null
     const options = rawOptions
       .filter((o) => o.label !== OTHER_OPTION_VALUE)
       .map(({ label, description }) => ({
-        label: typeof description === 'string' && description ? `${label} — ${description}` : label,
+        label: formatCodexQuestionOptionLabel(label, typeof description === 'string' ? description : undefined),
         value: label,
       }))
     if (qq.allowOther && !isMultiSelect && options.length > 0) {
@@ -262,8 +262,14 @@ export function parseQuestionResolution(msg: Record<string, unknown>) {
   return { toolUseId, sessionId, reason } as const
 }
 
+interface QuestionNotice {
+  eventType: string
+  toolUseId?: string
+  sessionId: string
+}
+
 export function matchesQuestionNotice(
-  notice: { eventType: string; toolUseId?: string; sessionId: string },
+  notice: QuestionNotice,
   toolUseId: string,
   sessionId?: string,
 ): boolean {
@@ -271,6 +277,38 @@ export function matchesQuestionNotice(
     isCodexQuestionToolUseId(toolUseId) &&
     notice.toolUseId === toolUseId &&
     (sessionId === undefined || notice.sessionId === sessionId)
+}
+
+/**
+ * A complete native pending-ID snapshot can retire questions even when
+ * bounded replay omitted both the question and its closure. An invalid or
+ * absent snapshot grants no authority to close anything.
+ */
+export function retiredNativeQuestionIds(
+  pendingIds: unknown,
+  sessionId: string,
+  messages: readonly ChatMessage[],
+  notices: readonly QuestionNotice[],
+): string[] {
+  if (!Array.isArray(pendingIds)) return []
+  const pending = new Set<string>()
+  for (const id of pendingIds) {
+    if (!isCodexQuestionToolUseId(id)) return []
+    pending.add(id)
+  }
+  const retired = new Set<string>()
+  const consider = (id: string | undefined) => {
+    if (id && isCodexQuestionToolUseId(id) && !pending.has(id)) retired.add(id)
+  }
+  for (const message of messages) {
+    const waiting = message.answered == null ||
+      (message.answered === REPLAY_RESOLVED_PLACEHOLDER && message.answeredAt === undefined)
+    if (waiting && message.type === 'prompt' && !message.requestId) consider(message.toolUseId)
+  }
+  for (const notice of notices) {
+    if (notice.eventType === 'question' && notice.sessionId === sessionId) consider(notice.toolUseId)
+  }
+  return [...retired]
 }
 
 /**

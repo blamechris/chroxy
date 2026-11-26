@@ -324,6 +324,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
     (isMultiQuestion && !!allowMultiQuestion) || (isSingleMultiSelect && !!allowSingleMultiSelect);
   const showMultiQuestionForm =
     useMultiForm && message.answered == null && !isExpired;
+  // A question that ended without an answer shows its status without choices
+  // or an answer summary, even when an option matches the status token.
+  const endedNotice = isPrompt ? questionEndedNotice(message.answered, message.answeredAt) : null;
+  const answeredNoAnswer = endedNotice !== null;
   // #4973 — the per-question structured summary chip needs the
   // `answeredAnswers` map (recorded by `markPromptAnsweredMulti` on the
   // client that submitted). When a multi-question prompt is answered but
@@ -334,20 +338,14 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   const hasMultiQuestionAnswers =
     useMultiForm &&
     message.answered != null &&
-    message.answeredAnswers != null;
-  // #8336 / #8470 — a question that ended with no answer: the daemon was cut off
-  // before anyone answered, a newer question replaced it, or this client's answer
-  // was not delivered. Not an answer: no check icon, and the status line below
-  // says so instead of echoing the token. One wording, shared with the dashboard.
-  const endedNotice = isPrompt ? questionEndedNotice(message.answered, message.answeredAt) : null;
-  const answeredNoAnswer = endedNotice !== null;
+    message.answeredAnswers != null &&
+    !answeredNoAnswer;
   const showMultiQuestionFallbackSummary =
     useMultiForm &&
     message.answered != null &&
     message.answeredAnswers == null &&
     !answeredNoAnswer;
-  const showMultiQuestionSummary =
-    useMultiForm && message.answered != null;
+  const showMultiQuestionSummary = hasMultiQuestionAnswers || showMultiQuestionFallbackSummary;
   // #4973 — per-question display labels for the post-answer summary chip.
   // Maps each question's chosen value(s) (from the structured
   // `answeredAnswers` map) back to its option label(s), comma-joined for
@@ -364,25 +362,37 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
       })
     : [];
   const hasOptions = isPrompt && !!message.options && message.options.length > 0;
+  const isFreeTextQuestion = isPrompt && !message.requestId && !!message.toolUseId && message.options?.length === 0 &&
+    !isMultiQuestion && !isSingleMultiSelect;
   const answeredIsFreeText =
-    hasOptions && message.answered != null &&
-    !message.options!.some(o => o.value === message.answered);
+    message.answered != null &&
+    (isFreeTextQuestion || (hasOptions && !message.options!.some(o => o.value === message.answered)));
   // Hide option buttons in free-text-answered case and while user is in
   // "Other" mode without an answer yet. Once an answer arrives, ignore
   // lingering otherActive so the chosen option still renders (e.g. when
   // another client answers while local Other mode is open).
   const showOptionButtons =
-    hasOptions && !answeredIsFreeText &&
+    hasOptions && !answeredIsFreeText && !answeredNoAnswer &&
     // #4973 — suppress the legacy Q[0] option buttons when the
     // interactive multi-question form / summary is rendering.
     !showMultiQuestionForm && !showMultiQuestionSummary &&
     (message.answered != null || !otherActive);
-  const showFreetextInput = isPrompt && otherActive && !message.answered && !isExpired;
+  const showFreetextInput = isPrompt && (otherActive || isFreeTextQuestion) &&
+    message.answered == null && !isExpired;
+  const canSendFreetext = connected && otherText.trim().length > 0;
+  const submitFreetext = () => {
+    // Check before latching so the person can retry after reconnecting.
+    if (!canSendFreetext || submittedRef.current) return;
+    submittedRef.current = true;
+    const trimmed = otherText.trim();
+    const payload: SelectOptionValue = otherActive ? { otherLabel, freeformText: trimmed } : trimmed;
+    onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
+  };
   // #5699 — when an unanswered, non-expired prompt is showing but we're offline,
   // explain why the (disabled) answer controls can't be used.
   const showDisconnectedAnswerHint =
     isPrompt && !connected && message.answered == null && !isExpired &&
-    (hasOptions || useMultiForm || otherActive);
+    (hasOptions || useMultiForm || showFreetextInput);
 
   // Answered permission prompts (with requestId) collapse to a compact pill.
   // user_question prompts (no requestId) are NOT collapsed.
@@ -803,69 +813,39 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
             // tests and Maestro flows. Pairs with `approval-freetext-send`
             // on the Send button so flows can drive Other-mode end-to-end.
             testID="approval-freetext-input"
-            autoFocus
-            onSubmitEditing={() => {
-              const trimmed = otherText.trim();
-              // #5699/#6079 — gate the Enter-key path on a live connection too
-              // (the Send button is already disabled). Critically, bail BEFORE
-              // latching submittedRef: a disconnected submit can't land, and
-              // setting the one-shot guard here would block the legitimate retry
-              // after reconnect (the guard only resets when message.answered
-              // changes, which never happens for a refused answer).
-              if (!trimmed || !connected || submittedRef.current) return;
-              submittedRef.current = true;
-              // #4755 — when the user reached this input by clicking the
-              // synthesized "Other" option (otherActive true), emit the
-              // structured `{otherLabel, freeformText}` payload so the
-              // server can drive the two-stage TUI write. When otherActive
-              // is false the user is in the zero-options free-text-only
-              // path (#1245) — keep emitting a plain string so the
-              // server's existing free-text handler continues to work
-              // unchanged. Mirrors dashboard handleSubmit (#4651).
-              const payload: SelectOptionValue = otherActive
-                ? { otherLabel, freeformText: trimmed }
-                : trimmed;
-              onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
-            }}
+            autoFocus={otherActive}
+            onSubmitEditing={submitFreetext}
             returnKeyType="send"
           />
           <TouchableOpacity
-            style={[styles.promptFreetextSend, (!otherText.trim() || !connected) && styles.promptOptionDisabled]}
+            style={[styles.promptFreetextSend, !canSendFreetext && styles.promptOptionDisabled]}
             // #5699 — also block the freeform Send while disconnected.
-            disabled={!otherText.trim() || !connected}
+            disabled={!canSendFreetext}
             accessibilityRole="button"
             // #5634 — name the freeform response in the tool context.
             accessibilityLabel={message.tool ? `Send response, ${message.tool}` : 'Send response'}
-            accessibilityState={{ disabled: !otherText.trim() || !connected }}
+            accessibilityState={{ disabled: !canSendFreetext }}
             // #4755 — see input testID comment above.
             testID="approval-freetext-send"
-            onPress={() => {
-              const trimmed = otherText.trim();
-              if (!trimmed || submittedRef.current) return;
-              submittedRef.current = true;
-              // #4755 — see onSubmitEditing comment above. Both paths
-              // (Enter key + Send button tap) must emit the same shape.
-              const payload: SelectOptionValue = otherActive
-                ? { otherLabel, freeformText: trimmed }
-                : trimmed;
-              onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
-            }}
+            onPress={submitFreetext}
           >
             <Text style={styles.promptFreetextSendText}>Send</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.promptFreetextCancel}
-            accessibilityRole="button"
-            // #5634 — cancel the freeform response and return to the options.
-            accessibilityLabel="Cancel response"
-            testID="approval-freetext-cancel"
-            onPress={() => {
-              setOtherActive(false);
-              setOtherText('');
-            }}
-          >
-            <Text style={styles.promptFreetextCancelText}>Cancel</Text>
-          </TouchableOpacity>
+          {otherActive && (
+            <TouchableOpacity
+              style={styles.promptFreetextCancel}
+              accessibilityRole="button"
+              // #5634 — cancel the freeform response and return to the options.
+              accessibilityLabel="Cancel response"
+              testID="approval-freetext-cancel"
+              onPress={() => {
+                setOtherActive(false);
+                setOtherText('');
+              }}
+            >
+              <Text style={styles.promptFreetextCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
       {endedNotice ? (
@@ -1136,7 +1116,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    minHeight: 44,
+    minHeight: 48,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.accentOrangeBorderStrong,
@@ -1147,7 +1127,8 @@ const styles = StyleSheet.create({
   promptFreetextSend: {
     paddingHorizontal: 16,
     paddingVertical: 8,
-    minHeight: 44,
+    minHeight: 48,
+    minWidth: 48,
     justifyContent: 'center',
     borderRadius: 8,
     backgroundColor: COLORS.accentOrange,
@@ -1160,7 +1141,8 @@ const styles = StyleSheet.create({
   promptFreetextCancel: {
     paddingHorizontal: 12,
     paddingVertical: 8,
-    minHeight: 44,
+    minHeight: 48,
+    minWidth: 48,
     justifyContent: 'center',
     borderRadius: 8,
     borderWidth: 1,

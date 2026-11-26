@@ -216,6 +216,95 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(useNotificationStore.getState().activityHistory).toHaveLength(1);
   });
 
+  it.each([false, true])('retires a notice after an empty full replay evicts its card (mirror only: %s)', (mirrorOnly) => {
+    store.setState((state) => ({
+      sessions: [...state.sessions, { sessionId: 'worker', name: 'Worker' } as ConnectionState['sessions'][number]],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }));
+    const dispatch = _testMessageHandler.handle;
+    dispatch({
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-evicted',
+      questions: [{ question: 'Evicted question?' }],
+    });
+    if (mirrorOnly) store.setState({ sessionNotifications: [] });
+    dispatch({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true });
+    dispatch({ type: 'history_replay_end', sessionId: 'worker', pendingQuestionToolUseIds: [] });
+    expect(store.getState().sessionStates.worker.messages).toEqual([]);
+    expect(store.getState().sessionNotifications).toEqual([]);
+    expect(useNotificationStore.getState().sessionNotifications).toEqual([]);
+    expect(useNotificationStore.getState().activityHistory).toHaveLength(1);
+  });
+
+  it('reconciles a nonempty pending snapshot for just the replayed session and clears both notice stores', () => {
+    store.setState((state) => ({
+      sessions: [
+        ...state.sessions, { sessionId: 'worker', name: 'Worker' }, { sessionId: 'other', name: 'Other' },
+      ] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState(), other: createEmptySessionState() },
+    }));
+    const dispatch = _testMessageHandler.handle;
+    const question = (toolUseId: string, sessionId = 'worker') => dispatch({
+      type: 'user_question', sessionId, toolUseId, questions: [{ question: 'Input?' }],
+    });
+    question('ask-codex-stale');
+    question('ask-codex-pending');
+    question('ask-codex-answered');
+    question('ask-codex-stale', 'other');
+    question('ask-legacy');
+    dispatch({ type: 'permission_request', sessionId: 'worker', requestId: 'perm-1', tool: 'Read' });
+    const humanAnswer = { answered: '(no longer pending)', answeredAt: 0, answeredAnswers: { 'Input?': '(no longer pending)' } };
+    store.setState((state) => ({
+      sessionStates: {
+        ...state.sessionStates,
+        worker: {
+          ...state.sessionStates.worker,
+          messages: state.sessionStates.worker.messages.map((m) =>
+            m.toolUseId === 'ask-codex-answered' ? { ...m, ...humanAnswer } : m),
+        },
+      },
+    }));
+    dispatch({ type: 'history_replay_start', sessionId: 'worker', fullHistory: false });
+    question('ask-codex-live');
+    dispatch({
+      type: 'history_replay_end', sessionId: 'worker',
+      pendingQuestionToolUseIds: ['ask-codex-pending', 'ask-codex-live'],
+    });
+    const state = store.getState();
+    const cards = state.sessionStates.worker.messages;
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-stale')?.answered).toBe('(no longer pending)');
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-pending')?.answered).toBeUndefined();
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-live')?.answered).toBeUndefined();
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-answered')).toMatchObject(humanAnswer);
+    expect(cards.find((m) => m.toolUseId === 'ask-legacy')?.answered).toBe('(resolved)');
+    expect(cards.find((m) => m.requestId === 'perm-1')?.answered).toBeUndefined();
+    expect(state.sessionStates.other.messages[0].answered).toBeUndefined();
+    expect(state.sessionNotifications.map((n) => [n.sessionId, n.toolUseId, n.eventType])).toEqual([
+      ['worker', 'ask-codex-pending', 'question'], ['other', 'ask-codex-stale', 'question'],
+      ['worker', undefined, 'question'], ['worker', undefined, 'permission'], ['worker', 'ask-codex-live', 'question'],
+    ]);
+    expect(useNotificationStore.getState().sessionNotifications).toEqual(state.sessionNotifications);
+  });
+
+  it.each([undefined, null, {}, ['ask-codex-pending', 42], ['ask-legacy']].map((value) => ({ value })))(
+    'keeps native notices and cards when the pending snapshot is unknown or malformed ($value)',
+    ({ value: pendingQuestionToolUseIds }) => {
+      store.setState((state) => ({
+        sessions: [...state.sessions, { sessionId: 'worker', name: 'Worker' } as ConnectionState['sessions'][number]],
+        sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+      }));
+      const dispatch = _testMessageHandler.handle;
+      dispatch({
+        type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-unknown',
+        questions: [{ question: 'Still waiting?' }],
+      });
+      dispatch({ type: 'history_replay_start', sessionId: 'worker', fullHistory: false });
+      dispatch({ type: 'history_replay_end', sessionId: 'worker', pendingQuestionToolUseIds });
+      expect(store.getState().sessionStates.worker.messages[0].answered).toBeUndefined();
+      expect(store.getState().sessionNotifications).toHaveLength(1);
+      expect(useNotificationStore.getState().sessionNotifications).toHaveLength(1);
+    },
+  );
+
   it('QUESTION_NOT_DELIVERED retracts the answer the card was marked with on send, without an alert', () => {
     seed([card({ answered: 'A1', answeredAt: 5, answeredAnswers: { 'First?': 'A1' } })]);
     _testMessageHandler.handle({ type: 'error', requestId: null, code: 'QUESTION_NOT_DELIVERED', message: 'Your answer was not delivered', toolUseId: 'ask-1', sessionId: 's1', fatal: false });

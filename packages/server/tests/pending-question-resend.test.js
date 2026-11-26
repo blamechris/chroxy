@@ -35,7 +35,7 @@ import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSpy, createMockSessionManager } from './test-helpers.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
-import { replayHistory, resendPendingQuestions } from '../src/ws-history.js'
+import { CAPABILITY_HISTORY_QUESTION_RESOLVED, replayHistory, resendPendingQuestions } from '../src/ws-history.js'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { BaseSession } from '../src/base-session.js'
 import { CliSession } from '../src/cli-session.js'
@@ -81,6 +81,72 @@ function registerClient(ctx, ws, overrides = {}) {
   ctx.clients.set(ws, client)
   return client
 }
+
+describe('authoritative native question IDs at replay end', () => {
+  const history = [{ type: 'message', messageType: 'response', content: 'Later reply', timestamp: 1, _seq: 8 }]
+  const capable = { clientCapabilities: new Set([CAPABILITY_HISTORY_QUESTION_RESOLVED]) }
+
+  for (const fullHistory of [true, false]) {
+    it(`advertises only the replayed session's pending native IDs on ${fullHistory ? 'full' : 'delta'} replay`, () => {
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Alpha', cwd: '/alpha' }, { id: 'sess-2', name: 'Beta', cwd: '/beta' },
+      ])
+      manager.getHistory = () => history
+      manager.isHistoryTruncated = () => false
+      manager.getLatestHistorySeq = () => 8
+      manager.getOldestHistorySeq = () => 8
+      const ids = ['ask-old-provider', 'ask-codex-alpha']
+      const calls = []
+      manager.getSession('sess-1').session.getPendingQuestions = () => {
+        calls.push('sess-1')
+        return ids.map(toolUseId => ({ toolUseId, questions: QUESTIONS }))
+      }
+      manager.getSession('sess-2').session.getPendingQuestions = () => {
+        calls.push('sess-2')
+        return [{ toolUseId: 'ask-codex-beta', questions: QUESTIONS }]
+      }
+      const ctx = makeCtx({ sessionManager: manager })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, { activeSessionId: 'sess-2', historyCursors: { 'sess-1': 8 }, ...capable })
+      replayHistory(ctx, ws, 'sess-1', { forceFull: fullHistory })
+      const end = ctx._sends.findIndex(frame => frame.type === 'history_replay_end')
+      assert.equal(ctx._sends[0]?.fullHistory, fullHistory)
+      assert.deepEqual(ctx._sends[end]?.pendingQuestionToolUseIds, ['ask-codex-alpha'])
+      assert.equal(ctx._sends[end]?.sessionId, 'sess-1')
+      assert.deepEqual(ctx._sends.slice(end + 1).filter(frame => frame.type === 'user_question').map(frame => frame.toolUseId), ids)
+      assert.deepEqual(calls, ['sess-1'], 'snapshot and resend share one live read from the exact session')
+    })
+  }
+
+  it('advertises explicit empty for known empty even without retained history', () => {
+    const ctx = makeCtx({ sessionManager: managerWithPending([], []) })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws, capable)
+    replayHistory(ctx, ws, 'sess-1')
+    assert.deepEqual(ctx._sends.find(frame => frame.type === 'history_replay_end')?.pendingQuestionToolUseIds, [])
+  })
+
+  it('omits the snapshot for an old client or an unavailable or malformed provider result', () => {
+    const providers = [
+      { connected: false, read: () => [] },
+      { connected: true, read: undefined },
+      { connected: true, read: () => { throw new Error('Question provider unavailable') } },
+      { connected: true, read: () => null },
+      { connected: true, read: () => [{ toolUseId: 'ask-codex-malformed' }] },
+    ]
+    for (const { connected, read } of providers) {
+      const manager = managerWithPending(history, [])
+      manager.getSession('sess-1').session.getPendingQuestions = read
+      const ctx = makeCtx({ sessionManager: manager })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, connected ? capable : {})
+      replayHistory(ctx, ws, 'sess-1')
+      const end = ctx._sends.find(frame => frame.type === 'history_replay_end')
+      assert.ok(end)
+      assert.equal(Object.hasOwn(end, 'pendingQuestionToolUseIds'), false)
+    }
+  })
+})
 
 // ── AC 1: the reconnect leaves the prompt answerable ───────────────────────
 

@@ -203,6 +203,84 @@ describe('question cards that end with no answer (#8470)', () => {
     expect(store.getState().sessionNotifications).toHaveLength(1)
   })
 
+  it('retires a notice even when an empty full replay evicts its card and closure row', () => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+    }))
+    handleMessage({
+      type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-evicted',
+      questions: [{ question: 'Evicted question?' }],
+    })
+    const notice = store.getState().sessionNotifications[0]!
+    handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: true })
+    handleMessage({ type: 'history_replay_end', sessionId: 'worker', pendingQuestionToolUseIds: [] })
+    expect(store.getState().sessionStates.worker!.messages).toEqual([])
+    expect(store.getState().sessionNotifications).toEqual([{ ...notice, readAt: expect.any(Number) }])
+  })
+
+  it('reconciles a nonempty pending snapshot for just the replayed session', () => {
+    store.setState((state) => ({
+      sessions: [{ sessionId: 'worker', name: 'Worker' }, { sessionId: 'other', name: 'Other' }] as ConnectionState['sessions'],
+      sessionStates: { ...state.sessionStates, worker: createEmptySessionState(), other: createEmptySessionState() },
+    }))
+    const question = (toolUseId: string, sessionId = 'worker') => handleMessage({
+      type: 'user_question', sessionId, toolUseId, questions: [{ question: 'Input?' }],
+    })
+    question('ask-codex-stale')
+    question('ask-codex-pending')
+    question('ask-codex-answered')
+    question('ask-codex-stale', 'other')
+    question('ask-legacy')
+    handleMessage({ type: 'permission_request', sessionId: 'worker', requestId: 'perm-1', tool: 'Read' })
+    const humanAnswer = { answered: '(no longer pending)', answeredAt: 0, answeredAnswers: { 'Input?': '(no longer pending)' } }
+    store.setState((state) => ({
+      sessionStates: {
+        ...state.sessionStates,
+        worker: {
+          ...state.sessionStates.worker!,
+          messages: state.sessionStates.worker!.messages.map((m) =>
+            m.toolUseId === 'ask-codex-answered' ? { ...m, ...humanAnswer } : m),
+        },
+      },
+    }))
+    handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: false })
+    question('ask-codex-live')
+    handleMessage({
+      type: 'history_replay_end', sessionId: 'worker',
+      pendingQuestionToolUseIds: ['ask-codex-pending', 'ask-codex-live'],
+    })
+    const cards = store.getState().sessionStates.worker!.messages
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-stale')?.answered).toBe('(no longer pending)')
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-pending')?.answered).toBeUndefined()
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-live')?.answered).toBeUndefined()
+    expect(cards.find((m) => m.toolUseId === 'ask-codex-answered')).toMatchObject(humanAnswer)
+    expect(cards.find((m) => m.toolUseId === 'ask-legacy')?.answered).toBe('(resolved)')
+    expect(cards.find((m) => m.requestId === 'perm-1')?.answered).toBeUndefined()
+    expect(store.getState().sessionStates.other!.messages[0]?.answered).toBeUndefined()
+    expect(store.getState().sessionNotifications.filter((n) => n.readAt !== undefined).map((n) => [n.sessionId, n.toolUseId])).toEqual([
+      ['worker', 'ask-codex-stale'], ['worker', 'ask-codex-answered'],
+    ])
+  })
+
+  it.each([undefined, null, {}, ['ask-codex-pending', 42], ['ask-legacy']].map((value) => ({ value })))(
+    'keeps native notices and cards when the pending snapshot is unknown or malformed ($value)',
+    ({ value: pendingQuestionToolUseIds }) => {
+      store.setState((state) => ({
+        sessions: [{ sessionId: 'worker', name: 'Worker' }] as ConnectionState['sessions'],
+        sessionStates: { ...state.sessionStates, worker: createEmptySessionState() },
+      }))
+      handleMessage({
+        type: 'user_question', sessionId: 'worker', toolUseId: 'ask-codex-unknown',
+        questions: [{ question: 'Still waiting?' }],
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 'worker', fullHistory: false })
+      handleMessage({ type: 'history_replay_end', sessionId: 'worker', pendingQuestionToolUseIds })
+      expect(store.getState().sessionStates.worker!.messages[0]?.answered).toBeUndefined()
+      expect(store.getState().sessionNotifications[0]?.readAt).toBeUndefined()
+    },
+  )
+
   it('QUESTION_NOT_DELIVERED retracts the answer the card was marked with on send', () => {
     store.setState({
       sessionStates: {

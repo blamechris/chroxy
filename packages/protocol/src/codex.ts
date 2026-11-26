@@ -47,6 +47,11 @@ export function isCodexQuestionToolUseId(value: unknown): boolean {
   return typeof value === 'string' && value.startsWith(CODEX_QUESTION_ID_PREFIX)
 }
 
+/** Text shown by a client for a native choice. Its wire value is still the label. */
+export function formatCodexQuestionOptionLabel(label: string, description?: string): string {
+  return description ? `${label} — ${description}` : label
+}
+
 /**
  * UI-facing metadata for the sandbox selector: a short label and a one-line
  * description per mode. Kept next to the canonical list so a new mode can't be

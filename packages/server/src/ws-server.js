@@ -446,7 +446,7 @@ function _isSecureRequest(req) {
  *   { type: 'folder_trust_result', sessionId, ok, status, error?, requestId? } — reply to trust_folder / untrust_folder to the requester; status is the folder's state after the change. Handled by both clients.
  *   { type: 'session_error', message, category?, sessionId?, recoverable?, code?, reason?, requestId?, boundSessionId?, boundSessionName?, primaryClientId?, attemptedSessionId?, activityId? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated?, conversationId?, latestSeq? } — beginning of history replay
- *   { type: 'history_replay_end', sessionId, latestSeq? }         — end of history replay
+ *   { type: 'history_replay_end', sessionId, latestSeq?, pendingQuestionToolUseIds? } — end of history replay
  *   { type: 'tool_input_backfill', sessionId, messageId, toolUseId?, input } — delta replay only, capability history_tool_input_backfill_v1: the input of a held tool card that has none (no historySeq; reconcile-only)
  *   { type: 'conversation_id', sessionId, conversationId } — SDK conversation ID for session portability
  *   { type: 'user_question', toolUseId, questions, timestamp?, historySeq?, interrupted?, superseded? }   — AskUserQuestion prompt from Claude
@@ -993,7 +993,7 @@ export class WsServer {
         reseedActiveAgents: (ws, sid) => self._reseedActiveAgents(ws, sid),
         // #7457: re-assert the questions a session is still blocked on, after a
         // replay's end frame let the client's sweep stamp them '(resolved)'.
-        resendPendingQuestions: (ws, sid) => self._resendPendingQuestions(ws, sid),
+        resendPendingQuestions: (ws, sid, pending) => self._resendPendingQuestions(ws, sid, pending),
         // #8340: the permission-card counterpart, for the replay path that ends
         // its own `history_replay_end` outside `replayHistory` (request_full_history).
         // Wired straight to the per-session implementation, NOT through a
@@ -2782,7 +2782,7 @@ export class WsServer {
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
   _reseedActiveAgents(ws, sessionId) { reseedActiveAgents(this._historyCtx, ws, sessionId) }
-  _resendPendingQuestions(ws, sessionId) { resendPendingQuestions(this._historyCtx, ws, sessionId) }
+  _resendPendingQuestions(ws, sessionId, pending) { resendPendingQuestions(this._historyCtx, ws, sessionId, pending) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {

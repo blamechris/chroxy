@@ -3853,6 +3853,19 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(parsed.data.historySeq, 7)
     })
 
+    it('ServerHistoryReplayEndSchema distinguishes known native pending IDs from omission', async () => {
+      const { ServerHistoryReplayEndSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'history_replay_end', sessionId: 'sess-1', latestSeq: 7 }
+      assert.deepEqual(ServerHistoryReplayEndSchema.parse(base), base)
+      for (const ids of [[], ['ask-codex-fixture']]) {
+        assert.deepEqual(ServerHistoryReplayEndSchema.parse({ ...base, pendingQuestionToolUseIds: ids }).pendingQuestionToolUseIds, ids)
+      }
+      for (const ids of [null, [7], ['ask-legacy'], ['']]) {
+        assert.equal(ServerHistoryReplayEndSchema.safeParse({ ...base, pendingQuestionToolUseIds: ids }).success, false)
+      }
+      assert.equal(ServerHistoryReplayEndSchema.safeParse({ ...base, sessionId: '', pendingQuestionToolUseIds: [] }).success, false)
+    })
+
     it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {
       const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
       const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls', outcome: 'expired' }

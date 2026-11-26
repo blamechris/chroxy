@@ -4443,8 +4443,9 @@ export class SessionManager extends EventEmitter {
       // dangling tool_start. Without this, an unresolved tool_use from
       // before shutdown re-enters `activeTools` on replay and never gets
       // cleared — the footer shows "Running X · Nh Mm" forever.
+      const nativeQuestionCorrections = []
       if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
-        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history, { nativeQuestionCorrections })
         // #8336: carry the previous run's numbering across the restart. The
         // persisted entries were contiguous and ended at `historyLastSeq`, so the
         // first one had `historyLastSeq - length + 1`; a state file without the
@@ -4465,6 +4466,7 @@ export class SessionManager extends EventEmitter {
       this._restoringHistory = (this._restoringHistory || 0) + 1
       try {
         this._history.restoreSeqReservation(sessionId, saved.seqReservedThrough)
+        this._history.appendRestoredQuestionCorrections(sessionId, nativeQuestionCorrections)
         if (saved.turnInFlight === true) {
           this._history.recordInterruptedTurn(sessionId)
         }

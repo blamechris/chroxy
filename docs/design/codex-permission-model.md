@@ -122,6 +122,12 @@ WebSocket reconnect can restore a still-pending question with the same ID.
 Codex scopes its own cancellation to a thread. Synthetic worker-shaped
 fixtures exercise this correlation in Chroxy. [Codex request lifecycle](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/app-server/src/outgoing_message.rs#L201-L216)
 
+At replay completion, capable clients receive the current native pending IDs
+for that session. The snapshot lets them clear stale notices after the
+bounded history has dropped the original question and its closure. An empty
+list confirms there are no pending native questions. If the provider cannot
+report a valid list, the replay omits the snapshot.
+
 Codex Desktop owns its own app-server connection. This support applies to
 questions delivered to Chroxy's existing connection.
 

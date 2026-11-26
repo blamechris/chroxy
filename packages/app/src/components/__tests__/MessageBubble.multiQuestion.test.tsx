@@ -320,6 +320,25 @@ describe('MessageBubble question that ended with no answer (#8470)', () => {
     expect(JSON.stringify(tree.toJSON())).toContain(answer);
     expect(present(tree, 'question-prompt-multi')).toBe(false);
   });
+
+  it('omits options on true closure even when one option matches the closure text', () => {
+    const answer = '(no longer pending)';
+    const message = multiQuestionPrompt({
+      toolUseId: 'ask-codex-1', questions: undefined, answered: answer,
+      options: [{ label: answer, value: answer }, { label: 'Next', value: 'Next' }],
+    });
+    const closed = render(message);
+    expect(present(closed, 'question-resolved')).toBe(true);
+    expect(present(closed, `approval-button-${answer}`)).toBe(false);
+    expect(present(closed, 'approval-button-Next')).toBe(false);
+    expect(present(closed, 'approval-freetext-input')).toBe(false);
+    expect(present(closed, 'approval-freetext-send')).toBe(false);
+
+    const answered = render({ ...message, answeredAt: 0 });
+    expect(present(answered, 'question-resolved')).toBe(false);
+    expect(first(answered, `approval-button-${answer}`).props.accessibilityState).toEqual({ disabled: true, selected: true });
+    expect(first(answered, 'approval-button-Next').props.accessibilityState).toEqual({ disabled: true, selected: false });
+  });
 });
 
 describe('MessageBubble single-question multiSelect (#5776)', () => {

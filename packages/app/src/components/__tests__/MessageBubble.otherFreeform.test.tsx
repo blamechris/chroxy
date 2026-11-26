@@ -23,6 +23,8 @@ import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/types';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+import { useConnectionStore } from '../../store/connection';
+import { createEmptySessionState } from '../../store/utils';
 
 // #5699 — the freeform Send + Enter (onSubmitEditing) paths gate on a live
 // connection. These tests exercise the connected submit, so set that.
@@ -48,7 +50,7 @@ function makePromptWithOther(): ChatMessage {
   } as ChatMessage;
 }
 
-function render(message: ChatMessage, onSelectOption: jest.Mock) {
+function render(message: ChatMessage, onSelectOption: jest.Mock, questionGated = false) {
   let tree!: renderer.ReactTestRenderer;
   act(() => {
     tree = renderer.create(
@@ -60,6 +62,7 @@ function render(message: ChatMessage, onSelectOption: jest.Mock) {
         onPress={() => {}}
         onOpenDetail={() => {}}
         onSelectOption={onSelectOption}
+        questionGated={questionGated}
       />,
     );
   });
@@ -67,6 +70,72 @@ function render(message: ChatMessage, onSelectOption: jest.Mock) {
 }
 
 describe('MessageBubble Other / freeform answer (#4755)', () => {
+  it.each([
+    { label: 'a permission card', requestId: 'perm-1', toolUseId: 'ask-codex-test', gated: false },
+    { label: 'a question awaiting consent', requestId: undefined, toolUseId: 'ask-codex-test', gated: true },
+    { label: 'a question missing its route', requestId: undefined, toolUseId: undefined, gated: false },
+  ])('withholds zero-option free text for $label', ({ requestId, toolUseId, gated }) => {
+    const onSelectOption = jest.fn();
+    const question = 'Name this layout';
+    const tree = render({
+      id: 'zero-option', type: 'prompt', content: question, timestamp: 1,
+      requestId, toolUseId, options: [], questions: [{ question, options: [] }],
+    }, onSelectOption, gated);
+    try {
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-input' })).toHaveLength(0);
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-send' })).toHaveLength(0);
+      expect(onSelectOption).not.toHaveBeenCalled();
+    } finally {
+      act(() => tree.unmount());
+    }
+  });
+
+  it('submits a native zero-option answer as a question response with its exact id and displays the recorded text', () => {
+    const toolUseId = 'ask-codex-free-text';
+    const question = 'Name this layout';
+    const message: ChatMessage = {
+      id: 'native-free-text', type: 'prompt', content: question, timestamp: 1,
+      toolUseId, options: [], questions: [{ question, options: [] }],
+    };
+    const prior = useConnectionStore.getState();
+    const sent: unknown[] = [];
+    useConnectionStore.setState({
+      socket: { readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) } as unknown as WebSocket,
+      activeSessionId: 'native-session',
+      sessionStates: { 'native-session': { ...createEmptySessionState(), messages: [message] } },
+    });
+    const answer = 'Compact list';
+    const onSelectOption = jest.fn((value: string, messageId: string, requestId: undefined, id: string) => {
+      expect(requestId).toBeUndefined();
+      const state = useConnectionStore.getState();
+      expect(state.sendUserQuestionResponse(value, id)).toBe('sent');
+      state.markPromptAnswered(messageId, value);
+    });
+    let tree: renderer.ReactTestRenderer | undefined;
+    let answeredTree: renderer.ReactTestRenderer | undefined;
+    try {
+      tree = render(message, onSelectOption);
+      const input = tree.root.findAllByProps({ testID: 'approval-freetext-input' })[0];
+      expect(input).toBeDefined();
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-cancel' })).toHaveLength(0);
+      act(() => input.props.onChangeText(`  ${answer}  `));
+      const send = tree.root.findByProps({ testID: 'approval-freetext-send' });
+      expect(send.props.disabled).toBe(false);
+      act(() => send.props.onPress());
+      expect(onSelectOption).toHaveBeenCalledTimes(1);
+      expect(onSelectOption).toHaveBeenCalledWith(answer, message.id, undefined, toolUseId);
+      expect(sent).toEqual([{ type: 'user_question_response', answer, toolUseId }]);
+      const answered = useConnectionStore.getState().sessionStates['native-session'].messages[0];
+      expect(answered.answered).toBe(answer);
+      answeredTree = render(answered, onSelectOption);
+      expect(JSON.stringify(answeredTree.toJSON())).toContain(answer);
+      expect(answeredTree.root.findAllByProps({ testID: 'approval-freetext-input' })).toHaveLength(0);
+    } finally {
+      act(() => { tree?.unmount(); answeredTree?.unmount(); });
+      useConnectionStore.setState(prior);
+    }
+  });
+
   it('shows the freeform input when the user picks the Other option', () => {
     // Step 1 of the freeform flow: tapping Other must hide the option
     // buttons and surface the text input keyed by `approval-freetext-input`.

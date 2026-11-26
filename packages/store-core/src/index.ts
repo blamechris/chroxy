@@ -901,6 +901,7 @@ export {
   handleQuestionNotDelivered,
   parseQuestionResolution,
   matchesQuestionNotice,
+  retiredNativeQuestionIds,
   type QuestionEndKind,
   markQuestionEnded,
   endQuestionInSessions,
