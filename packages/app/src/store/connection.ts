@@ -712,6 +712,37 @@ function retryFromGiveUpAlert(redial: () => void): void {
   redial();
 }
 
+/**
+ * #8929 — what a "Connection Failed" alert's Retry actually dials. The alert
+ * outlives the give-up, so the url/token captured when it was created can be
+ * stale (the user re-paired to another server while it was open): redialing them
+ * would also bump connectionAttemptId and kill the newer connection. Resolve the
+ * target at TAP time from the current saved connection through connectAuto, the
+ * same path as the banner's retryConnection() (which also re-resolves the
+ * freshest LAN/tunnel endpoint).
+ *
+ * `silent: false` is deliberate. Unlike the banner Reconnect (silent), the user
+ * tapped an alert whose purpose is feedback, so a failed retry should say so
+ * again. With a saved record the give-up also re-latches the sticky
+ * 'server_down' banner either way, so this cannot loop.
+ *
+ * With no saved record (a first-time connect that never authenticated, where the
+ * give-up fell to 'disconnected') there is nothing else to dial, so redial the
+ * captured target.
+ */
+function redialFromGiveUpAlert(
+  get: () => ConnectionState,
+  capturedUrl: string,
+  capturedToken: string,
+): void {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  if (saved?.url && saved?.token) {
+    void get().connectAuto(saved, { silent: false });
+  } else {
+    void get().connect(capturedUrl, capturedToken);
+  }
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   queuedMessageCount: 0,
@@ -1379,7 +1410,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             'The server is still restarting. Try again later.',
             [
               { text: 'OK' },
-              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => redialFromGiveUpAlert(get, url, token)) },
             ],
           );
         }
@@ -1411,7 +1442,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             [
               { text: 'OK' },
               { text: 'Forget Server', style: 'destructive', onPress: () => { void get().clearSavedConnection(); } },
-              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => { void get().connect(url, token); }) },
+              { text: 'Retry', onPress: () => retryFromGiveUpAlert(() => redialFromGiveUpAlert(get, url, token)) },
             ],
           );
         }
