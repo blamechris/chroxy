@@ -151,4 +151,22 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(ss('s1').messages.find((m) => m.id === 'srv-think-0')).toMatchObject({ type: 'thinking', thinkingStreaming: true })
     expect(errRows()).toHaveLength(1)
   })
+
+  it('a general sessionless error settles a realistic pending send after an earlier turn', async () => {
+    const { handle, ss, errRows } = await setup({
+      streamingMessageId: 'pending',
+      pendingClientMessageId: 'u1',
+      messages: [
+        { id: 'r0', type: 'response', content: 'earlier', timestamp: 1 },
+        { id: 'srv-think-old', type: 'thinking', content: 'old', timestamp: 1, thinkingStreaming: false },
+        { id: 'u1', type: 'user_input', content: 'hi', timestamp: 2 },
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 3 },
+      ],
+    })
+    handle({ type: 'server_error', message: 'Failed to send', recoverable: true })
+    expect(ss('s1').streamingMessageId).toBeNull()
+    expect(ss('s1').pendingClientMessageId).toBeNull()
+    expect(ss('s1').messages.some((m) => m.id === 'thinking')).toBe(false)
+    expect(errRows()).toHaveLength(1)
+  })
 })

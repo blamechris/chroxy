@@ -239,7 +239,9 @@ export function pendingTurnHasStarted(
  * error during a pending send the server has not visibly started (including
  * one from an unrelated request, e.g. a failed repo listing) settles that send,
  * as before this change, and the send's own safety-net timer would clear it
- * anyway.
+ * anyway. The guard covers the window before that safety-net timer, which
+ * clears a still-'pending' turn after the stall window regardless of a visible
+ * thinking bubble (pre-existing behaviour, unchanged here).
  *
  * When false the caller appends the error row only: it leaves
  * `streamingMessageId`, `pendingClientMessageId` and thinking blocks alone.
