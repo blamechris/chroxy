@@ -62,6 +62,15 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(errRows()).toHaveLength(1)
   })
 
+  it('a tunnel error while the send is pending leaves the pending turn', async () => {
+    const { handle, ss, errRows } = await setup({ ...midStream, streamingMessageId: 'pending' })
+    handle({ type: 'server_error', category: 'tunnel', message: 'Tunnel connection lost', recoverable: true })
+    expect(ss('s1').streamingMessageId).toBe('pending')
+    expect(ss('s1').pendingClientMessageId).toBe('client-1')
+    expect(ss('s1').messages.some((m) => m.id === 'thinking')).toBe(true)
+    expect(errRows()).toHaveLength(1)
+  })
+
   it('a delta still lands on the streaming message after the error row', async () => {
     const { handle, ss } = await setup({})
     vi.useFakeTimers()

@@ -162,6 +162,19 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(errRows(store, 's1')).toHaveLength(1);
   });
 
+  it('a tunnel error while the send is pending leaves the pending turn', () => {
+    const { store, th } = setup();
+    patchSession(store, 's1', { streamingMessageId: 'pending', pendingClientMessageId: 'client-1' });
+    _testMessageHandler.handle({
+      type: 'server_error', category: 'tunnel', message: 'Tunnel connection lost', recoverable: true,
+    });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('pending');
+    expect(s1.pendingClientMessageId).toBe('client-1');
+    expect(th('s1')[0]).toMatchObject({ id: 't1', thinkingStreaming: true });
+    expect(errRows(store, 's1')).toHaveLength(1);
+  });
+
   it('a delta still lands on the streaming message after the error row', () => {
     const { store } = setup();
     jest.useFakeTimers();
