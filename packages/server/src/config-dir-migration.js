@@ -71,11 +71,16 @@ export const HIGH_CONSEQUENCE_ENTRIES = ['config.json', 'server-identity.json', 
  *
  * Windows reports `ino` as 0 on some filesystems, so fall back to a normalized
  * (case-insensitive there) path compare when either inode is unusable.
+ *
+ * The stat is `{ bigint: true }` on purpose: an NTFS file ID is 64 bits, and a
+ * plain stat hands it back as a double that loses everything above 2^53, so two
+ * different directories created back to back can round to the same Number and
+ * read as one (#8750). BigInt `dev`/`ino` are exact.
  */
-function sameDir(a, b) {
+function sameDir(a, b, statImpl = statSync) {
   try {
-    const sa = statSync(a)
-    const sb = statSync(b)
+    const sa = statImpl(a, { bigint: true })
+    const sb = statImpl(b, { bigint: true })
     if (sa.ino && sb.ino) return sa.dev === sb.dev && sa.ino === sb.ino
   } catch {
     // One side is missing or unreadable — fall through to the path compare,
@@ -102,10 +107,10 @@ function sameDir(a, b) {
  * Never throws: an unreadable source is reported via `unreadable` so callers on
  * the boot path can degrade rather than fail.
  *
- * @param {{ source?: string, target?: string }} [opts] Injection seams for tests.
+ * @param {{ source?: string, target?: string, statImpl?: typeof statSync }} [opts] Injection seams for tests.
  * @returns {StrandedState}
  */
-export function detectStrandedState({ source = defaultConfigDir(), target = configDir() } = {}) {
+export function detectStrandedState({ source = defaultConfigDir(), target = configDir(), statImpl } = {}) {
   const result = {
     relocated: false,
     source,
@@ -118,7 +123,7 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
   // Covers every not-relocated case at once: the variable unset, set empty, set
   // to a relative path (config-dir.js refuses those back to the default), or set
   // to `~/.chroxy` itself by a different spelling or through a symlink.
-  if (sameDir(source, target)) return result
+  if (sameDir(source, target, statImpl)) return result
   result.relocated = true
 
   if (!existsSync(source)) return result

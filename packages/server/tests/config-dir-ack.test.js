@@ -121,7 +121,7 @@ describe('stranded-state acknowledgement (#7244)', () => {
 
       assert.equal(readStrandedAck(detect()), null)
       const applied = applyStrandedAck(detect())
-      assert.deepEqual(applied.stranded, ['config.json'])
+      assert.deepEqual(applied.stranded, ['config.json'], JSON.stringify(detect()))
       assert.ok(formatStrandedWarning(applied).length > 0)
     })
   }
@@ -219,8 +219,8 @@ describe('chroxy config-dir ack (#7244)', () => {
     assert.equal(res.acknowledged, true)
     assert.deepEqual(res.names, ['config.json'])
     assert.ok(existsSync(ackPath()))
-    assert.ok(/config\.json/.test(out.text()))
-    assert.ok(/warn(s|ing)? again/.test(out.text()), 'tells the operator a new entry still warns')
+    assert.ok(/config\.json/.test(out.text()), out.text())
+    assert.ok(/warn(s|ing)? again/.test(out.text()), `tells the operator a new entry still warns: ${out.text()}`)
   })
 
   it('with nothing stranded says so and writes nothing', () => {
@@ -229,7 +229,7 @@ describe('chroxy config-dir ack (#7244)', () => {
 
     assert.equal(res.acknowledged, false)
     assert.ok(!existsSync(ackPath()))
-    assert.ok(/nothing (is )?stranded|No state stranded/i.test(out.text()))
+    assert.ok(/nothing (is )?stranded|No state stranded/i.test(out.text()), out.text())
   })
 
   it('when the root is not relocated says so and writes nothing', () => {
@@ -239,8 +239,8 @@ describe('chroxy config-dir ack (#7244)', () => {
 
     assert.equal(res.acknowledged, false)
     assert.ok(!existsSync(join(source, ACK_FILE_NAME)))
-    assert.ok(/not relocated/i.test(out.text()))
-    assert.ok(/CHROXY_CONFIG_DIR/.test(out.text()), 'tells the operator the variable must be set')
+    assert.ok(/not relocated/i.test(out.text()), out.text())
+    assert.ok(/CHROXY_CONFIG_DIR/.test(out.text()), `tells the operator the variable must be set: ${out.text()}`)
   })
 
   it('refuses to acknowledge when the source could not be read', () => {
@@ -252,7 +252,7 @@ describe('chroxy config-dir ack (#7244)', () => {
 
     assert.equal(res.acknowledged, false)
     assert.ok(!existsSync(ackPath()))
-    assert.ok(/EACCES/.test(out.text()))
+    assert.ok(/EACCES/.test(out.text()), out.text())
   })
 
   it('a second ack replaces the snapshot with the current set', () => {
@@ -275,9 +275,9 @@ describe('chroxy config-dir status shows acknowledgements (#7244)', () => {
 
     assert.deepEqual(res.stranded, ['config.json', 'push-tokens.json'])
     assert.deepEqual(res.acknowledged, ['config.json'])
-    assert.ok(/config\.json.*acknowledged/.test(out.text()))
-    assert.ok(out.text().includes(`CHROXY_CONFIG_DIR='${target}' chroxy config-dir ack`), 'footer carries the env')
-    assert.ok(!/push-tokens\.json.*acknowledged/.test(out.text()))
+    assert.ok(/config\.json.*acknowledged/.test(out.text()), out.text())
+    assert.ok(out.text().includes(`CHROXY_CONFIG_DIR='${target}' chroxy config-dir ack`), `footer carries the env: ${out.text()}`)
+    assert.ok(!/push-tokens\.json.*acknowledged/.test(out.text()), out.text())
   })
 })
 
