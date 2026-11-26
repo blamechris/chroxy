@@ -60,6 +60,8 @@ describe('provider usage roster (#8944)', () => {
 
   it('classifies claude-tui as not reporting, and an unlisted runtime provider as reporting', () => {
     expect(providerReportsUsage('claude-tui')).toBe(false)
+    expect(providerReportsUsage('claude-channel')).toBe(false)
+    expect(providerReportsUsage('user-shell')).toBe(true)
     expect(providerReportsUsage('claude-sdk')).toBe(true)
     expect(providerReportsUsage('some-config-driven-endpoint')).toBe(true)
     expect(providerReportsUsage('constructor')).toBe(true)

@@ -435,7 +435,27 @@ describe('SidebarTokenView (#4303 v0)', () => {
       expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
         /not measured yet/i,
       )
-      expect(tokenViewCollapsedMetric(sessions)).toBe('no usage yet')
+      expect(tokenViewCollapsedMetric(sessions)).toBe('not measured')
+    })
+
+    it('a lone user-shell session reads as tracked; beside an unbilled TUI it reads "—"', () => {
+      const lone = [makeSession('sh', 'user-shell', noTurns())]
+      render(<SidebarTokenView sessions={lone} />)
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('0 tokens')
+      expect(screen.queryByTestId('sidebar-token-view-untracked-note')).toBeNull()
+      cleanup()
+      render(
+        <SidebarTokenView
+          sessions={[
+            makeSession('sh', 'user-shell', noTurns()),
+            makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+          ]}
+        />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('—')
+      expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
+        /not measured yet/i,
+      )
     })
 
     it('a billed tracked session beside a TUI session still reads its sum', () => {
@@ -527,7 +547,7 @@ describe('SidebarTokenView (#4303 v0)', () => {
       const popover = screen.getByTestId(
         'sidebar-token-view-provider-claude-tui-untracked-popover',
       )
-      expect(popover.textContent ?? '').toContain('claude TUI')
+      expect(popover.textContent ?? '').toContain('Claude Code (TUI)')
     })
 
     // #4546: the Escape focus-restore wiring lives on the shared

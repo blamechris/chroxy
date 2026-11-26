@@ -435,8 +435,10 @@ function InfoDisclosure({
 // per-billing-class BILLING_CLASS_TOOLTIP map above (the api-key tooltip
 // carries the same visible-vs-billed-tokens explanation).
 
-const TUI_UNTRACKED_EXPLANATION =
-  'Token count not exposed by claude TUI (PTY-only interface)'
+// #8944: named from the row's registry label, never a string typed per provider.
+function untrackedExplanation(label: string): string {
+  return `Token count not exposed by ${label}`
+}
 
 // #8255 / #8944: visible (not tooltip-only) copy under the headline totals.
 // The provider names come from the shared provider registry labels, never a
@@ -735,7 +737,7 @@ export function SidebarTokenView({
                       triggerClassName="sidebar-token-view-provider-untracked"
                       testIdBase={`sidebar-token-view-provider-${row.provider}-untracked`}
                     >
-                      {TUI_UNTRACKED_EXPLANATION}
+                      {untrackedExplanation(label)}
                     </InfoDisclosure>
                   ) : (
                     <span className="sidebar-token-view-provider-tokens">
@@ -830,7 +832,7 @@ export function SidebarTokenView({
  */
 export function tokenViewCollapsedMetric(sessions: SessionInfo[]): string {
   const agg = aggregateUsage(sessions)
-  if (agg.noMeasuredUsage) return agg.trackedSessions === 0 ? 'not tracked' : 'no usage yet'
+  if (agg.noMeasuredUsage) return agg.trackedSessions === 0 ? 'not tracked' : 'not measured'
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
   return `${formatTokens(totalTokens)} tokens`
 }

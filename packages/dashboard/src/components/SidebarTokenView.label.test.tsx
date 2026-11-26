@@ -7,7 +7,7 @@
  * itself goes red.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, cleanup, screen } from '@testing-library/react'
+import { render, cleanup, screen, fireEvent } from '@testing-library/react'
 import type { SessionInfo, CumulativeUsage } from '@chroxy/store-core'
 
 vi.mock('@chroxy/store-core', async (importOriginal) => {
@@ -48,6 +48,17 @@ function session(id: string, provider: string, turnsBilled: number): SessionInfo
     cumulativeUsage: usage(turnsBilled),
   } as SessionInfo
 }
+
+describe('untracked row tooltip label (#8944)', () => {
+  it('names the provider from the registry label, not a hardcoded string', () => {
+    render(<SidebarTokenView sessions={[session('tui', 'claude-tui', 1)]} />)
+    fireEvent.click(screen.getByTestId('sidebar-token-view-provider-claude-tui-untracked'))
+    const tip =
+      screen.getByTestId('sidebar-token-view-provider-claude-tui-untracked-popover').textContent ?? ''
+    expect(tip.includes('REGISTRY-LABEL(claude-tui)')).toBe(true)
+    expect(tip.includes('TUI')).toBe(false)
+  })
+})
 
 describe('untracked note label (#8944)', () => {
   it('names an all-untracked workspace from the registry label', () => {

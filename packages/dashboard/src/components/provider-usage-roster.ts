@@ -17,21 +17,25 @@
  * to `true`, and the Tokens panel's `turnsBilled > 0` gate keeps a provider
  * that never reports from reading as measured.
  *
- * `claude-tui` is the only `false` row: the TUI runs under a PTY and exposes
- * no token counts. `claude-cli` DOES report, via stream-json `result.usage`,
+ * `claude-tui` and `claude-channel` are the `false` rows: the TUI runs under a
+ * PTY and exposes no token counts; the channel scaffold mirrors that design. `claude-cli` DOES report, via stream-json `result.usage`,
  * even on a subscription.
  */
 export const PROVIDER_REPORTS_USAGE: Readonly<Record<string, boolean>> = {
   'claude-sdk': true,
   'claude-cli': true,
   'claude-tui': false,
-  'claude-channel': true,
+  // Mirrors claude-tui's interactive design (claude-channel-session.js header);
+  // a scaffold today that never runs a turn.
+  'claude-channel': false,
   'claude-byok': true,
   'deepseek': true,
   'ollama': true,
   'gemini': true,
   'codex': true,
   'codex-appserver': true,
+  // A user shell runs no model, so a tracked zero is accurate. Classifying it
+  // untracked would add an "excluded" note to every workspace with a terminal open.
   'user-shell': true,
   'docker-cli': true,
   'docker-sdk': true,
