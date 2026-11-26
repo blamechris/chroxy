@@ -71,6 +71,16 @@ function setup() {
   return { store, th };
 }
 
+function patchSession(
+  store: ReturnType<typeof createMockStore>,
+  sid: string,
+  patch: Record<string, unknown>,
+) {
+  store.setState((s) => ({
+    sessionStates: { ...s.sessionStates, [sid]: { ...s.sessionStates[sid], ...patch } },
+  }));
+}
+
 describe('error paths settle open thinking blocks (#8931)', () => {
   it('server_error with a sessionId settles that session only', () => {
     const { th } = setup();
@@ -80,8 +90,12 @@ describe('error paths settle open thinking blocks (#8931)', () => {
     expect(th('s2')[0]).toMatchObject({ id: 't2', thinkingStreaming: true });
   });
 
-  it('server_error without a sessionId settles the active session only', () => {
-    const { th } = setup();
+  // #9336: changed from "settles the active session" with streamingMessageId null.
+  // A sessionless error no longer ends a turn that is not the pending send, so the
+  // settle case is the pending send placeholder; the mid-stream case is below.
+  it('server_error without a sessionId settles the active session only while its send is pending', () => {
+    const { store, th } = setup();
+    patchSession(store, 's1', { streamingMessageId: 'pending' });
     _testMessageHandler.handle({ type: 'server_error', message: 'boom', recoverable: true });
     expect(th('s1')[0]).toMatchObject({ thinkingStreaming: false });
     expect(th('s2')[0]).toMatchObject({ thinkingStreaming: true });
@@ -105,5 +119,85 @@ describe('error paths settle open thinking blocks (#8931)', () => {
     }));
     _testMessageHandler.handle({ type: 'server_error', sessionId: 's1', message: 'boom', recoverable: true });
     expect(th('s1')[0]).toMatchObject({ id: 't1', content: 'reasoning', thinkingStreaming: false });
+  });
+});
+
+describe('sessionless server_error keeps a live turn (#9336)', () => {
+  const errRows = (store: ReturnType<typeof createMockStore>, sid: string) =>
+    store.getState().sessionStates[sid].messages.filter((m) => m.type === 'error');
+
+  function midStream() {
+    const ctx = setup();
+    patchSession(ctx.store, 's1', {
+      streamingMessageId: 'resp-1',
+      pendingClientMessageId: 'client-1',
+      messages: [
+        { id: 'resp-1', type: 'response', content: 'hel', timestamp: 1 },
+        think('t1', '', true),
+      ],
+    });
+    return ctx;
+  }
+
+  it('a tunnel error mid-turn only appends the error row', () => {
+    const { store, th } = midStream();
+    _testMessageHandler.handle({
+      type: 'server_error', category: 'tunnel', message: 'Tunnel connection lost', recoverable: true,
+    });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('resp-1');
+    expect(s1.pendingClientMessageId).toBe('client-1');
+    expect(th('s1')[0]).toMatchObject({ id: 't1', thinkingStreaming: true });
+    expect(errRows(store, 's1')).toHaveLength(1);
+    expect(store.getState().serverErrors).toHaveLength(1);
+  });
+
+  it('a general sessionless error mid-stream leaves the turn', () => {
+    const { store, th } = midStream();
+    _testMessageHandler.handle({ type: 'server_error', message: 'Failed to list repos', recoverable: true });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('resp-1');
+    expect(s1.pendingClientMessageId).toBe('client-1');
+    expect(th('s1')[0]).toMatchObject({ id: 't1', thinkingStreaming: true });
+    expect(errRows(store, 's1')).toHaveLength(1);
+  });
+
+  it('a delta still lands on the streaming message after the error row', () => {
+    const { store } = setup();
+    jest.useFakeTimers();
+    try {
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({ type: 'stream_delta', sessionId: 's1', messageId: 'resp-1', delta: 'hel' });
+      _testMessageHandler.handle({ type: 'server_error', message: 'Failed to list repos', recoverable: true });
+      _testMessageHandler.handle({ type: 'stream_delta', sessionId: 's1', messageId: 'resp-1', delta: 'lo' });
+      jest.runAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('resp-1');
+    expect(s1.messages.find((m) => m.id === 'resp-1')?.content).toBe('hello');
+  });
+
+  it('a general sessionless error while the send is pending settles the turn', () => {
+    const { store, th } = setup();
+    patchSession(store, 's1', { streamingMessageId: 'pending', pendingClientMessageId: 'client-1' });
+    _testMessageHandler.handle({ type: 'server_error', message: 'Failed to send', recoverable: true });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBeNull();
+    expect(s1.pendingClientMessageId).toBeNull();
+    expect(th('s1')[0]).toMatchObject({ thinkingStreaming: false });
+    expect(errRows(store, 's1')).toHaveLength(1);
+  });
+
+  it('a tagged error still ends that session mid-stream', () => {
+    const { store, th } = midStream();
+    _testMessageHandler.handle({
+      type: 'server_error', sessionId: 's1', category: 'session', message: 'Process exited', recoverable: true,
+    });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBeNull();
+    expect(s1.pendingClientMessageId).toBeNull();
+    expect(th('s1')[0]).toMatchObject({ thinkingStreaming: false });
   });
 });

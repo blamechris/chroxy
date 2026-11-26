@@ -194,6 +194,31 @@ export function handleServerError(
   return { serverError, chatMessage }
 }
 
+/**
+ * #9336: does this `server_error` end the turn of the session it is routed to?
+ *
+ * - `tagged` (the error's `sessionId` named a known session): true. A session's
+ *   own turn-ending error carries its id.
+ * - untagged `tunnel`: false. Tunnel state is connection-level and
+ *   informational; it says nothing about the active session's turn.
+ * - untagged, any other category: true only while the target still holds the
+ *   optimistic `'pending'` send placeholder (the error may be that send
+ *   failing). A real streaming id or no turn means a sessionless request error
+ *   (its `correlationId` is server-generated, so the client cannot match it to
+ *   a request) must not end a turn that has already started streaming.
+ *
+ * When false the caller appends the error row only: it leaves
+ * `streamingMessageId`, `pendingClientMessageId` and thinking blocks alone.
+ */
+export function serverErrorEndsTurn(
+  serverError: ServerError,
+  target: { tagged: boolean; streamingMessageId: string | null | undefined },
+): boolean {
+  if (target.tagged) return true
+  if (serverError.category === 'tunnel') return false
+  return target.streamingMessageId === 'pending'
+}
+
 // ---------------------------------------------------------------------------
 // server_shutdown
 //

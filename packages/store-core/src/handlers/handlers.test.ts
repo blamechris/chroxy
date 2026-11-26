@@ -107,6 +107,7 @@ import {
   handleSessionUsage,
   handleResultUsage,
   handleServerError,
+  serverErrorEndsTurn,
   handleServerShutdown,
   handleServerStatusLegacy,
   handleWebTaskUpsert,
@@ -5815,6 +5816,51 @@ describe('handleServerError', () => {
     expect(typeof result.chatMessage.id).toBe('string')
     expect(result.chatMessage.id.length).toBeGreaterThan(0)
     expect(typeof result.chatMessage.timestamp).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// serverErrorEndsTurn (#9336)
+// ---------------------------------------------------------------------------
+describe('serverErrorEndsTurn (#9336)', () => {
+  const err = (category: 'tunnel' | 'session' | 'permission' | 'general') =>
+    handleServerError({ category, message: 'm' }).serverError
+
+  it('a tagged error ends the turn whatever the category or streaming state', () => {
+    for (const category of ['tunnel', 'session', 'permission', 'general'] as const) {
+      for (const streamingMessageId of ['pending', 'msg-1', null, undefined]) {
+        expect(
+          serverErrorEndsTurn(err(category), { tagged: true, streamingMessageId }),
+        ).toBe(true)
+      }
+    }
+  })
+
+  it('an untagged tunnel error never ends the turn, even while pending', () => {
+    expect(
+      serverErrorEndsTurn(err('tunnel'), { tagged: false, streamingMessageId: 'pending' }),
+    ).toBe(false)
+  })
+
+  it('an untagged general error ends the turn while the send is pending', () => {
+    expect(
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'pending' }),
+    ).toBe(true)
+  })
+
+  it('an untagged general error leaves a turn that is already streaming', () => {
+    expect(
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'msg-1' }),
+    ).toBe(false)
+  })
+
+  it('an untagged general error with no turn does not end one', () => {
+    expect(
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: null }),
+    ).toBe(false)
+    expect(
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: undefined }),
+    ).toBe(false)
   })
 })
 
