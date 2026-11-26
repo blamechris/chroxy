@@ -213,4 +213,27 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(s1.pendingClientMessageId).toBeNull();
     expect(th('s1')[0]).toMatchObject({ thinkingStreaming: false });
   });
+
+  it('an unknown sessionId is treated as untagged: mid-stream it only appends the row', () => {
+    const { store, th } = midStream();
+    _testMessageHandler.handle({
+      type: 'server_error', sessionId: 'ghost', category: 'session', message: 'Process exited', recoverable: true,
+    });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('resp-1');
+    expect(s1.pendingClientMessageId).toBe('client-1');
+    expect(th('s1')[0]).toMatchObject({ id: 't1', thinkingStreaming: true });
+    expect(errRows(store, 's1')).toHaveLength(1);
+  });
+
+  it('an unknown sessionId while the send is pending settles the active session', () => {
+    const { store } = setup();
+    patchSession(store, 's1', { streamingMessageId: 'pending', pendingClientMessageId: 'client-1' });
+    _testMessageHandler.handle({
+      type: 'server_error', sessionId: 'ghost', category: 'session', message: 'Process exited', recoverable: true,
+    });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBeNull();
+    expect(s1.pendingClientMessageId).toBeNull();
+  });
 });

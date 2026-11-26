@@ -207,6 +207,11 @@ export function handleServerError(
  *   (its `correlationId` is server-generated, so the client cannot match it to
  *   a request) must not end a turn that has already started streaming.
  *
+ * The `'pending'` window is deliberately conservative: any untagged non-tunnel
+ * error during a pending send (including one from an unrelated request, e.g. a
+ * failed repo listing) settles that send, as before this change, and the send's
+ * own safety-net timer would clear it anyway.
+ *
  * When false the caller appends the error row only: it leaves
  * `streamingMessageId`, `pendingClientMessageId` and thinking blocks alone.
  */

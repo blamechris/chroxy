@@ -106,4 +106,32 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(ss('s1').messages.some((m) => m.id === 'thinking')).toBe(false)
     expect(ss('s2').streamingMessageId).toBe('resp-2')
   })
+
+  it('an unknown sessionId is treated as untagged: mid-stream it only appends the row', async () => {
+    const { handle, ss, errRows } = await setup(midStream)
+    handle({ type: 'server_error', sessionId: 'ghost', category: 'session', message: 'Process exited', recoverable: true })
+    expect(ss('s1').streamingMessageId).toBe('resp-1')
+    expect(ss('s1').pendingClientMessageId).toBe('client-1')
+    expect(ss('s1').messages.some((m) => m.id === 'thinking')).toBe(true)
+    expect(errRows()).toHaveLength(1)
+  })
+
+  it('an unknown sessionId while the send is pending settles the active session', async () => {
+    const { handle, ss } = await setup({ ...midStream, streamingMessageId: 'pending' })
+    handle({ type: 'server_error', sessionId: 'ghost', category: 'session', message: 'Process exited', recoverable: true })
+    expect(ss('s1').streamingMessageId).toBeNull()
+    expect(ss('s1').pendingClientMessageId).toBeNull()
+  })
+
+  it('with no active session the error goes to the global log and no session changes', async () => {
+    const { handle, ss, useConnectionStore } = await setup(midStream)
+    useConnectionStore.setState({ activeSessionId: null, streamingMessageId: 'resp-1', messages: [] })
+    const before = { s1: ss('s1'), s2: ss('s2') }
+    handle({ type: 'server_error', message: 'Failed to list repos', recoverable: true })
+    const st = useConnectionStore.getState()
+    expect(st.streamingMessageId).toBeNull()
+    expect(st.messages.filter((m) => m.type === 'error')).toHaveLength(1)
+    expect(ss('s1')).toBe(before.s1)
+    expect(ss('s2')).toBe(before.s2)
+  })
 })

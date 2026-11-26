@@ -4182,11 +4182,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
             messages: [...ss.messages, errorMsg],
           }));
         }
+      } else {
+        // No session context on app — the error is already surfaced via
+        // `useNotificationStore.addServerError` and the unrecoverable Alert
+        // below. App's ConnectionState has no top-level `messages` array
+        // to fall back to (unlike the dashboard).
       }
-      // No session context on app — the error is already surfaced via
-      // `useNotificationStore.addServerError` and the unrecoverable Alert
-      // below. App's ConnectionState has no top-level `messages` array
-      // to fall back to (unlike the dashboard).
       if (!serverError.recoverable) {
         Alert.alert('Server Error', serverError.message);
       }
