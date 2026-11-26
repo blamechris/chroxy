@@ -516,7 +516,7 @@ describe('detectStrandedState identity compare is exact on a lossy-stat platform
   })
 
   it('reads the same exact ino on a different dev as different directories', () => {
-    const statImpl = (p, opts) => ({ dev: p === '/fake/src' ? 1n : 2n, ino: A })
+    const statImpl = (p) => ({ dev: p === '/fake/src' ? 1n : 2n, ino: A })
     const d = detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl })
     assert.equal(d.relocated, true)
   })
