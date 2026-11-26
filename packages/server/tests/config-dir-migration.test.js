@@ -479,3 +479,39 @@ describe('the stranded set is derived, not enumerated', () => {
     assert.deepEqual(readdirSync(source).sort(), d.stranded, 'nothing is filtered out silently')
   })
 })
+
+describe('detectStrandedState identity compare is exact on a lossy-stat platform (#8750)', () => {
+  // Models Node on Windows: without { bigint: true } the 64-bit NTFS file ID
+  // comes back as a double (lossy above 2^53); with it, the exact BigInt.
+  const fakeStat = (ids) => (p, opts) => {
+    const id = ids[p]
+    if (id === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    if (opts && opts.bigint) return { dev: 1n, ino: id }
+    return { dev: 1, ino: Number(id) }
+  }
+  const A = (1n << 60n) + 1n
+  const B = (1n << 60n) + 2n
+
+  it('fixture premise: the two IDs differ exactly but collide as Numbers', () => {
+    assert.notEqual(A, B)
+    assert.equal(Number(A), Number(B))
+  })
+
+  it('reads two distinct directories whose IDs collide as Numbers as different', () => {
+    const statImpl = fakeStat({ '/fake/src': A, '/fake/dst': B })
+    const d = detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl })
+    assert.equal(d.relocated, true)
+  })
+
+  it('still reads the same ID on both sides as the same directory', () => {
+    const statImpl = fakeStat({ '/fake/src': A, '/fake/alias': A })
+    const d = detectStrandedState({ source: '/fake/src', target: '/fake/alias', statImpl })
+    assert.equal(d.relocated, false)
+  })
+
+  it('treats inode 0n as unusable and falls back to the path compare', () => {
+    const statImpl = fakeStat({ '/fake/src': 0n, '/fake/dst': 0n })
+    assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/dst', statImpl }).relocated, true)
+    assert.equal(detectStrandedState({ source: '/fake/src', target: '/fake/src', statImpl }).relocated, false)
+  })
+})
