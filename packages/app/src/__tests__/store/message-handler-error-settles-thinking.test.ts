@@ -236,4 +236,23 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(s1.streamingMessageId).toBeNull();
     expect(s1.pendingClientMessageId).toBeNull();
   });
+
+  it('a general sessionless error leaves a pending send whose thinking has started', () => {
+    const { store } = setup();
+    patchSession(store, 's1', {
+      streamingMessageId: 'pending',
+      pendingClientMessageId: 'u1',
+      messages: [
+        { id: 'u1', type: 'user_input', content: 'hi', timestamp: 1 },
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+      ],
+    });
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'srv-think-0', thinking: true, sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'server_error', message: 'Failed to list repos', recoverable: true });
+    const s1 = store.getState().sessionStates.s1;
+    expect(s1.streamingMessageId).toBe('pending');
+    expect(s1.pendingClientMessageId).toBe('u1');
+    expect(s1.messages.find((m) => m.id === 'srv-think-0')).toMatchObject({ type: 'thinking', thinkingStreaming: true });
+    expect(errRows(store, 's1')).toHaveLength(1);
+  });
 });

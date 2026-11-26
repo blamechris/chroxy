@@ -879,6 +879,7 @@ export {
   handleSessionUsage,
   handleServerError,
   serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerShutdown,
   handleServerStatusLegacy,
   handleRateLimited,

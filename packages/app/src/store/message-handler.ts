@@ -157,6 +157,7 @@ import {
   handleResultQueueReconcile,
   handleServerError as sharedServerError,
   serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
@@ -4169,7 +4170,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       const errTarget = errTargetId ? get().sessionStates[errTargetId] : undefined;
       if (errTargetId && errTarget) {
         // #9336: a sessionless informational error must not end a live turn.
-        if (serverErrorEndsTurn(serverError, { tagged: errTagged, streamingMessageId: errTarget.streamingMessageId })) {
+        if (serverErrorEndsTurn(serverError, { tagged: errTagged, streamingMessageId: errTarget.streamingMessageId, turnStarted: pendingTurnHasStarted(errTarget.messages, errTarget.pendingClientMessageId) })) {
           updateSession(errTargetId, (ss) => ({
             messages: filterThinking(finalizeThinkingStreams([...ss.messages, errorMsg])),
             streamingMessageId: null,

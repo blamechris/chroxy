@@ -108,6 +108,7 @@ import {
   handleResultUsage,
   handleServerError,
   serverErrorEndsTurn,
+  pendingTurnHasStarted,
   handleServerShutdown,
   handleServerStatusLegacy,
   handleWebTaskUpsert,
@@ -5830,7 +5831,7 @@ describe('serverErrorEndsTurn (#9336)', () => {
     for (const category of ['tunnel', 'session', 'permission', 'general'] as const) {
       for (const streamingMessageId of ['pending', 'msg-1', null, undefined]) {
         expect(
-          serverErrorEndsTurn(err(category), { tagged: true, streamingMessageId }),
+          serverErrorEndsTurn(err(category), { tagged: true, streamingMessageId, turnStarted: false }),
         ).toBe(true)
       }
     }
@@ -5838,29 +5839,67 @@ describe('serverErrorEndsTurn (#9336)', () => {
 
   it('an untagged tunnel error never ends the turn, even while pending', () => {
     expect(
-      serverErrorEndsTurn(err('tunnel'), { tagged: false, streamingMessageId: 'pending' }),
+      serverErrorEndsTurn(err('tunnel'), { tagged: false, streamingMessageId: 'pending', turnStarted: false }),
     ).toBe(false)
   })
 
   it('an untagged general error ends the turn while the send is pending', () => {
     expect(
-      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'pending' }),
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'pending', turnStarted: false }),
     ).toBe(true)
+  })
+
+  it('an untagged general error leaves a pending send the server has started', () => {
+    expect(
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'pending', turnStarted: true }),
+    ).toBe(false)
   })
 
   it('an untagged general error leaves a turn that is already streaming', () => {
     expect(
-      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'msg-1' }),
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: 'msg-1', turnStarted: false }),
     ).toBe(false)
   })
 
   it('an untagged general error with no turn does not end one', () => {
     expect(
-      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: null }),
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: null, turnStarted: false }),
     ).toBe(false)
     expect(
-      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: undefined }),
+      serverErrorEndsTurn(err('general'), { tagged: false, streamingMessageId: undefined, turnStarted: false }),
     ).toBe(false)
+  })
+})
+
+describe('pendingTurnHasStarted (#9336)', () => {
+  const row = (id: string, type: ChatMessage['type']): ChatMessage => ({ id, type, content: '', timestamp: 1 })
+  const user = row('u1', 'user_input')
+
+  it('is false without a pending client message id', () => {
+    expect(pendingTurnHasStarted([user, row('t1', 'thinking')], null)).toBe(false)
+    expect(pendingTurnHasStarted([user, row('t1', 'thinking')], undefined)).toBe(false)
+  })
+
+  it('is false when the id names no message', () => {
+    expect(pendingTurnHasStarted([row('t1', 'thinking')], 'u1')).toBe(false)
+  })
+
+  it('is false with only the send placeholder after the user message', () => {
+    expect(pendingTurnHasStarted([user, row('thinking', 'thinking')], 'u1')).toBe(false)
+  })
+
+  it('is true with a real thinking, response or tool_use row after it', () => {
+    for (const type of ['thinking', 'response', 'tool_use'] as const) {
+      expect(pendingTurnHasStarted([user, row('thinking', 'thinking'), row('srv-1', type)], 'u1')).toBe(true)
+    }
+  })
+
+  it('does not count a thinking bubble before the user message', () => {
+    expect(pendingTurnHasStarted([row('old-t', 'thinking'), user, row('thinking', 'thinking')], 'u1')).toBe(false)
+  })
+
+  it('does not count client-appended rows after it', () => {
+    expect(pendingTurnHasStarted([user, row('e1', 'error'), row('s1', 'system'), row('p1', 'prompt')], 'u1')).toBe(false)
   })
 })
 

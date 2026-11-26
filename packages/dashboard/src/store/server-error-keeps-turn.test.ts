@@ -134,4 +134,21 @@ describe('sessionless server_error keeps a live turn (#9336)', () => {
     expect(ss('s1')).toBe(before.s1)
     expect(ss('s2')).toBe(before.s2)
   })
+
+  it('a general sessionless error leaves a pending send whose thinking has started', async () => {
+    const { handle, ss, errRows } = await setup({
+      streamingMessageId: 'pending',
+      pendingClientMessageId: 'u1',
+      messages: [
+        { id: 'u1', type: 'user_input', content: 'hi', timestamp: 1 },
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+      ],
+    })
+    handle({ type: 'stream_start', messageId: 'srv-think-0', thinking: true, sessionId: 's1' })
+    handle({ type: 'server_error', message: 'Failed to list repos', recoverable: true })
+    expect(ss('s1').streamingMessageId).toBe('pending')
+    expect(ss('s1').pendingClientMessageId).toBe('u1')
+    expect(ss('s1').messages.find((m) => m.id === 'srv-think-0')).toMatchObject({ type: 'thinking', thinkingStreaming: true })
+    expect(errRows()).toHaveLength(1)
+  })
 })
