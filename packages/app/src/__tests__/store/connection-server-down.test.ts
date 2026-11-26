@@ -418,6 +418,65 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       ws.restore();
     });
 
+    // #8929 — the alert can outlive a re-pair. Retry must dial the CURRENT saved
+    // connection (like the banner's retryConnection), not the url/token captured
+    // when the alert was created, and must not redial the old server.
+    it.each(['probe', 'restart'] as const)('#8929 %s alert Retry dials the current saved connection, not the captured one', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind);
+      // Re-pair to another server while the alert is open.
+      useConnectionLifecycleStore.setState({
+        savedConnection: { url: 'wss://other.example.com', token: 'tok-new' },
+      });
+      (global.fetch as jest.Mock).mockClear();
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(0);
+      const sock = ws.instances[ws.instances.length - 1];
+      expect(sock.url).toContain('other.example.com');
+      expect(sock.url).not.toContain('tunnel.example.com');
+      // Nothing probed or dialed the old server.
+      const probed = (global.fetch as jest.Mock).mock.calls.map(([u]) => String(u));
+      expect(probed.some((u) => u.includes('tunnel.example.com'))).toBe(false);
+      expect(probed.some((u) => u.includes('other.example.com'))).toBe(true);
+      // The new token authenticates, not the captured one.
+      sock.readyState = 1;
+      sock.onopen?.();
+      await flushPromises();
+      const sent = sock.send.mock.calls.map(([m]) => String(m)).join('\n');
+      expect(sent).toContain('tok-new');
+      expect(sent).not.toContain('"tok"');
+      ws.restore();
+    });
+
+    // #8929 — no saved record (a first-time connect that never authenticated):
+    // there is nothing else to dial, so Retry redials the captured target.
+    it.each(['probe', 'restart'] as const)('#8929 %s alert Retry with no saved record redials the captured target', async (kind) => {
+      const ws = installMockWebSocket();
+      const onPress = await giveUpAndGetRetry(kind, false);
+      (global.fetch as jest.Mock).mockClear();
+      (global.fetch as jest.Mock).mockResolvedValue(mockResponse(200, { status: 'ok' }));
+
+      onPress();
+      await flushPromises();
+      jest.advanceTimersByTime(0);
+      await flushPromises();
+
+      expect(ws.instances.length).toBeGreaterThan(0);
+      const sock = ws.instances[ws.instances.length - 1];
+      expect(sock.url).toContain('tunnel.example.com');
+      sock.readyState = 1;
+      sock.onopen?.();
+      await flushPromises();
+      expect(sock.send.mock.calls.map(([m]) => String(m)).join('\n')).toContain('"tok"');
+      ws.restore();
+    });
+
     // A stale alert (app already recovered some other way) must not retire the
     // healthy socket.
     it.each(['probe', 'restart'] as const)('%s alert Retry is a no-op once the connection recovered', async (kind) => {
