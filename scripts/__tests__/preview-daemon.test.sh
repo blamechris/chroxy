@@ -42,7 +42,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=159
+EXPECTED_CASES=160
 
 PASS=0
 FAIL=0
@@ -549,6 +549,59 @@ pd start --config-patch "$PATCH_DIR/acp-inject.json" --stub-acp </dev/null >/dev
   && pass "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" || fail "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/acp.err")"
 ok "usage documents --stub-acp and the HANG_UNTIL_CANCEL way to hold a turn busy" "usage text" -- \
   bash -c 'u="$(bash "$1" start --bogus 2>&1)"; case "$u" in *"--stub-acp"*HANG_UNTIL_CANCEL*) exit 0 ;; *) exit 1 ;; esac' _ "$PD"
+
+# The recipe documented for --stub-acp depends on the fixture's behaviour, which the
+# shape checks above cannot see: drive the REAL fixture over ND-JSON with plain node.
+cat >"$WORK/acp-drive.js" <<'JS'
+const { spawn } = require('child_process')
+const child = spawn(process.execPath, [process.argv[2]], { stdio: ['pipe', 'pipe', 'ignore'] })
+const msgs = []
+let waiters = []
+let buf = ''
+const done = (code, why) => { try { child.kill() } catch {} ; if (why) console.error(why); process.exit(code) }
+const hard = setTimeout(() => done(1, 'hard timeout'), 15000)
+child.on('exit', () => { if (!finished) done(1, 'fixture exited early') })
+child.stdout.on('data', (d) => {
+  buf += d
+  let i
+  while ((i = buf.indexOf('\n')) >= 0) {
+    let m; try { m = JSON.parse(buf.slice(0, i)) } catch { m = null }
+    buf = buf.slice(i + 1)
+    if (m) { msgs.push(m); waiters = waiters.filter((w) => !w(m)) }
+  }
+})
+const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n')
+// resolves with the first message (already seen or future) matching pred, or null after ms
+const wait = (pred, ms) => new Promise((resolve) => {
+  const seen = msgs.find(pred); if (seen) return resolve(seen)
+  const t = setTimeout(() => { waiters = waiters.filter((w) => w !== w1); resolve(null) }, ms)
+  const w1 = (m) => { if (pred(m)) { clearTimeout(t); resolve(m); return true } return false }
+  waiters.push(w1)
+})
+const reply = (id) => (m) => m.id === id && m.result !== undefined
+let finished = false
+const need = (c, why) => { if (!c) done(1, 'FAILED: ' + why) }
+;(async () => {
+  send({ id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })
+  need(await wait(reply(1), 3000), 'no initialize result')
+  send({ id: 2, method: 'session/new', params: { cwd: process.cwd(), mcpServers: [] } })
+  const sn = await wait(reply(2), 3000); need(sn, 'no session/new result')
+  const sessionId = sn.result.sessionId; need(sessionId, 'no sessionId')
+  send({ id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'preamble text. HANG_UNTIL_CANCEL please' }] } })
+  need(await wait((m) => m.method === 'session/update' && m.params.update.content && m.params.update.content.text === 'WAITING', 3000), 'no WAITING update')
+  need(!(await wait(reply(3), 1000)), 'held prompt was answered before any cancel')
+  send({ method: 'session/cancel', params: { sessionId } })
+  const c = await wait(reply(3), 3000)
+  need(c && c.result.stopReason === 'cancelled', 'cancel did not end the turn with stopReason cancelled')
+  send({ id: 4, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hello again' }] } })
+  const e = await wait(reply(4), 3000)
+  need(e && e.result.stopReason === 'end_turn', 'second prompt in the same process did not end_turn')
+  finished = true; clearTimeout(hard); done(0)
+})()
+JS
+node "$WORK/acp-drive.js" "$ACP_FIX" >"$WORK/acp-drive.out" 2>&1; RC=$?
+[ "$RC" -eq 0 ] && pass "the --stub-acp fixture holds a HANG_UNTIL_CANCEL turn until session/cancel, then serves another prompt in the same process" \
+  || fail "the --stub-acp fixture holds a HANG_UNTIL_CANCEL turn until session/cancel, then serves another prompt in the same process" "rc=$RC $(cat "$WORK/acp-drive.out")"
 
 # =========================================================================
 # 6c. sweep: reap abandoned previews (#8742)

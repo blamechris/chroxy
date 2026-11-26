@@ -49,7 +49,9 @@
 #                       session with provider smoke-acp). To hold a turn busy, send a
 #                       prompt containing HANG_UNTIL_CANCEL; the agent then waits
 #                       until session/cancel (Stop). Queue follow-ups, then press
-#                       Stop. Any other prompt streams a short reply and ends. A
+#                       Stop only once the held turn shows as busy: the agent arms
+#                       its cancel wait when it receives the prompt, and a cancel
+#                       that arrives earlier is ignored (the turn then hangs). Any other prompt streams a short reply and ends. A
 #                       --config-patch still cannot set providers.acp; only this
 #                       flag registers it, and only this fixture. Refused (exit 2,
 #                       nothing created) if the fixture file is missing.
