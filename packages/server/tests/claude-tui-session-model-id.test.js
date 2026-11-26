@@ -198,10 +198,14 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
     s._waitForPrompt = async () => true
     s._writePtyTextThrottled = async () => { if (echo) s._appendToOutputTail(echo); return true }
     // What claude prints once the prompt is written and the turn's scan boundaries are marked.
+    // `replyAppended` settles once the fake reply is in the output tail, so a test can wait on
+    // that event instead of sleeping.
     let replied = false
+    let markReplied
+    const replyAppended = new Promise((resolve) => { markReplied = resolve })
     const realArm = s._armResultTimeout.bind(s)
     s._armResultTimeout = (...a) => {
-      if (!replied) { replied = true; if (reply) s._appendToOutputTail(reply) }
+      if (!replied) { replied = true; if (reply) s._appendToOutputTail(reply); markReplied() }
       return realArm(...a)
     }
     s._term = { write: () => {}, kill: () => {}, pid: 2 ** 30 }
@@ -210,9 +214,8 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
     s.on('result', (e) => events.results.push(e))
     const realTeardown = s._teardownTurn.bind(s)
     s._teardownTurn = (reason, opts) => { events.reasons.push(reason); return realTeardown(reason, opts) }
-    return { s, events }
+    return { s, events, replyAppended }
   }
-
 
   const OWN = 'claude-haiku-5-5' // what the session passes to --model for 'haiku-5-5'
 
@@ -240,14 +243,33 @@ describe('ClaudeTuiSession — rejected model reported at the first-output watch
     assert.deepEqual(events.errors.map((e) => e.code), ['stream_stall'])
   })
 
+  const quotedReply = () => `The CLI says "${screenFor(OWN)}" when the id is wrong.`
+
+  // The first-output watchdog is disabled here (0 is the operator opt-out): this control is
+  // about quoted text plus a later Stop completing normally, so nothing may race a wall-clock
+  // margin. The other timeouts stay at the helper's 5000 ms; they only start counting once the
+  // turn arms them and the Stop hook is written right after the reply is appended.
   it('an assistant reply quoting the sentence (even for the session\'s own model) with no hook, then Stop, completes normally', async () => {
-    const { s, events } = turnSession({ firstOutputTimeoutMs: 4000, reply: `The CLI says "${screenFor(OWN)}" when the id is wrong.` })
+    const { s, events, replyAppended } = turnSession({ firstOutputTimeoutMs: 0, reply: quotedReply() })
     const turn = s.sendMessage('explain that error')
-    await new Promise((r) => setTimeout(r, 300))
+    await replyAppended
     assert.equal(s._isBusy, true, 'quoted text did not tear the turn down')
     writeFileSync(join(s._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'ok' }))
     await turn
     assert.deepEqual(events.reasons, [])
     assert.deepEqual(events.errors, [])
+  })
+
+  // PINS CURRENT BEHAVIOUR, not a verdict on it (#9031). With no hook and no Stop, the watchdog
+  // cannot tell a quoted own-model sentence from the TUI's real rejection screen (the scan is a
+  // substring match on the post-prompt output), so it reports model_unavailable. The control
+  // above is what proves quoted text alone never tears a turn down. This case waits for the
+  // watchdog instead of racing it.
+  it('the same quoted reply with no Stop reaches the watchdog and is classified model_unavailable (current behaviour, pinned)', async () => {
+    const { s, events } = turnSession({ reply: quotedReply() })
+    await s.sendMessage('explain that error')
+    assert.deepEqual(events.reasons, ['first_output_timeout'])
+    assert.deepEqual(events.errors.map((e) => e.code), ['model_unavailable'])
+    assert.equal(events.errors[0].model, OWN)
   })
 })
