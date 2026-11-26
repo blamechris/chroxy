@@ -21,6 +21,9 @@
 #   - --config-patch merges into the scratch config (0600 kept), refuses every
 #     non-allowlisted key / invalid JSON / non-object before creating anything; and
 #     --stub-provider registers the keyless smoke-stub provider (#9189)
+#   - --stub-acp (#9345) registers only the repo's scripted ACP agent (absolute node +
+#     fixture paths, no env), refuses a missing fixture, and a patch still cannot
+#     set providers.acp
 #   - sweep (#8742) reaps by AGE (and cleans a dead daemon); a gone/reused launcher
 #     is report-only unless --force past PREVIEW_DAEMON_FORCE_MIN_AGE; a PID now
 #     owned by another process is never signalled (its stale dir is just removed);
@@ -39,7 +42,7 @@ PD="$REPO_ROOT/scripts/preview-daemon.sh"
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome (#7653). Asserted EQUAL, not -ge.
-EXPECTED_CASES=150
+EXPECTED_CASES=160
 
 PASS=0
 FAIL=0
@@ -490,6 +493,115 @@ SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
 [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.length)" = 2 ] && [ "$(cfg_get "$SP/config/config.json" providers.anthropicCompatible.1.id)" = '"smoke-stub"' ] \
   && pass "--stub-provider appends after the --config-patch providers" || fail "--stub-provider appends after the --config-patch providers"
 [ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+# --- --stub-acp (#9345): a keyless ACP stub that queues mid-turn input ---------
+ACP_FIX="$REPO_ROOT/packages/server/tests/fixtures/fake-acp-agent.js"
+OUT="$(pd start --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+node -e '
+  const { isAbsolute, basename } = require("path"), fs = require("fs")
+  const [, f, fix] = process.argv
+  const l = JSON.parse(fs.readFileSync(f, "utf8")).providers.acp
+  const e = l[0]
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const ok = l.length === 1 && same(Object.keys(e).sort(), ["args", "command", "id", "label"])
+    && e.id === "smoke-acp" && e.label === "Smoke ACP stub"
+    && isAbsolute(e.command) && basename(e.command) === "node" && fs.statSync(e.command).isFile()
+    && same(e.args, [fix]) && isAbsolute(e.args[0]) && fs.existsSync(e.args[0])
+  process.exit(ok ? 0 : 1)' "$ACFG" "$ACP_FIX" 2>"$WORK/acp.cmp"; CRC=$?
+[ "$RC" -eq 0 ] && [ "$CRC" -eq 0 ] && pass "--stub-acp writes exactly one smoke-acp entry: absolute node, existing absolute fixture, no env" \
+  || fail "--stub-acp writes exactly one smoke-acp entry: absolute node, existing absolute fixture, no env" "rc=$RC $(cat "$WORK/acp.err" "$WORK/acp.cmp") $(cat "$ACFG" 2>&1)"
+[ "$(mode_of "$ACFG")" = 600 ] && pass "--stub-acp: the config.json stays mode 0600" || fail "--stub-acp: the config.json stays mode 0600" "mode=$(mode_of "$ACFG")"
+[ "$(cfg_get "$ACFG" provider)" = null ] && pass "--stub-acp registers but does not select the provider (no default provider set)" || fail "--stub-acp registers but does not select the provider (no default provider set)" "$(cfg_get "$ACFG" provider)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+OUT="$(pd start --config-patch "$PATCH_DIR/other.json" --stub-provider 18473 --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.length)" = 2 ] \
+  && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.0.id)" = '"other"' ] && [ "$(cfg_get "$ACFG" providers.anthropicCompatible.1.id)" = '"smoke-stub"' ] \
+  && [ "$(cfg_get "$ACFG" providers.acp.length)" = 1 ] && [ "$(cfg_get "$ACFG" providers.acp.0.id)" = '"smoke-acp"' ] \
+  && pass "--stub-acp coexists with --config-patch providers and --stub-provider" || fail "--stub-acp coexists with --config-patch providers and --stub-provider" "rc=$RC $(cat "$WORK/acp.err") $(cat "$ACFG" 2>&1)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+printf '%s' '{"provider":"smoke-acp"}' >"$PATCH_DIR/sel.json"
+OUT="$(pd start --config-patch "$PATCH_DIR/sel.json" --stub-acp 2>"$WORK/acp.err")"; RC=$?
+SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"; ACFG="$SP/config/config.json"
+[ "$RC" -eq 0 ] && [ "$(cfg_get "$ACFG" provider)" = '"smoke-acp"' ] && [ "$(cfg_get "$ACFG" providers.acp.0.id)" = '"smoke-acp"' ] \
+  && pass "--stub-acp with a provider patch selects smoke-acp explicitly" || fail "--stub-acp with a provider patch selects smoke-acp explicitly" "rc=$RC $(cat "$WORK/acp.err")"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+OUT="$(pd start 2>/dev/null)"; SP="$(printf '%s\n' "$OUT" | sed -n 's/^SMOKE=//p')"
+[ "$(cfg_get "$SP/config/config.json" providers)" = null ] && pass "without --stub-acp no providers.acp entry is registered" || fail "without --stub-acp no providers.acp entry is registered" "$(cfg_get "$SP/config/config.json" providers)"
+[ -n "$SP" ] && pd clean "$SP" >/dev/null 2>&1
+
+# A checkout without the fixture: run a copy of the script from a tree that lacks it.
+NOFIX="$WORK/nofix"; mkdir -p "$NOFIX/scripts"; cp "$PD" "$NOFIX/scripts/preview-daemon.sh"
+BEFORE="$(count_smoke_dirs)"
+env HOME="$HOME_T" PREVIEW_DAEMON_SKIP_BUILD=1 PREVIEW_DAEMON_CLI="$STUB_OK" bash "$NOFIX/scripts/preview-daemon.sh" start --stub-acp </dev/null >/dev/null 2>"$WORK/acp.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "fixture not found" "$WORK/acp.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+  && pass "--stub-acp refuses a missing fixture (exit 2, names it, no scratch dir)" || fail "--stub-acp refuses a missing fixture (exit 2, names it, no scratch dir)" "rc=$RC $(cat "$WORK/acp.err")"
+
+# The allowlist did not widen: a patch still cannot register an ACP command.
+printf '%s' '{"providers":{"acp":[{"id":"smoke-acp","command":"/bin/sh","args":["-c","id"]}]}}' >"$PATCH_DIR/acp-inject.json"
+BEFORE="$(count_smoke_dirs)"
+pd start --config-patch "$PATCH_DIR/acp-inject.json" --stub-acp </dev/null >/dev/null 2>"$WORK/acp.err"; RC=$?
+[ "$RC" -eq 2 ] && grep -q "may only contain anthropicCompatible, not: acp" "$WORK/acp.err" && [ "$(count_smoke_dirs)" = "$BEFORE" ] \
+  && pass "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" || fail "a --config-patch providers.acp stays refused even alongside --stub-acp (exit 2, no scratch dir)" "rc=$RC $(cat "$WORK/acp.err")"
+ok "usage documents --stub-acp and the HANG_UNTIL_CANCEL way to hold a turn busy" "usage text" -- \
+  bash -c 'u="$(bash "$1" start --bogus 2>&1)"; case "$u" in *"--stub-acp"*HANG_UNTIL_CANCEL*) exit 0 ;; *) exit 1 ;; esac' _ "$PD"
+
+# The recipe documented for --stub-acp depends on the fixture's behaviour, which the
+# shape checks above cannot see: drive the REAL fixture over ND-JSON with plain node.
+cat >"$WORK/acp-drive.js" <<'JS'
+const { spawn } = require('child_process')
+const child = spawn(process.execPath, [process.argv[2]], { stdio: ['pipe', 'pipe', 'ignore'] })
+const msgs = []
+let waiters = []
+let buf = ''
+const done = (code, why) => { try { child.kill() } catch {} ; if (why) console.error(why); process.exit(code) }
+const hard = setTimeout(() => done(1, 'hard timeout'), 15000)
+child.on('exit', () => { if (!finished) done(1, 'fixture exited early') })
+child.stdout.on('data', (d) => {
+  buf += d
+  let i
+  while ((i = buf.indexOf('\n')) >= 0) {
+    let m; try { m = JSON.parse(buf.slice(0, i)) } catch { m = null }
+    buf = buf.slice(i + 1)
+    if (m) { msgs.push(m); waiters = waiters.filter((w) => !w(m)) }
+  }
+})
+const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n')
+// resolves with the first message (already seen or future) matching pred, or null after ms
+const wait = (pred, ms) => new Promise((resolve) => {
+  const seen = msgs.find(pred); if (seen) return resolve(seen)
+  const t = setTimeout(() => { waiters = waiters.filter((w) => w !== w1); resolve(null) }, ms)
+  const w1 = (m) => { if (pred(m)) { clearTimeout(t); resolve(m); return true } return false }
+  waiters.push(w1)
+})
+const reply = (id) => (m) => m.id === id && m.result !== undefined
+let finished = false
+const need = (c, why) => { if (!c) done(1, 'FAILED: ' + why) }
+;(async () => {
+  send({ id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })
+  need(await wait(reply(1), 3000), 'no initialize result')
+  send({ id: 2, method: 'session/new', params: { cwd: process.cwd(), mcpServers: [] } })
+  const sn = await wait(reply(2), 3000); need(sn, 'no session/new result')
+  const sessionId = sn.result.sessionId; need(sessionId, 'no sessionId')
+  send({ id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'preamble text. HANG_UNTIL_CANCEL please' }] } })
+  need(await wait((m) => m.method === 'session/update' && m.params.update.content && m.params.update.content.text === 'WAITING', 3000), 'no WAITING update')
+  need(!(await wait(reply(3), 1000)), 'held prompt was answered before any cancel')
+  send({ method: 'session/cancel', params: { sessionId } })
+  const c = await wait(reply(3), 3000)
+  need(c && c.result.stopReason === 'cancelled', 'cancel did not end the turn with stopReason cancelled')
+  send({ id: 4, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hello again' }] } })
+  const e = await wait(reply(4), 3000)
+  need(e && e.result.stopReason === 'end_turn', 'second prompt in the same process did not end_turn')
+  finished = true; clearTimeout(hard); done(0)
+})()
+JS
+node "$WORK/acp-drive.js" "$ACP_FIX" >"$WORK/acp-drive.out" 2>&1; RC=$?
+[ "$RC" -eq 0 ] && pass "the --stub-acp fixture holds a HANG_UNTIL_CANCEL turn until session/cancel, then serves another prompt in the same process" \
+  || fail "the --stub-acp fixture holds a HANG_UNTIL_CANCEL turn until session/cancel, then serves another prompt in the same process" "rc=$RC $(cat "$WORK/acp-drive.out")"
 
 # =========================================================================
 # 6c. sweep: reap abandoned previews (#8742)

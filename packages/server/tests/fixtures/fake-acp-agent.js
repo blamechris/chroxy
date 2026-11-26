@@ -4,6 +4,12 @@
 // drive AcpSession's real translation + persistence code through a REAL
 // spawned child process — no live third-party agent required, no network.
 //
+// Also consumed by `scripts/preview-daemon.sh --stub-acp` (#9345), which registers
+// this file as the keyless ACP stub of an isolated preview daemon. That recipe
+// relies on the `HANG_UNTIL_CANCEL` substring marker, on the `cancelled` reply to
+// session/cancel, and on one process serving many prompts. The preview-daemon
+// harness (scripts/__tests__/preview-daemon.test.sh) pins all three.
+//
 // Scenario is selected by the PROMPT TEXT the test sends (substring match),
 // so ONE process instance can serve every scenario across a sequence of
 // prompts — needed by the interrupt/persistence test, which sends two
