@@ -261,10 +261,8 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   const [singleSelectByIdx, setSingleSelectByIdx] = useState<Record<number, string>>({})
   const [multiSelectByIdx, setMultiSelectByIdx] = useState<Record<number, string[]>>({})
   const submittedRef = useRef(false)
-  // #4624 — stable id prefix for aria-labelledby. Each question text gets
-  // `${labelIdPrefix}-${idx}` so duplicate question texts don't collide
-  // and screen readers can announce the group label.
-  const labelIdPrefix = useId()
+  // Scope labels and radio groups to this form when several are open.
+  const formId = useId()
 
   // #5800 — selection state + answersMap-builder + canSubmit derivation
   // now live in `@chroxy/store-core` (shared with the app's
@@ -290,19 +288,18 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
     <div className="question-prompt question-prompt--multi" data-testid="question-prompt-multi">
       {questions.map((q, idx) => {
         const isMultiSelect = q.multiSelect === true
-        const labelId = `${labelIdPrefix}-q-${idx}`
+        const questionId = `${formId}-q-${idx}`
         return (
         <div key={`q-${idx}`} className="question-prompt-multi-row" data-testid={`question-multi-row-${idx}`}>
-          <div className="question-text" id={labelId}>{q.question}</div>
+          <div className="question-text" id={questionId}>{q.question}</div>
           <div
             className={`question-options${isMultiSelect ? ' question-options--multi' : ''}`}
             role={isMultiSelect ? 'group' : 'radiogroup'}
-            aria-labelledby={labelId}
+            aria-labelledby={questionId}
             {...(isMultiSelect ? {} : { 'aria-required': true })}
           >
-            {q.options.map((opt) => {
-              const inputId = `q-${idx}-${opt.value}`
-              const inputName = `q-${idx}`
+            {q.options.map((opt, optionIdx) => {
+              const inputId = `${questionId}-option-${optionIdx}`
               const isMulti = q.multiSelect === true
               const isChecked = isMulti
                 ? (multiSelectByIdx[idx] || []).includes(opt.value)
@@ -317,7 +314,7 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
                   <input
                     id={inputId}
                     type={isMulti ? 'checkbox' : 'radio'}
-                    name={inputName}
+                    name={questionId}
                     checked={isChecked}
                     onChange={() => isMulti ? handleCheckboxToggle(idx, opt.value) : handleRadioChange(idx, opt.value)}
                   />

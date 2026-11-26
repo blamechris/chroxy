@@ -2,7 +2,7 @@
  * QuestionPrompt tests (#1193)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
 import { QuestionPrompt, MultiQuestionForm } from './QuestionPrompt'
 
@@ -741,6 +741,39 @@ describe('QuestionPrompt', () => {
       const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
       expect(arg!['Which release strategy?']).toBe('Minor')
       expect(arg!['Confirm?']).toBe('Yes')
+    })
+
+    it('keeps labels, selections, and submissions in their own concurrent question forms', () => {
+      const firstAnswer = vi.fn()
+      const secondAnswer = vi.fn()
+      render(
+        <>
+          <QuestionPrompt {...q1} questions={[q1, q2]} allowMultiQuestion onSelect={firstAnswer} />
+          <QuestionPrompt {...q1} questions={[q1, q2]} allowMultiQuestion onSelect={secondAnswer} />
+        </>,
+      )
+      const [firstForm, secondForm] = screen.getAllByTestId('question-prompt-multi')
+      const first = within(firstForm!)
+      const second = within(secondForm!)
+      const radio = (form: typeof first, optionId: string) =>
+        within(form.getByTestId(`question-multi-option-${optionId}`)).getByRole('radio')
+
+      fireEvent.click(second.getByText('Minor'))
+      expect(radio(second, '0-Minor')).toBeChecked()
+      expect(radio(first, '0-Minor')).not.toBeChecked()
+
+      fireEvent.click(first.getByText('Patch'))
+      expect(radio(first, '0-Patch')).toBeChecked()
+      expect(radio(second, '0-Minor')).toBeChecked()
+
+      fireEvent.click(second.getByText('No'))
+      fireEvent.click(first.getByText('Yes'))
+      fireEvent.click(second.getByRole('button', { name: 'Submit' }))
+      expect(secondAnswer).toHaveBeenCalledExactlyOnceWith({ 'Which release strategy?': 'Minor', 'Confirm?': 'No' })
+      expect(firstAnswer).not.toHaveBeenCalled()
+
+      fireEvent.click(first.getByRole('button', { name: 'Submit' }))
+      expect(firstAnswer).toHaveBeenCalledExactlyOnceWith({ 'Which release strategy?': 'Patch', 'Confirm?': 'Yes' })
     })
 
     // #4621 / #4735 — multi-select answers used to be JSON.stringify'd
