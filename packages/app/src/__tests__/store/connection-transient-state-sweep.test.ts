@@ -150,6 +150,7 @@ const DIRTY_VALUES: SweepFieldValues = {
   inactivityWarning: { idleMs: 60000, prefab: 'check-in', receivedAt: Date.now() },
   sessionRole: 'observer',
   primaryClientId: 'other-device',
+  interruptedQueued: [{ clientMessageId: 'q1', text: 'cleared by Stop', queuedAt: 1, status: 'confirmed' }],
 };
 const CLEAN_VALUES: SweepFieldValues = {
   devPreviews: [],
@@ -161,6 +162,7 @@ const CLEAN_VALUES: SweepFieldValues = {
   inactivityWarning: null,
   sessionRole: null,
   primaryClientId: null,
+  interruptedQueued: [],
 };
 
 function dirtySessionState(): SessionState {
@@ -237,6 +239,8 @@ const ALL_BASE_SESSION_STATE_KEYS = {
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,
+  // #9069: locally-cleared follow-ups awaiting the server's interrupted dequeue.
+  interruptedQueued: true,
 } satisfies Record<keyof Required<BaseSessionState>, true>;
 
 /**

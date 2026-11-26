@@ -4,6 +4,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
+import { buildChatViewMessages } from '@chroxy/store-core'
 import { ThinkingDots } from './ThinkingDots'
 import { writeText } from '../utils/clipboard'
 import * as fs from 'fs'
@@ -42,6 +43,22 @@ describe('ChatView', () => {
     render(<ChatView messages={[{ id: 'kept', type: 'system', content, timestamp: 1 }]} isStreaming={false} />)
     expect(screen.getByText(/was kept open instead of being closed/)).toBeInTheDocument()
     expect(screen.getByText(/close the session yourself/)).toBeInTheDocument()
+  })
+
+  it('renders the "Not sent" Stop notice as a system row, via the real chat pipeline (#9069)', () => {
+    const content = 'Not sent \u2014 Stop discarded 2 queued messages: \u201cone\u201d, \u201ctwo\u201d'
+    const { chatMessages } = buildChatViewMessages([
+      { id: 'u1', type: 'user_input', content: 'hi', timestamp: 1 },
+      {
+        id: 'queue-discarded-1', type: 'system', content, timestamp: 2,
+        discardedFollowUps: [{ id: 'a', preview: 'one' }, { id: 'b', preview: 'two' }],
+      },
+    ], null)
+    const { container } = render(<ChatView messages={chatMessages as ChatViewMessage[]} isStreaming={false} />)
+    const text = screen.getByText(/Not sent \u2014 Stop discarded 2 queued messages/)
+    expect(text).toBeInTheDocument()
+    expect(text.closest('.msg-row-system')).not.toBeNull()
+    expect(container.querySelectorAll('.msg-row-system')).toHaveLength(1)
   })
 
   it('shows the copy control only on finished, non-empty response bubbles (#6631)', () => {

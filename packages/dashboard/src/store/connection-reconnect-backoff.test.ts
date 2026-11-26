@@ -327,6 +327,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
       inactivityWarning: { sinceMs: 1 },
       sessionRole: 'observer',
       primaryClientId: 'other-device',
+      interruptedQueued: [{ clientMessageId: 'q1', text: 'cleared by Stop', queuedAt: 1, status: 'confirmed' }],
     }
     const CLEAN: Record<SweepField, unknown> = {
       devPreviews: [],
@@ -338,6 +339,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
       inactivityWarning: null,
       sessionRole: null,
       primaryClientId: null,
+      interruptedQueued: [],
     }
     // Runtime half of the Record<SweepField> typing: a field added to the list
     // without a dirty/clean pair here must fail even where nothing typechecks
@@ -485,6 +487,8 @@ const ALL_SESSION_STATE_KEYS = {
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,
+  // #9069: locally-cleared follow-ups awaiting the server's interrupted dequeue.
+  interruptedQueued: true,
   // Dashboard-only fields (packages/dashboard/src/store/types.ts)
   terminalRawBuffer: true,
   terminalSize: true,
@@ -697,6 +701,7 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
       inactivityWarning: { sinceMs: 1 },
       sessionRole: 'observer',
       primaryClientId: 'other-device',
+      interruptedQueued: [{ clientMessageId: 'q1', text: 'cleared by Stop', queuedAt: 1, status: 'confirmed' }],
     }
     const CLEAN: Record<SweepField, unknown> = {
       devPreviews: [],
@@ -708,6 +713,7 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
       inactivityWarning: null,
       sessionRole: null,
       primaryClientId: null,
+      interruptedQueued: [],
     }
     expect(Object.keys(DIRTY).sort()).toEqual([...TRANSIENT_SESSION_SWEEP_FIELDS].sort())
     for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) expect(DIRTY[field], field).not.toEqual(CLEAN[field])

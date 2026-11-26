@@ -404,6 +404,15 @@ export interface ChatMessage {
    * Renderers show a small labelled chip (`content` carries the label).
    */
   turnOutcome?: MarkedTurnOutcome;
+  /**
+   * #9069 — set on the `type: 'system'` "Not sent" notice a Stop leaves when it
+   * discards queued follow-ups: the entries it names, in order. Lets later
+   * `message_dequeued{interrupted}` frames from the same Stop extend the one
+   * notice instead of adding another. Built by `handleMessageDequeued`.
+   */
+  discardedFollowUps?: { id?: string; preview: string }[];
+  /** #9069 — when that notice was last extended; the coalescing window slides from it. */
+  discardedLastAt?: number;
 }
 
 /**

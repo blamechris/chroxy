@@ -77,6 +77,26 @@ export interface QueuedMessagesBuilder {
    * stream-stall safety net.
    */
   reconcileFakedFreshTurn?: (state: FakedFreshTurnState) => FakedFreshTurnPatch | null
+  /**
+   * #9069 — only `handleMessageDequeued` populates this, and only for
+   * `reason: 'interrupted'`. Given the session's state BEFORE `applyTo` removes
+   * the entry, returns the patch that records the follow-up as "not sent" in a
+   * single coalesced system notice, or null when nothing changes.
+   */
+  discardNotice?: (state: DiscardNoticeState, now: number) => DiscardNoticePatch | null
+}
+
+/** Session subset the discard-notice builder reads (both clients carry these). */
+export interface DiscardNoticeState {
+  queuedMessages: QueuedSessionMessage[]
+  interruptedQueued: QueuedSessionMessage[]
+  messages: ChatMessage[]
+}
+
+/** The patch a discard notice produces. */
+export interface DiscardNoticePatch {
+  messages: ChatMessage[]
+  interruptedQueued: QueuedSessionMessage[]
 }
 
 /**
@@ -181,6 +201,107 @@ export function enqueueOptimisticQueuedMessage(
       status: 'pending',
     },
   ]
+}
+
+/** Id prefix of the "Not sent" system notice (#9069). */
+export const QUEUE_DISCARD_NOTICE_ID_PREFIX = 'queue-discarded-'
+/** Dequeues for one Stop arrive in a burst; later than this starts a new notice. */
+const DISCARD_NOTICE_COALESCE_MS = 5000
+const DISCARD_PREVIEW_MAX = 60
+/** Cap on the locally-cleared stash, in case a server never confirms a Stop. */
+const INTERRUPTED_STASH_MAX = 50
+
+/** True for the "Not sent" notice a Stop leaves in the transcript (#9069). */
+export function isDiscardNotice(m: ChatMessage): boolean {
+  return m.type === 'system' && (m.discardedFollowUps !== undefined || m.id.startsWith(QUEUE_DISCARD_NOTICE_ID_PREFIX))
+}
+
+/** Single-line, ~60-char preview of a queued message for the notice (cut by code point). */
+export function previewQueuedText(text: string | undefined): string {
+  const flat = (text ?? '').replace(/\s+/g, ' ').trim()
+  if (flat.length === 0) return '(attachment)'
+  const points = Array.from(flat)
+  return points.length > DISCARD_PREVIEW_MAX ? `${points.slice(0, DISCARD_PREVIEW_MAX - 1).join('').trimEnd()}…` : flat
+}
+
+/** Notice wording: the follow-ups were NOT sent. */
+export function buildDiscardNoticeContent(items: { preview: string }[]): string {
+  const n = items.length
+  const list = items.map((i) => `\u201c${i.preview}\u201d`).join(', ')
+  return `Not sent \u2014 Stop discarded ${n} queued message${n === 1 ? '' : 's'}: ${list}`
+}
+
+/**
+ * #9069 — remember what a local Stop cleared, so the server's per-item
+ * `message_dequeued{interrupted}` (which carries no text) can still name it.
+ * Called by each client's `sendInterrupt` alongside the optimistic clear. A
+ * fresh Stop REPLACES the stash: entries an earlier Stop left unconfirmed are
+ * stale and must not be attributed to this one.
+ */
+export function stashClearedQueue(
+  _stash: QueuedSessionMessage[] | undefined,
+  cleared: QueuedSessionMessage[],
+): QueuedSessionMessage[] {
+  return cleared.slice(-INTERRUPTED_STASH_MAX)
+}
+
+/**
+ * #9069 — build the discard-notice step for one `interrupted` dequeue. The text
+ * comes from the live queue (another client pressed Stop) or the local-clear
+ * stash (this client did). An existing notice is extended only while it is still
+ * the transcript tail (a later user/response message means a new Stop) and its
+ * last extension was at most COALESCE_MS ago (the window slides, so one Stop's
+ * slow burst stays one notice).
+ */
+function buildDiscardNotice(clientMessageId: string | undefined) {
+  return (state: DiscardNoticeState, now: number): DiscardNoticePatch | null => {
+    // A dequeue with no id (FIFO head) is only meaningful against the live
+    // queue; the stash is keyed by id and must never be consumed positionally.
+    const live =
+      clientMessageId === undefined
+        ? state.queuedMessages[0]
+        : state.queuedMessages.find((m) => m.clientMessageId === clientMessageId)
+    const stashed =
+      live || clientMessageId === undefined
+        ? undefined
+        : state.interruptedQueued.find((m) => m.clientMessageId === clientMessageId)
+    const entry = live ?? stashed
+    const stash = stashed ? state.interruptedQueued.filter((m) => m !== stashed) : state.interruptedQueued
+    const item = { id: clientMessageId, preview: entry ? previewQueuedText(entry.text) : '(text unavailable)' }
+
+    let idx = -1
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      if (isDiscardNotice(state.messages[i]!)) {
+        idx = i
+        break
+      }
+    }
+    const existing = idx === -1 ? undefined : state.messages[idx]
+    // Only notices (and the Stop's own turn-outcome chip) may follow it.
+    const atTail =
+      idx !== -1 &&
+      state.messages.slice(idx + 1).every((m) => isDiscardNotice(m) || (m.type === 'system' && m.turnOutcome !== undefined))
+    const extend =
+      existing !== undefined &&
+      atTail &&
+      now - (existing.discardedLastAt ?? existing.timestamp) <= DISCARD_NOTICE_COALESCE_MS
+    const prior = extend ? (existing.discardedFollowUps ?? []) : []
+    // A repeated frame for an id already listed must not add a second row.
+    if (extend && item.id !== undefined && prior.some((p) => p.id === item.id)) return null
+    const items = [...prior, item]
+    const notice: ChatMessage = {
+      id: extend ? existing.id : `${QUEUE_DISCARD_NOTICE_ID_PREFIX}${now}`,
+      type: 'system',
+      content: buildDiscardNoticeContent(items),
+      timestamp: extend ? existing.timestamp : now,
+      discardedFollowUps: items,
+      discardedLastAt: now,
+    }
+    const messages = extend
+      ? [...state.messages.slice(0, idx), notice, ...state.messages.slice(idx + 1)]
+      : [...state.messages, notice]
+    return { messages, interruptedQueued: stash }
+  }
 }
 
 /**
@@ -323,6 +444,8 @@ export function handleMessageDequeued(
   const queueLength = optionalNumber(msg, 'queueLength')
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
+    // #9069 — only an interrupt (Stop) means "discarded, not sent".
+    ...(msg.reason === 'interrupted' ? { discardNotice: buildDiscardNotice(clientMessageId) } : {}),
     // #5950 — after removing the dequeued entry, reconcile against the server's
     // authoritative queueLength so any leftover orphan (from a dropped earlier
     // dequeue) is trimmed too. Referential no-op when already in sync.

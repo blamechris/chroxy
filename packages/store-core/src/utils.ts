@@ -137,6 +137,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     // #5937: empty outgoing-message queue. Never null so renderers' .length/.map
     // are guard-free; populated by message_queued / optimistic enqueue.
     queuedMessages: [],
+    interruptedQueued: [],
   };
 }
 
@@ -170,12 +171,14 @@ export function createEmptyBaseSessionState(): BaseSessionState {
  * the store write entirely and avoid churning referential equality.
  */
 export function clearTransientSessionState(
-  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>,
-): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>> {
-  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>> = {}
+  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests' | 'interruptedQueued'>,
+): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests' | 'interruptedQueued'>> {
+  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests' | 'interruptedQueued'>> = {}
   // The original client owns this consent lifetime; disconnected frames cannot confirm closure.
   if (ss.devPreviews?.length) patch.devPreviews = []
   if (ss.devPreviewRequests?.length) patch.devPreviewRequests = []
+  // #9069: a dropped socket means the server's interrupted dequeues for a local Stop may never come.
+  if (ss.interruptedQueued?.length) patch.interruptedQueued = []
   if (ss.providerRuntimeInfo) patch.providerRuntimeInfo = null
   if (ss.streamingMessageId) patch.streamingMessageId = null
   if (ss.isPlanPending) {
@@ -231,6 +234,7 @@ export const TRANSIENT_SESSION_SWEEP_FIELDS = [
   'inactivityWarning',
   'sessionRole',
   'primaryClientId',
+  'interruptedQueued',
 ] as const satisfies readonly (keyof BaseSessionState)[]
 
 /**

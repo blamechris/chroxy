@@ -233,6 +233,9 @@ export interface DispatchSessionBase {
   // optimistic turn when its clientMessageId matches this owner. Both clients'
   // real `SessionState` carry it (BaseSessionState).
   pendingClientMessageId?: string | null
+  // `interruptedQueued` — #9069: follow-ups a local Stop cleared, read+rewritten
+  // by message_dequeued{interrupted} when it writes the "Not sent" notice.
+  interruptedQueued?: QueuedSessionMessage[]
   conversationId?: string | null
   sessionRules?: PermissionRule[]
   // #6771: durable per-project rules ("always allow / deny") applied to this
@@ -1748,6 +1751,21 @@ function dispatchQueuedMessages<S extends DispatchSessionBase>(
           messages: ss.messages,
           pendingClientMessageId: ss.pendingClientMessageId ?? null,
         })
+        // #9069 — a Stop's per-item dequeue extends one coalesced "Not sent" notice.
+        // Read the queue BEFORE applyTo removed the entry (ss is the pre-update state).
+        const discard = builder.discardNotice?.(
+          {
+            queuedMessages: ss.queuedMessages ?? [],
+            interruptedQueued: ss.interruptedQueued ?? [],
+            messages: ss.messages,
+          },
+          Date.now(),
+        )
+        if (discard) {
+          ;(patch as { messages?: ChatMessage[] }).messages = discard.messages
+          ;(patch as { interruptedQueued?: QueuedSessionMessage[] }).interruptedQueued =
+            discard.interruptedQueued
+        }
         if (turnPatch) {
           if ('streamingMessageId' in turnPatch) {
             ;(patch as { streamingMessageId?: string | null }).streamingMessageId =

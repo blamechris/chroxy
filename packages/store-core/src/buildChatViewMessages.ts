@@ -50,6 +50,7 @@ import {
 import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 import type { ChatMessage, MessageAttachment } from './types'
 import { isTurnOutcomeMarker } from './turn-outcome-marker'
+import { isDiscardNotice } from './handlers/outgoing-queue'
 
 /**
  * Flattened chat-view row.
@@ -280,7 +281,8 @@ export function buildChatViewMessages(
     // #7326: a turn-outcome marker is the one `system` row that belongs in the
     // chat flow -- "this reply was cut off" means nothing on a separate tab,
     // away from the turn it describes.
-    if (m.type === 'system') return isTurnOutcomeMarker(m)
+    // #9069: so is the "Not sent" notice a Stop leaves where the queued bubbles were.
+    if (m.type === 'system') return isTurnOutcomeMarker(m) || isDiscardNotice(m)
     if (hideToolAndThinking && isHiddenInCompactMode(m.type)) return false
     // #8271: a `stream_start` opens an empty response slot; a turn that ends with
     // no text (first-output stall, AUTH_REQUIRED teardown) never fills it, and the
@@ -337,7 +339,7 @@ export function buildChatViewMessages(
   // #7326: the tail is the last REAL row. A turn-outcome marker trails every
   // truncated / refused / stopped turn, and counting it would move the tail off
   // a final tool run, collapsing the group #4305/#4309 keep expanded.
-  const markerIds = new Set(visibleMessages.filter(isTurnOutcomeMarker).map((m) => m.id))
+  const markerIds = new Set(visibleMessages.filter((m) => isTurnOutcomeMarker(m) || isDiscardNotice(m)).map((m) => m.id))
   let chatTailMessageId: string | null = null
   for (let i = chatMessages.length - 1; i >= 0; i--) {
     if (!markerIds.has(chatMessages[i]!.id)) {

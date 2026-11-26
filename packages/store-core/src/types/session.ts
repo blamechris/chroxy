@@ -704,4 +704,10 @@ export interface BaseSessionState {
    * until a server→client queue snapshot lands (tracked in #5937 / #5935).
    */
   queuedMessages: QueuedSessionMessage[];
+  /**
+   * #9069 — follow-ups this client's own Stop cleared locally, kept until the
+   * server's `message_dequeued{interrupted}` names them in the "Not sent"
+   * notice (the frame carries no text). Absent/empty otherwise.
+   */
+  interruptedQueued?: QueuedSessionMessage[];
 }
