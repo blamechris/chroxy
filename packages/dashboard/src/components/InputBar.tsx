@@ -1525,6 +1525,15 @@ export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendSta
               data-testid="interrupt-button"
               className="btn-interrupt"
               onClick={onInterrupt}
+              // #9271: browsers fire `click` on EVERY Enter keydown of a focused
+              // <button>, auto-repeats included (Space activates once, on keyup).
+              // Swallow the repeats so a held key sends one interrupt; a fresh
+              // press and a mouse click are untouched.
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && !isFreshKeyPress(e)) {
+                  e.preventDefault()
+                }
+              }}
               type="button"
               aria-label="Stop generation"
             >
