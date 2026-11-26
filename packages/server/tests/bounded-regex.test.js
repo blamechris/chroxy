@@ -110,24 +110,23 @@ describe('bounded regex matching', () => {
     } finally { m.close() }
   })
 
-  it('starts the match deadline once the worker has attached its handler, not when the thread comes online', async () => {
-    // The fixture is online at once but takes ~300 ms to load; the deadline is 100 ms.
+  it('starts the match deadline once the worker has attached its handler, not when the thread comes online', async (t) => {
+    // The fixture is online at once but takes ~600 ms to load; the deadline is 250 ms.
     // The match can only succeed if the deadline did not run while the module loaded.
-    const m = createBoundedRegexMatcher({ timeoutMs: 100, workerUrl: SLOW_START_WORKER })
-    try {
-      assert.equal(await m.test('^fine$', 'fine'), true, `a slow-loading worker is not charged for its load: ${JSON.stringify(m.stats())}`)
-      assert.equal(m.stats().timeouts, 0)
-    } finally { m.close() }
+    const m = createBoundedRegexMatcher({ timeoutMs: 250, workerUrl: SLOW_START_WORKER })
+    t.after(() => m.close())
+    assert.equal(await m.test('^fine$', 'fine'), true, `a slow-loading worker is not charged for its load: ${JSON.stringify(m.stats())}`)
+    assert.equal(m.stats().timeouts, 0)
   })
 
-  it('a worker that never becomes ready gives up at the startup timeout and counts as no match', { timeout: 8000 }, async () => {
+  it('a worker that never becomes ready gives up at the startup timeout and counts as no match', { timeout: 8000 }, async (t) => {
     const m = createBoundedRegexMatcher({ timeoutMs: 10_000, workerUrl: NEVER_READY_WORKER })
+    t.after(() => m.close())
     const started = Date.now()
-    try {
-      assert.equal(await m.test('^fine$', 'fine'), false)
-      const took = Date.now() - started
-      assert.ok(took < 6000, `gave up after ${took}ms`)
-    } finally { m.close() }
+    assert.equal(await m.test('^fine$', 'fine'), false)
+    const took = Date.now() - started
+    assert.ok(took >= 1500, `gave up after only ${took}ms: the startup fallback did not end it`)
+    assert.ok(took < 6000, `gave up after ${took}ms`)
   })
 
   it('reports a run of timeouts once per interval, not once per timeout', async () => {
