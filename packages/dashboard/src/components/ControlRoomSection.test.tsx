@@ -798,6 +798,30 @@ describe('ControlRoomSection control actions (#5272)', () => {
     expect(onInterruptSession).toHaveBeenCalledTimes(1)
     expect(onInterruptSession).toHaveBeenCalledWith('s-chroxy')
   })
+
+  // #9271 — a held Enter on a focused button clicks once per auto-repeat in
+  // browsers; the helper swallows repeats. jsdom pins the guard, not the click.
+  it('a repeated Enter on the "Interrupt turn" button is default-prevented and does not interrupt (#9271)', () => {
+    const onInterruptSession = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={[makeSession('s-chroxy', '/Users/me/Projects/chroxy')]}
+        activity={buildActivity('s-chroxy', [activityEntry('a1', { status: 'running' })])}
+        onInterruptSession={onInterruptSession}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+    const btn = screen.getByTestId('cr-interrupt-chroxy')
+    expect(fireEvent.keyDown(btn, { key: 'Enter', repeat: true })).toBe(false)
+    expect(fireEvent.keyDown(btn, { key: 'Enter', repeat: false })).toBe(true)
+    expect(onInterruptSession).not.toHaveBeenCalled()
+    fireEvent.click(btn)
+    expect(onInterruptSession).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('ControlRoomSection investigate action (#5202 / #5608)', () => {

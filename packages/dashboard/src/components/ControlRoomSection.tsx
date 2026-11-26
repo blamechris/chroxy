@@ -38,6 +38,7 @@ import type { ActivityState, SessionInfo } from '@chroxy/store-core'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import { ActivityTree } from './ActivityTree'
 import { writeText } from '../utils/clipboard'
+import { suppressRepeatedActivation } from '../utils/keyboard'
 
 // Verdict → semantic accent. The three buckets map onto the dashboard's
 // ok/warn/bad theme accents (green/amber/red). A single named map keeps the tag
@@ -784,6 +785,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
                     className="cr-interrupt-btn"
                     data-testid={`cr-interrupt-${repo.name}`}
                     onClick={() => onInterruptSession(sessionId)}
+                    onKeyDown={suppressRepeatedActivation}
                     title="Interrupt the current turn in this session"
                   >
                     Interrupt turn
