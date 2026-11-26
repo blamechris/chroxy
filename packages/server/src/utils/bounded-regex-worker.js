@@ -23,3 +23,7 @@ parentPort.on('message', ({ id, source, text }) => {
   const re = compile(source)
   parentPort.postMessage({ id, matched: re ? re.test(text) : false })
 })
+
+// Tell the owner the handler above is attached. The thread is 'online' before
+// this module has loaded, and a match deadline must not include that load.
+parentPort.postMessage({ ready: true })

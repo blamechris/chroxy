@@ -4,6 +4,9 @@ import assert from 'node:assert/strict'
 import { createBoundedRegexMatcher, DEFAULT_TIMEOUT_MS, DEFAULT_MAX_INPUT } from '../src/utils/bounded-regex.js'
 import { shouldSkipEvaluatorAsync, _resetSkipPatternCache } from '../src/prompt-evaluator.js'
 
+const SLOW_START_WORKER = new URL('./fixtures/bounded-regex-slow-start-worker.mjs', import.meta.url)
+const NEVER_READY_WORKER = new URL('./fixtures/bounded-regex-never-ready-worker.mjs', import.meta.url)
+
 // The reviewer's corpus: each of these ran for seconds on the event loop.
 const CORPUS = [
   { source: '.*a.*a.*b', text: 'a'.repeat(250) },
@@ -97,13 +100,33 @@ describe('bounded regex matching', () => {
       assert.ok(m.stats().timeouts <= 2, 'and only two ran to their deadline')
       // Another caller is not starved by the first, and everything drains.
       const other = await m.test('^fine$', 'fine', 'polite')
-      assert.equal(other, true)
+      assert.equal(other, true, `a harmless match from another caller after the greedy ones timed out: ${JSON.stringify(m.stats())}`)
       assert.equal(m.stats().queued, 0)
       // The overall bound: three keys fill it, a fourth is refused while they wait.
       const jobs = ['a', 'b', 'c'].map((k) => m.test(CORPUS[0].source, CORPUS[0].text, k))
       const fourth = await m.test('^fine$', 'fine', 'd')
       assert.equal(fourth, false, 'refused: the overall queue is full')
       await Promise.all(jobs)
+    } finally { m.close() }
+  })
+
+  it('starts the match deadline once the worker has attached its handler, not when the thread comes online', async () => {
+    // The fixture is online at once but takes ~300 ms to load; the deadline is 100 ms.
+    // The match can only succeed if the deadline did not run while the module loaded.
+    const m = createBoundedRegexMatcher({ timeoutMs: 100, workerUrl: SLOW_START_WORKER })
+    try {
+      assert.equal(await m.test('^fine$', 'fine'), true, `a slow-loading worker is not charged for its load: ${JSON.stringify(m.stats())}`)
+      assert.equal(m.stats().timeouts, 0)
+    } finally { m.close() }
+  })
+
+  it('a worker that never becomes ready gives up at the startup timeout and counts as no match', { timeout: 8000 }, async () => {
+    const m = createBoundedRegexMatcher({ timeoutMs: 10_000, workerUrl: NEVER_READY_WORKER })
+    const started = Date.now()
+    try {
+      assert.equal(await m.test('^fine$', 'fine'), false)
+      const took = Date.now() - started
+      assert.ok(took < 6000, `gave up after ${took}ms`)
     } finally { m.close() }
   })
 

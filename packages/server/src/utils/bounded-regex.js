@@ -46,7 +46,7 @@ export function createBoundedRegexMatcher({
   workerUrl = new URL('./bounded-regex-worker.js', import.meta.url),
 } = {}) {
   let worker = null
-  let online = null // Promise<boolean> for the current worker
+  let ready = null // Promise<boolean> for the current worker: true once it can answer
   let seq = 0
   let chain = Promise.resolve()
   let timeouts = 0
@@ -61,27 +61,36 @@ export function createBoundedRegexMatcher({
     // Referenced while a match is pending (so an awaiting caller keeps the loop
     // alive), unreferenced when idle (see finish).
     worker = w
-    online = new Promise((resolve) => {
+    // 'online' only means the thread started running JS, possibly before its
+    // module has attached the message handler, so wait for the worker's own
+    // ready message. A job posted earlier would sit queued while its deadline ran.
+    ready = new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), STARTUP_TIMEOUT_MS)
-      w.once('online', () => { clearTimeout(timer); resolve(true) })
+      const onReady = (m) => {
+        if (m?.ready !== true) return
+        w.off('message', onReady)
+        clearTimeout(timer)
+        resolve(true)
+      }
+      w.on('message', onReady)
       w.once('error', () => { clearTimeout(timer); resolve(false) })
       w.once('exit', () => { clearTimeout(timer); resolve(false) })
     })
-    const forget = () => { if (worker === w) { worker = null; online = null } }
+    const forget = () => { if (worker === w) { worker = null; ready = null } }
     w.on('error', forget)
     w.on('exit', forget)
     return w
   }
 
   function drop(w) {
-    if (worker === w) { worker = null; online = null }
+    if (worker === w) { worker = null; ready = null }
     w.terminate().catch(() => {})
   }
 
   async function run(source, text) {
     const w = worker || spawn()
-    // The deadline is for the MATCH: it starts once the worker is up.
-    if (!(await online)) { drop(w); return false }
+    // The deadline is for the MATCH: it starts once the worker can answer.
+    if (!(await ready)) { drop(w); return false }
     return new Promise((resolve) => {
       const id = ++seq
       let settled = false
