@@ -400,18 +400,78 @@ describe('SidebarTokenView (#4303 v0)', () => {
   })
 
   describe('untracked headline totals (#8255)', () => {
-    it('aggregateUsage reports trackedSessions and allUntracked', () => {
+    it('aggregateUsage reports trackedSessions and noMeasuredUsage', () => {
       const tuiOnly = aggregateUsage([makeSession('tui', 'claude-tui', makeUsage(0, 0))])
       expect(tuiOnly.trackedSessions).toBe(0)
-      expect(tuiOnly.allUntracked).toBe(true)
+      expect(tuiOnly.noMeasuredUsage).toBe(true)
       const mixed = aggregateUsage([
         makeSession('tui', 'claude-tui', makeUsage(0, 0)),
         makeSession('sdk', 'claude-sdk', makeUsage(0, 0)),
       ])
       expect(mixed.trackedSessions).toBe(1)
-      expect(mixed.allUntracked).toBe(false)
+      expect(mixed.noMeasuredUsage).toBe(false)
       // No sessions at all is "nothing yet", not "untracked".
-      expect(aggregateUsage([]).allUntracked).toBe(false)
+      expect(aggregateUsage([]).noMeasuredUsage).toBe(false)
+    })
+
+    // #8944: a fresh tracked session (turnsBilled 0) is a zero template, not a
+    // measurement — beside a TUI session it must not read as "the TUI used 0".
+    const noTurns = (): CumulativeUsage => ({ ...makeUsage(0, 0), turnsBilled: 0 })
+
+    it('a TUI session plus a turn-less tracked session is not a measured zero', () => {
+      const sessions = [
+        makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+        makeSession('fresh', 'claude-sdk', noTurns()),
+      ]
+      const agg = aggregateUsage(sessions)
+      expect(agg.trackedSessions).toBe(1)
+      expect(agg.measuredSessions).toBe(0)
+      expect(agg.noMeasuredUsage).toBe(true)
+      render(<SidebarTokenView sessions={sessions} />)
+      const today = screen.getByTestId('sidebar-token-view-today-total')
+      expect(today).toHaveTextContent('—')
+      expect(today.textContent).not.toMatch(/0 tokens/)
+      expect(screen.getByTestId('sidebar-token-view-io-total').textContent).not.toMatch(/0/)
+      expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
+        /not measured yet/i,
+      )
+      expect(tokenViewCollapsedMetric(sessions)).toBe('not measured')
+    })
+
+    it('a lone user-shell session reads as tracked; beside an unbilled TUI it reads "—"', () => {
+      const lone = [makeSession('sh', 'user-shell', noTurns())]
+      render(<SidebarTokenView sessions={lone} />)
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('0 tokens')
+      expect(screen.queryByTestId('sidebar-token-view-untracked-note')).toBeNull()
+      cleanup()
+      render(
+        <SidebarTokenView
+          sessions={[
+            makeSession('sh', 'user-shell', noTurns()),
+            makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+          ]}
+        />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('—')
+      expect(screen.getByTestId('sidebar-token-view-untracked-note')).toHaveTextContent(
+        /not measured yet/i,
+      )
+    })
+
+    it('a billed tracked session beside a TUI session still reads its sum', () => {
+      const agg = aggregateUsage([
+        makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+        makeSession('fresh', 'claude-sdk', noTurns()),
+        makeSession('busy', 'claude-sdk', makeUsage(1000, 500)),
+      ])
+      expect(agg.measuredSessions).toBe(1)
+      expect(agg.noMeasuredUsage).toBe(false)
+    })
+
+    it('a turn-less tracked session with no untracked provider still reads 0', () => {
+      render(<SidebarTokenView sessions={[makeSession('fresh', 'claude-sdk', noTurns())]} />)
+      expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('0 tokens')
+      expect(screen.queryByTestId('sidebar-token-view-untracked-note')).toBeNull()
     })
 
     it('all-TUI workspace reads "not tracked", never 0', () => {
@@ -487,7 +547,7 @@ describe('SidebarTokenView (#4303 v0)', () => {
       const popover = screen.getByTestId(
         'sidebar-token-view-provider-claude-tui-untracked-popover',
       )
-      expect(popover.textContent ?? '').toContain('claude TUI')
+      expect(popover.textContent ?? '').toContain('Claude Code (TUI)')
     })
 
     // #4546: the Escape focus-restore wiring lives on the shared

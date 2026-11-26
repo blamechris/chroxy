@@ -24,12 +24,10 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { BillingClass, CumulativeUsage, SessionInfo } from '@chroxy/store-core'
 import { formatCostBadge, formatTokens, getProviderLabel } from '@chroxy/store-core'
 import type { MonthlyBudgetState } from '../store/types'
+import { providerReportsUsage } from './provider-usage-roster'
 
-// Subscription/PTY providers that never emit token usage today (decision #1).
-// claude-tui is the only one in this set right now; if upstream adds usage
-// exposure we drop it from here. claude-cli DOES emit usage even on
-// subscription via stream-json's `result.usage`, so it is NOT in this set.
-const UNTRACKED_PROVIDERS = new Set(['claude-tui'])
+// Which providers report token usage lives in provider-usage-roster.ts (#8944),
+// where a test compares it with the server's registry in both directions.
 
 // #5630/#5629: per-billing-class cost-row copy + tooltip. The label/value
 // rendering is class-specific:
@@ -124,11 +122,21 @@ export interface AggregateTotals {
   /** Sessions whose provider reports usage (feeds `totals`). */
   trackedSessions: number
   /**
-   * #8255: true when sessions exist but NONE reported usage — the headline
-   * totals are then "not tracked", not a measured 0. False for an empty
-   * workspace ("nothing yet") and for a measured zero on a tracked provider.
+   * #8944: tracked sessions that have billed at least one turn. Only these
+   * contribute a MEASURED figure; a tracked session with `turnsBilled === 0`
+   * has not measured anything yet (the server snapshot is a zero template).
    */
-  allUntracked: boolean
+  measuredSessions: number
+  /** Distinct untracked provider names present, sorted (drives the note copy). */
+  untrackedProviders: string[]
+  /**
+   * #8255 / #8944: true when an untracked session exists and nothing measured
+   * anything — the headline totals are then "not tracked", not a measured 0.
+   * False for an empty workspace ("nothing yet"), for a workspace with no
+   * untracked provider (a fresh tracked session honestly reads 0), and as soon
+   * as any tracked session has billed a turn.
+   */
+  noMeasuredUsage: boolean
 }
 
 const EMPTY_USAGE: CumulativeUsage = {
@@ -191,12 +199,17 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
   let totalSessions = 0
   let hasUntracked = false
   let trackedSessions = 0
+  let measuredSessions = 0
+  const untrackedProviders = new Set<string>()
 
   for (const session of sessions) {
     totalSessions += 1
     const provider = session.provider ?? 'unknown'
-    const untracked = UNTRACKED_PROVIDERS.has(provider)
-    if (untracked) hasUntracked = true
+    const untracked = !providerReportsUsage(provider)
+    if (untracked) {
+      hasUntracked = true
+      untrackedProviders.add(provider)
+    }
     const billingClass = deriveBillingClass(session)
 
     const usage = session.cumulativeUsage ?? EMPTY_USAGE
@@ -230,6 +243,9 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     // pull the overall total toward zero.
     if (!untracked) {
       trackedSessions += 1
+      // #8944: a tracked session that has billed no turn is a zero template,
+      // not a measurement.
+      if (usage.turnsBilled > 0) measuredSessions += 1
       crossTotal = addUsage(crossTotal, usage)
     }
   }
@@ -255,7 +271,9 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     totalSessions,
     hasUntracked,
     trackedSessions,
-    allUntracked: totalSessions > 0 && trackedSessions === 0,
+    measuredSessions,
+    untrackedProviders: Array.from(untrackedProviders).sort(),
+    noMeasuredUsage: hasUntracked && measuredSessions === 0,
   }
 }
 
@@ -417,14 +435,26 @@ function InfoDisclosure({
 // per-billing-class BILLING_CLASS_TOOLTIP map above (the api-key tooltip
 // carries the same visible-vs-billed-tokens explanation).
 
-const TUI_UNTRACKED_EXPLANATION =
-  'Token count not exposed by claude TUI (PTY-only interface)'
+// #8944: named from the row's registry label, never a string typed per provider.
+function untrackedExplanation(label: string): string {
+  return `Token count not exposed by ${label}`
+}
 
-// #8255: visible (not tooltip-only) copy under the headline totals.
-const ALL_UNTRACKED_NOTE =
-  'Not tracked: the Claude Code (TUI) provider does not report tokens.'
-const MIXED_UNTRACKED_NOTE =
-  'Claude Code (TUI) sessions are excluded: that provider does not report tokens.'
+// #8255 / #8944: visible (not tooltip-only) copy under the headline totals.
+// The provider names come from the shared provider registry labels, never a
+// hardcoded string.
+export function untrackedNote(agg: AggregateTotals): string {
+  const labels = agg.untrackedProviders.map(getProviderLabel).join(', ')
+  const many = agg.untrackedProviders.length > 1
+  const verb = many ? 'those providers do' : 'that provider does'
+  if (agg.trackedSessions === 0) {
+    return `Not tracked: ${labels} ${many ? 'do' : 'does'} not report tokens.`
+  }
+  if (agg.noMeasuredUsage) {
+    return `Not measured yet: ${labels} sessions are excluded (${verb} not report tokens) and no other session has billed a turn.`
+  }
+  return `${labels} sessions are excluded: ${verb} not report tokens.`
+}
 
 export interface SidebarTokenViewProps {
   /** All known sessions across active + resumable + background. */
@@ -491,7 +521,7 @@ export function SidebarTokenView({
   // always visible without scrolling.
   const sessionRows = useMemo(() => {
     return sessions
-      .filter((s) => !UNTRACKED_PROVIDERS.has(s.provider ?? 'unknown'))
+      .filter((s) => providerReportsUsage(s.provider ?? 'unknown'))
       .map((s) => {
         const usage = s.cumulativeUsage ?? EMPTY_USAGE
         return {
@@ -519,7 +549,7 @@ export function SidebarTokenView({
             className="sidebar-token-view-value"
             data-testid="sidebar-token-view-today-total"
           >
-            {agg.allUntracked ? '—' : `${formatTokens(totalTokens)} tokens`}
+            {agg.noMeasuredUsage ? '—' : `${formatTokens(totalTokens)} tokens`}
           </span>
         </div>
         <div className="sidebar-token-view-aggregate-row">
@@ -528,7 +558,7 @@ export function SidebarTokenView({
             className="sidebar-token-view-value-secondary"
             data-testid="sidebar-token-view-io-total"
           >
-            {agg.allUntracked
+            {agg.noMeasuredUsage
               ? '—'
               : `${formatTokens(agg.totals.inputTokens)} · ${formatTokens(agg.totals.outputTokens)}`}
           </span>
@@ -538,7 +568,7 @@ export function SidebarTokenView({
             className="sidebar-token-view-untracked-note"
             data-testid="sidebar-token-view-untracked-note"
           >
-            {agg.allUntracked ? ALL_UNTRACKED_NOTE : MIXED_UNTRACKED_NOTE}
+            {untrackedNote(agg)}
           </div>
         )}
         {hitRatio !== null && (
@@ -707,7 +737,7 @@ export function SidebarTokenView({
                       triggerClassName="sidebar-token-view-provider-untracked"
                       testIdBase={`sidebar-token-view-provider-${row.provider}-untracked`}
                     >
-                      {TUI_UNTRACKED_EXPLANATION}
+                      {untrackedExplanation(label)}
                     </InfoDisclosure>
                   ) : (
                     <span className="sidebar-token-view-provider-tokens">
@@ -802,7 +832,7 @@ export function SidebarTokenView({
  */
 export function tokenViewCollapsedMetric(sessions: SessionInfo[]): string {
   const agg = aggregateUsage(sessions)
-  if (agg.allUntracked) return 'not tracked'
+  if (agg.noMeasuredUsage) return agg.trackedSessions === 0 ? 'not tracked' : 'not measured'
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
   return `${formatTokens(totalTokens)} tokens`
 }
