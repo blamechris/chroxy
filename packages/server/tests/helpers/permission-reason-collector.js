@@ -6,27 +6,26 @@
 // emitters, or that silently skips an emit shape it cannot read, is the "cannot check
 // treated as nothing to check" failure from docs/false-safety-guards.md.
 //
-// A resolve-path reason is the `reason` of every `emit('permission_resolved', {...})`
-// call. An emit call is any `<x>.emit(...)`, `<x>['emit'](...)`, a bare `emit(...)`, and
-// a call to a name bound from `.emit` (`const e = this.emit.bind(this)`, `const {emit} = this`).
-// The reason is resolved from the AST as:
-//   - a string literal                         reason: 'timeout'
-//   - a conditional of resolvable branches     userStop ? 'stopped' : 'cleared'
-//   - a local `const` of one of those          const reason = stop ? 'stopped' : 'aborted'
-//   - a parameter of the enclosing function    the argument at that position of EVERY call
-//     site of that function (by name); the function must not be referenced any other way
-//     (`setTimeout(f)`, `.then(f)`, `const g = f`), which would hide a path's reason.
-// A re-emit of a `.on('permission_resolved', (data) => ...)` listener's own payload is a
-// relay, not an emitter, and is not counted.
-// TRIPWIRE: every `'permission_resolved'` string literal in the file must be the event of an
-// emit call or a listener registration; any other occurrence (`const EVT = '...'`) is a problem,
-// and so is an emit whose event is not a string literal (it could be this one).
-// Anything unresolvable is reported, never ignored.
+// FAIL CLOSED. Rather than list bad shapes, the guard accepts a short list of understood ones:
+//   - a resolve-path reason is the `reason` of every `emit('permission_resolved', {...})` call
+//     (`x.emit`, `x['emit']`, a bare `emit`, a name bound from `.emit`/`.emit.bind`);
+//   - a reason resolves through a string literal, a conditional of resolvable branches, a `const`
+//     of those, or a parameter that is NEVER assigned (then the argument at that position of EVERY
+//     call site of the function, which must not be referenced any other way). A `let`, a `var`,
+//     a reassigned parameter or a destructured binding is a problem;
+//   - a re-emit is a RELAY only if its payload is the enclosing `permission_resolved` listener's
+//     own parameter and that listener leaves it untouched (`checkRelay`); any other non-literal
+//     payload is a problem, never skipped;
+//   - EVERY 'permission_resolved' string or expression-free template literal in a file must be
+//     classified (`classifyLiteral`): a listener registration, an emit's event, a comparison, a
+//     wire-frame `type:` value, or a roster array element. Anything else is a problem naming file:line.
 
 import { parse as acornParse } from 'acorn'
 
 const EVENT = 'permission_resolved'
 const LISTENER_METHODS = new Set(['on', 'once', 'off', 'addListener', 'prependListener', 'prependOnceListener', 'removeListener', 'removeAllListeners'])
+/** Calls that forward an event as [eventIdx, payloadIdx]: the byok agent-event wrapper (`emit` is [0, 1]). */
+const WRAPPER_EMITTERS = new Map([['_emitAgentEvent', [1, 2]]])
 
 export function parseSource(src, label) {
   try {
@@ -54,6 +53,9 @@ const isFunction = n => n.type === 'FunctionDeclaration' || n.type === 'Function
 const where = n => `line ${n.loc.start.line}`
 const propName = p => (p.key.type === 'Identifier' && !p.computed ? p.key.name : p.key.type === 'Literal' ? String(p.key.value) : null)
 const isStr = (n, v) => n?.type === 'Literal' && typeof n.value === 'string' && (v === undefined || n.value === v)
+/** The event name as a string literal OR an expression-free template literal. */
+const isEventLit = n => isStr(n, EVENT) || (n?.type === 'TemplateLiteral' && n.expressions.length === 0 && n.quasis[0].value.cooked === EVENT)
+const identsIn = n => { const out = []; walk(n, [], m => { if (m.type === 'Identifier') out.push(m.name) }); return out }
 
 /** Name of a member callee/property: `.x`, `['x']`, or null when it is computed non-literally. */
 function memberName(m) {
@@ -90,14 +92,17 @@ function isEmitCall(node, aliases) {
   return ['call', 'apply'].includes(memberName(c)) && c.object.type === 'MemberExpression' && memberName(c.object) === 'emit'
 }
 
-function isListenerCall(node) {
-  return node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
-    && LISTENER_METHODS.has(memberName(node.callee)) && isStr(node.arguments[0], EVENT)
+/** [eventIdx, payloadIdx] if `call` forwards an event, else null. */
+function relayShape(call, aliases) {
+  if (call.type !== 'CallExpression') return null
+  if (isEmitCall(call, aliases)) return [0, 1]
+  const c = call.callee
+  return WRAPPER_EMITTERS.get(c.type === 'Identifier' ? c.name : memberName(c)) ?? null
 }
 
-/** Is `ancestors` inside a function registered as a `permission_resolved` listener? */
-function insideListener(ancestors) {
-  return ancestors.some((a, i) => isFunction(a) && ancestors.slice(0, i).some(c => isListenerCall(c) && c.arguments.includes(a)))
+function isListenerCall(node) {
+  return node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+    && LISTENER_METHODS.has(memberName(node.callee)) && isEventLit(node.arguments[0])
 }
 
 function functionName(fn, parent) {
@@ -115,6 +120,92 @@ function topLevelStrings(ast) {
     for (const d of s.declarations) if (d.id.type === 'Identifier' && isStr(d.init)) m.set(d.id.name, d.init.value)
   }
   return m
+}
+
+/**
+ * The one relay predicate. `call` forwards the event with payload `call.arguments[payloadIdx]`.
+ * It is a RELAY (not an emitter of reasons of its own) only when that payload is a parameter of
+ * the nearest enclosing `permission_resolved` listener callback AND the listener leaves the
+ * parameter UNTOUCHED: it appears only as a relay payload, in a plain non-assignment member read
+ * (`d.requestId`), or in a test position (`if (d && ...)`). Assigning to it or to a member,
+ * `delete`, passing it to any other call, spreading it, or aliasing it are problems.
+ * @returns {{ok: boolean, problems: string[]}}  ok=false with no problems = not a relay at all.
+ */
+function checkRelay(call, ancestors, payloadIdx) {
+  const payload = call.arguments[payloadIdx]
+  if (payload?.type !== 'Identifier') return { ok: false, problems: [] }
+  let fn = null
+  for (let i = ancestors.length - 1; i >= 0 && !fn; i--) {
+    const a = ancestors[i]
+    if (isFunction(a) && ancestors.slice(0, i).some(c => isListenerCall(c) && c.arguments.includes(a))
+      && a.params.some(q => q.type === 'Identifier' && q.name === payload.name)) fn = a
+  }
+  if (!fn) return { ok: false, problems: [] }
+  const problems = []
+  walk(fn.body, [], (n, anc) => {
+    if (n.type !== 'Identifier' || n.name !== payload.name) return
+    const parent = anc[anc.length - 1]
+    if (!parent) return
+    const bad = why => problems.push(`${where(n)}: the relayed payload '${n.name}' is ${why}, so the reason it forwards is no longer the emitter's`)
+    if (parent.type === 'CallExpression' && parent.callee !== n) {
+      const k = parent.arguments.indexOf(n)
+      if (k >= 1 && isEventLit(parent.arguments[k - 1])) return // a relay payload
+      return bad('passed to another call')
+    }
+    if (parent.type === 'MemberExpression' && parent.object === n) {
+      let top = parent
+      let up = anc.length - 2
+      while (up >= 0 && anc[up].type === 'MemberExpression' && anc[up].object === top) { top = anc[up]; up-- }
+      const g = anc[up]
+      if (g && ((g.type === 'AssignmentExpression' && g.left === top) || g.type === 'UpdateExpression'
+        || (g.type === 'UnaryExpression' && g.operator === 'delete'))) bad('assigned to, updated or deleted through a member')
+      return // otherwise a plain member read
+    }
+    // A test position: `if (d && d.x)`, `!d`, `typeof d`.
+    let cur = n
+    let idx = anc.length - 1
+    while (idx >= 0 && ['LogicalExpression', 'UnaryExpression', 'BinaryExpression'].includes(anc[idx].type)
+      && !(anc[idx].type === 'UnaryExpression' && anc[idx].operator === 'delete')) { cur = anc[idx]; idx-- }
+    const holder = anc[idx]
+    if (holder && (holder.type === 'IfStatement' || holder.type === 'ConditionalExpression') && holder.test === cur) return
+    bad(`used as a ${parent.type}`)
+  })
+  return { ok: problems.length === 0, problems }
+}
+
+/**
+ * How one 'permission_resolved' literal is used, or null (unclassified).
+ *   listener    the event of `.on/.once/.off/...`
+ *   emit        the event of an emit call or the byok agent-event wrapper
+ *   comparison  an operand of ==, ===, !=, !==, or a `case` test
+ *   frame       the value of a `type:` property of an object literal (a wire frame)
+ *   roster      an element of an array literal (a list of event names; it cannot emit)
+ */
+function classifyLiteral(node, ancestors, aliases) {
+  const parent = ancestors[ancestors.length - 1]
+  if (!parent) return null
+  if (parent.type === 'CallExpression') {
+    const k = parent.arguments.indexOf(node)
+    if (k === 0 && isListenerCall(parent)) return 'listener'
+    const shape = relayShape(parent, aliases)
+    return shape && shape[0] === k ? 'emit' : null
+  }
+  if (parent.type === 'BinaryExpression' && ['==', '===', '!=', '!=='].includes(parent.operator)) return 'comparison'
+  if (parent.type === 'SwitchCase' && parent.test === node) return 'comparison'
+  if (parent.type === 'Property' && parent.value === node && !parent.computed && propName(parent) === 'type'
+    && ancestors[ancestors.length - 2]?.type === 'ObjectExpression') return 'frame'
+  if (parent.type === 'ArrayExpression') return 'roster'
+  return null
+}
+
+/** Every AssignmentExpression / UpdateExpression in `body` that targets the plain name `name`. */
+function assignmentsTo(body, name) {
+  const hits = []
+  walk(body, [], n => {
+    if (n.type === 'AssignmentExpression' && n.left.type !== 'MemberExpression' && identsIn(n.left).includes(name)) hits.push(n)
+    else if (n.type === 'UpdateExpression' && n.argument.type === 'Identifier' && n.argument.name === name) hits.push(n)
+  })
+  return hits
 }
 
 /**
@@ -169,6 +260,8 @@ function resolve(expr, ancestors, ast, aliases, seen = new Set()) {
     if (!isFunction(fn)) continue
     const idx = fn.params.findIndex(p => p.type === 'Identifier' && p.name === expr.name)
     if (idx >= 0) {
+      const reassigned = assignmentsTo(fn.body, expr.name)
+      if (reassigned.length) return { values: [], problems: reassigned.map(a => `${where(a)}: reason parameter '${expr.name}' is reassigned, so its call-site literals are not what is emitted`) }
       const name = functionName(fn, ancestors[i - 1])
       if (!name) return { values: [], problems: [`${where(expr)}: reason '${expr.name}' is a parameter of an anonymous function`] }
       const out = { values: [], problems: strayReferences(ast, name) }
@@ -187,13 +280,18 @@ function resolve(expr, ancestors, ast, aliases, seen = new Set()) {
       return out
     }
     const decls = []
+    const patterned = []
     walk(fn.body, [], (n, anc) => {
-      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === expr.name) {
-        if (!anc.some(a => isFunction(a))) decls.push({ n, anc: [fn, ...anc] })
-      }
+      if (n.type !== 'VariableDeclarator' || anc.some(a => isFunction(a))) return
+      if (n.id.type === 'Identifier' && n.id.name === expr.name) decls.push({ n, anc: [fn, ...anc], kind: anc[anc.length - 1].kind })
+      else if (n.id.type !== 'Identifier' && identsIn(n.id).includes(expr.name)) patterned.push(n)
     })
+    if (patterned.length) return { values: [], problems: [`${where(patterned[0])}: '${expr.name}' is bound by a destructuring pattern this guard cannot follow`] }
     if (decls.length > 1) return { values: [], problems: [`${where(expr)}: '${expr.name}' is declared ${decls.length} times in one function`] }
     if (decls.length === 1) {
+      if (decls[0].kind !== 'const') return { values: [], problems: [`${where(decls[0].n)}: '${expr.name}' is a \`${decls[0].kind}\`; only a \`const\` reason can be resolved`] }
+      const reassigned = assignmentsTo(fn.body, expr.name)
+      if (reassigned.length) return { values: [], problems: reassigned.map(a => `${where(a)}: '${expr.name}' is assigned after its declaration`) }
       if (!decls[0].n.init) return { values: [], problems: [`${where(expr)}: '${expr.name}' has no initializer`] }
       return resolve(decls[0].n.init, decls[0].anc, ast, aliases, seen)
     }
@@ -201,14 +299,23 @@ function resolve(expr, ancestors, ast, aliases, seen = new Set()) {
   return { values: [], problems: [`${where(expr)}: reason '${expr.name}' is not bound to a literal in any enclosing function`] }
 }
 
-/** Can an object-literal spread carry a `reason`? Returns a problem string or null. */
-function spreadProblem(arg, ast) {
+/**
+ * Can a payload spread carry a `reason`? Returns a problem string or null.
+ * `passThrough` (wire frames only) additionally accepts a reason that is a plain
+ * `<param>.reason` read, and a spread of an enclosing function's own parameter.
+ */
+function spreadProblem(arg, ast, params = new Set(), passThrough = false, trusted = new Set()) {
+  const bad = `${where(arg)}: spread in a payload that this guard cannot show lacks a \`reason\` (it could override it)`
+  if (passThrough && arg.type === 'Identifier' && params.has(arg.name)) return null
+  if (arg.type === 'CallExpression' && arg.callee.type === 'Identifier' && trusted.has(arg.callee.name)) return null
   const objectsOf = e => {
     if (e.type === 'ObjectExpression') return [e]
     if (e.type === 'ConditionalExpression') { const a = objectsOf(e.consequent), b = objectsOf(e.alternate); return a && b ? [...a, ...b] : null }
+    if (e.type === 'LogicalExpression') return objectsOf(e.right)
     return null
   }
-  const checkObjects = objs => objs.every(o => o.properties.every(p => p.type === 'Property' && !p.computed && propName(p) !== 'reason'))
+  const reasonFree = o => o.properties.every(p => p.type === 'Property' && !p.computed && (propName(p) !== 'reason'
+    || (passThrough && frameReasonProblem(p.value, params) === null)))
   let objs = objectsOf(arg)
   if (!objs && arg.type === 'CallExpression' && arg.callee.type === 'Identifier') {
     const decl = ast.body.find(s => s.type === 'FunctionDeclaration' && s.id.name === arg.callee.name)
@@ -219,12 +326,20 @@ function spreadProblem(arg, ast) {
       if (returns.length > 0 && all.every(Boolean)) objs = all.flat()
     }
   }
-  if (objs && checkObjects(objs)) return null
-  return `${where(arg)}: spread in a payload that this guard cannot show lacks a \`reason\` (it could override it)`
+  return objs && objs.every(reasonFree) ? null : bad
 }
 
+/** A wire frame's `reason` value: a string literal or `<param>.reason`; else a problem string. */
+function frameReasonProblem(v, params) {
+  if (isStr(v)) return null
+  if (v.type === 'MemberExpression' && memberName(v) === 'reason' && v.object.type === 'Identifier' && params.has(v.object.name)) return null
+  return `${where(v)}: a wire frame's reason is a ${v.type}, not a string literal or a pass-through of a handler parameter's \`reason\``
+}
+
+const fnParams = ancestors => new Set(ancestors.filter(isFunction).flatMap(f => f.params.filter(q => q.type === 'Identifier').map(q => q.name)))
+
 /**
- * Every reason `permission_resolved` is emitted with in `src`.
+ * Every reason `permission_resolved` is emitted with in `src` (permission-manager.js).
  * @returns {{reasons: Set<string>, emits: number, problems: string[]}}
  */
 export function collectResolvedReasons(src, label) {
@@ -236,11 +351,9 @@ export function collectResolvedReasons(src, label) {
   let emits = 0
   let relays = 0
   walk(ast, [], (node, ancestors) => {
-    // Tripwire: every 'permission_resolved' literal is the event of an emit or a listener.
-    if (isStr(node, EVENT)) {
-      const parent = ancestors[ancestors.length - 1]
-      const claimed = parent?.type === 'CallExpression' && parent.arguments[0] === node && (isEmitCall(parent, aliases) || isListenerCall(parent))
-      if (!claimed) problems.push(`${where(node)}: '${EVENT}' literal is neither an emit's event nor a listener registration (an emit through it would be invisible)`)
+    if (isEventLit(node)) {
+      const kind = classifyLiteral(node, ancestors, aliases)
+      if (kind !== 'listener' && kind !== 'emit') problems.push(`${where(node)}: '${EVENT}' literal is neither an emit's event nor a listener registration (an emit through it would be invisible)`)
     }
     if (!isEmitCall(node, aliases)) return
     const callee = node.callee
@@ -249,13 +362,17 @@ export function collectResolvedReasons(src, label) {
       return
     }
     const ev = node.arguments[0]
-    const evName = isStr(ev) ? ev.value : ev?.type === 'Identifier' && consts.has(ev.name) ? consts.get(ev.name) : null
+    const evName = isEventLit(ev) ? EVENT : isStr(ev) ? ev.value : ev?.type === 'Identifier' && consts.has(ev.name) ? consts.get(ev.name) : null
     if (evName === null) { problems.push(`${where(node)}: emit whose event is not a string literal: it could be '${EVENT}'`); return }
     if (evName !== EVENT) return
     emits++
     const obj = node.arguments[1]
-    if (obj?.type === 'Identifier' && insideListener(ancestors) && ancestors.some(a => isFunction(a) && a.params.some(q => q.type === 'Identifier' && q.name === obj.name))) { relays++; return }
-    if (obj?.type !== 'ObjectExpression') { problems.push(`${where(node)}: payload is not an object literal`); return }
+    if (obj?.type !== 'ObjectExpression') {
+      const rel = checkRelay(node, ancestors, 1)
+      if (rel.ok) relays++
+      else problems.push(...(rel.problems.length ? rel.problems : [`${where(node)}: payload is neither an object literal nor the untouched parameter of a '${EVENT}' listener`]))
+      return
+    }
     for (const p of obj.properties) {
       if (p.type === 'SpreadElement') { const sp = spreadProblem(p.argument, ast); if (sp) problems.push(sp) }
       else if (p.computed && p.key.type !== 'Literal') problems.push(`${where(p)}: computed payload key could be \`reason\``)
@@ -270,46 +387,48 @@ export function collectResolvedReasons(src, label) {
 }
 
 /**
- * How one source file touches `permission_resolved`, for the all-of-src roster. Emit-like
- * calls (a callee named like `emit`, `_emitAgentEvent`, or an alias of `.emit`) carrying the
- * event as ANY argument must be a relay inside a `permission_resolved` listener; everything
- * else is classified: `listeners`, `relays`, `comparisons`, `frames` (an object literal with
- * `type: 'permission_resolved'`, whose literal `reason`s are returned), `other`.
- * @returns {{violations: string[], listeners: number, relays: number, comparisons: number, frames: number, frameReasons: string[], other: number}}
+ * How one source file uses the event, for the all-of-src roster. Every literal is classified
+ * (`classifyLiteral`); an unclassified one is a problem. An emit of the event outside
+ * permission-manager.js must be a valid relay (`checkRelay`), so a literal-object emit, even
+ * inside a listener, is a violation. A `roster` (array element) use is a problem unless `allowRoster`. A wire frame's `reason` must be a string literal (returned
+ * in `frameReasons`) or a pass-through of a handler parameter's `.reason`. `trustedSpreadFns`
+ * names imported helpers whose returns the caller has verified reason-free with `returnsReasonFreeObjects`.
+ * @returns {{problems: string[], counts: Record<string, number>, frameReasons: string[]}}
  */
-export function classifyResolvedUses(src, label) {
+export function classifyResolvedUses(src, label, { allowEmitters = false, allowRoster = false, trustedSpreadFns = new Set() } = {}) {
   const ast = parseSource(src, label)
   const aliases = emitAliases(ast)
-  const consts = topLevelStrings(ast)
-  const out = { violations: [], listeners: 0, relays: 0, comparisons: 0, frames: 0, frameReasons: [], other: 0 }
-  const isEv = a => isStr(a, EVENT) || (a?.type === 'Identifier' && consts.get(a.name) === EVENT)
-  const emitLike = n => {
-    if (n.type !== 'CallExpression') return false
-    if (isEmitCall(n, aliases)) return true
-    const c = n.callee
-    const name = c.type === 'Identifier' ? c.name : memberName(c)
-    return typeof name === 'string' && /emit/i.test(name)
-  }
+  const counts = { listener: 0, emit: 0, relay: 0, comparison: 0, frame: 0, roster: 0 }
+  const problems = []
+  const frameReasons = []
   walk(ast, [], (n, anc) => {
+    if (!isEventLit(n)) return
+    const kind = classifyLiteral(n, anc, aliases)
+    if (!kind) { problems.push(`${where(n)}: unclassified use of '${EVENT}' (not a listener, an emit, a comparison, a frame type or a roster element)`); return }
+    if (kind === 'roster' && !allowRoster) { problems.push(`${where(n)}: '${EVENT}' is an array element in a file not declared as an event-name roster (it could be an argument list, e.g. Reflect.apply(emit, ..., [event, ...]))`); return }
+    counts[kind]++
     const parent = anc[anc.length - 1]
-    if (n.type === 'CallExpression' && emitLike(n) && n.arguments.some(isEv)) {
-      if (insideListener(anc)) out.relays++
-      else out.violations.push(`${where(n)}: emits '${EVENT}' outside a '${EVENT}' listener`)
+    if (kind === 'emit' && !allowEmitters) {
+      const shape = relayShape(parent, aliases)
+      const rel = checkRelay(parent, anc.slice(0, -1), shape[1])
+      if (rel.ok) counts.relay++
+      else problems.push(...(rel.problems.length ? rel.problems : [`${where(parent)}: emits '${EVENT}' with a payload that is not the untouched parameter of a '${EVENT}' listener`]))
     }
-    if (isListenerCall(n)) out.listeners++
-    if (n.type === 'ObjectExpression') {
-      const t = n.properties.find(p => p.type === 'Property' && propName(p) === 'type' && isStr(p.value, EVENT))
-      if (t) {
-        out.frames++
-        for (const p of n.properties) if (p.type === 'Property' && propName(p) === 'reason' && isStr(p.value)) out.frameReasons.push(p.value.value)
+    if (kind === 'frame') {
+      const obj = anc[anc.length - 2]
+      const params = fnParams(anc)
+      for (const p of obj.properties) {
+        if (p.type === 'SpreadElement') { const sp = spreadProblem(p.argument, ast, params, true, trustedSpreadFns); if (sp) problems.push(sp) }
+        else if (p.computed && p.key.type !== 'Literal') problems.push(`${where(p)}: computed frame key could be \`reason\``)
+        else if (propName(p) === 'reason') {
+          const fp = frameReasonProblem(p.value, params)
+          if (fp) problems.push(fp)
+          else if (isStr(p.value)) frameReasons.push(p.value.value)
+        }
       }
     }
-    if (isStr(n, EVENT)) {
-      if (parent?.type === 'BinaryExpression' || parent?.type === 'SwitchCase') out.comparisons++
-      else if (!(parent?.type === 'CallExpression') && !(parent?.type === 'Property')) out.other++
-    }
   })
-  return out
+  return { problems, counts, frameReasons }
 }
 
 /**
@@ -318,7 +437,8 @@ export function classifyResolvedUses(src, label) {
  * name destructured from it) must be a direct argument of `permissionOutcomeForReason`, the
  * shared table's lookup, and there must be at least one such call. The data parameter itself
  * may only be read through a plain `.member` (or negated), never handed on, spread or indexed,
- * so no helper, lookup object, `in`, Map, regex or `switch` can see the reason.
+ * so no helper, lookup object, `in`, Map, regex or `switch` can see the reason. No binding of
+ * `permissionOutcomeForReason` other than the protocol import may exist at any scope.
  * Throws if the function (or its import from '@chroxy/protocol') is missing.
  * @returns {{problems: string[], lookups: number}}
  */
@@ -331,6 +451,19 @@ export function checkJournalReasonReads(src, label, fnName = 'permissionOutcomeF
     && s.specifiers.some(x => x.imported?.name === 'permissionOutcomeForReason' && x.local.name === 'permissionOutcomeForReason'))
   if (!imported) throw new Error(`REFUSE: ${label}: permissionOutcomeForReason is not imported from '@chroxy/protocol' -- the table lookup is not the shared one`)
   if (fn.params.length < 2 || fn.params[1].type !== 'Identifier') throw new Error(`REFUSE: ${label}: ${fnName}'s second parameter is not a plain identifier`)
+
+  const LOOKUP = 'permissionOutcomeForReason'
+  const problems = []
+  // N-1: a local binding of the lookup's name, at any scope, shadows the shared table's.
+  walk(ast, [], (n, anc) => {
+    const rebinds = (n.type === 'VariableDeclarator' && identsIn(n.id).includes(LOOKUP))
+      || ((n.type === 'FunctionDeclaration' || n.type === 'ClassDeclaration') && n.id?.name === LOOKUP)
+      || (isFunction(n) && n.params.some(q => identsIn(q).includes(LOOKUP)))
+      || (n.type === 'ImportSpecifier' && n.local.name === LOOKUP && !(n.imported.name === LOOKUP && anc[anc.length - 1].source.value === '@chroxy/protocol'))
+      || ((n.type === 'ImportDefaultSpecifier' || n.type === 'ImportNamespaceSpecifier') && n.local.name === LOOKUP)
+      || (n.type === 'AssignmentExpression' && n.left.type === 'Identifier' && n.left.name === LOOKUP)
+    if (rebinds) problems.push(`${where(n)}: rebinds ${LOOKUP}, which shadows the shared table's lookup`)
+  })
 
   const dataNames = new Set([fn.params[1].name])
   const reasonNames = new Set()
@@ -355,11 +488,10 @@ export function checkJournalReasonReads(src, label, fnName = 'permissionOutcomeF
     })
   }
 
-  const problems = []
   let lookups = 0
   if (reasonNames.has('<rest>')) problems.push(`${label}: a rest element destructured from the event hides its reason`)
   const isLookupArg = (n, parent) => parent?.type === 'CallExpression' && parent.callee.type === 'Identifier'
-    && parent.callee.name === 'permissionOutcomeForReason' && parent.arguments.includes(n)
+    && parent.callee.name === LOOKUP && parent.arguments.includes(n)
   walk(fn.body, [], (n, anc) => {
     const parent = anc[anc.length - 1]
     if (n.type === 'MemberExpression' && n.object.type === 'Identifier' && dataNames.has(n.object.name)) {
@@ -387,4 +519,27 @@ export function checkJournalReasonReads(src, label, fnName = 'permissionOutcomeF
   })
   if (lookups === 0) problems.push(`${label}: ${fnName} never passes the event's reason to permissionOutcomeForReason`)
   return { problems, lookups }
+}
+
+/**
+ * Is function `fnName` in `src` a function every `return` of which is an object literal (or a
+ * conditional of them) with no `reason` key and no spread/computed key? For helpers that are
+ * spread into a payload but live in another file.
+ * @returns {boolean}
+ */
+export function returnsReasonFreeObjects(src, label, fnName) {
+  const ast = parseSource(src, label)
+  const decl = ast.body.map(s => (s.type === 'ExportNamedDeclaration' && s.declaration ? s.declaration : s))
+    .find(s => s.type === 'FunctionDeclaration' && s.id.name === fnName)
+  if (!decl) throw new Error(`REFUSE: ${label}: no function ${fnName}`)
+  const objectsOf = e => {
+    if (e?.type === 'ObjectExpression') return [e]
+    if (e?.type === 'ConditionalExpression') { const a = objectsOf(e.consequent), b = objectsOf(e.alternate); return a && b ? [...a, ...b] : null }
+    return null
+  }
+  const returns = []
+  walk(decl.body, [], n => { if (n.type === 'ReturnStatement') returns.push(n.argument) })
+  const all = returns.map(objectsOf)
+  return returns.length > 0 && all.every(Boolean)
+    && all.flat().every(o => o.properties.every(p => p.type === 'Property' && !p.computed && propName(p) !== 'reason'))
 }
