@@ -5,6 +5,21 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { scanConversations, clearScanCache, groupConversationsByRepo } from '../src/conversation-scanner.js'
 
+const NOISE_STRINGS = [
+  '<task-notification>background task finished</task-notification>',
+  '<ci-monitor-event name="x">green</ci-monitor-event>',
+  '<system-reminder>be brief</system-reminder>',
+  '<command-name>/clear</command-name>',
+  '<command-message>clear</command-message>',
+  '<command-args>now</command-args>',
+  '<local-command-stdout>ok</local-command-stdout>',
+  '<local-command-stderr>oops</local-command-stderr>',
+  '<local-command-caveat>caveat</local-command-caveat>',
+  '<bash-input>ls</bash-input>',
+  '<bash-stdout>out</bash-stdout>',
+  '<bash-stderr>err</bash-stderr>',
+]
+
 describe('scanConversations', () => {
   let tempDir
 
@@ -417,6 +432,47 @@ describe('scanConversations', () => {
 
     const result = await scanConversations({ projectsDir: tempDir })
     assert.equal(result.length, 20)
+  })
+
+  describe('first-prompt preview ignores strings no person typed (#9363)', () => {
+    function strUser(content, extra = {}) {
+      return { type: 'user', cwd: '/tmp/project', timestamp: '2026-02-25T10:00:00.000Z', message: { content }, ...extra }
+    }
+
+    async function previewOf(...entries) {
+      makeProject('noise-project', { 'c.jsonl': jsonlLines(...entries) })
+      const result = await scanConversations({ projectsDir: tempDir })
+      return result[0].preview
+    }
+
+    for (const noise of NOISE_STRINGS) {
+      it(`hides ${noise.slice(0, 22)} and previews the next real prompt`, async () => {
+        assert.equal(await previewOf(strUser(noise), strUser('fix the login bug')), 'fix the login bug')
+      })
+    }
+
+    for (const flag of ['isMeta', 'isCompactSummary', 'isSidechain']) {
+      it(`hides a string entry flagged ${flag}`, async () => {
+        assert.equal(
+          await previewOf(strUser('plain looking text', { [flag]: true }), strUser('the real prompt')),
+          'the real prompt',
+        )
+      })
+    }
+
+    it('hides an empty string entry', async () => {
+      assert.equal(await previewOf(strUser('   '), strUser('the real prompt')), 'the real prompt')
+    })
+
+    it('previews a string prompt that only mentions a tag mid-text', async () => {
+      const text = 'why does <system-reminder> show up in my output?'
+      assert.equal(await previewOf(strUser(text)), text)
+    })
+
+    it('leaves array content unchanged, even when its text looks like a wrapper', async () => {
+      const text = '<system-reminder>typed in a block</system-reminder>'
+      assert.equal(await previewOf(userEntry(text)), text)
+    })
   })
 })
 

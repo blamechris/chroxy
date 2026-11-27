@@ -215,7 +215,7 @@ export function getJsonlMtime(filePath) {
  * task results, CI monitor events, injected reminders, local-command wrappers and
  * their output. Mirrors the runner's MACHINE_PROSE
  * (docs/reports/harness-evals/runner/trialkit/extract.py). The scanner and search
- * modules take any string as a preview and are deliberately left as they are.
+ * previews share it through `promptPreview`.
  */
 const MACHINE_PROSE_PREFIXES = [
   '<task-notification>',
@@ -246,6 +246,33 @@ export function isTypedPromptString(entry, content) {
   const text = content.trim()
   if (!text) return false
   return !MACHINE_PROSE_PREFIXES.some((p) => text.startsWith(p))
+}
+
+/**
+ * The first-prompt preview of one `user` entry, or null when it is not a typed
+ * prompt (#9363). The one rule behind the conversation list and search previews:
+ * string content must pass `isTypedPromptString`; array content is skipped when it
+ * carries a tool_result, otherwise its text blocks are joined with a newline.
+ * The result is cut to 200 characters.
+ *
+ * @param {object} entry - a parsed JSONL entry
+ * @returns {string|null}
+ */
+export function promptPreview(entry) {
+  if (!entry || entry.type !== 'user') return null
+  const content = entry.message?.content
+  if (typeof content === 'string') {
+    return isTypedPromptString(entry, content) ? content.slice(0, 200) : null
+  }
+  if (Array.isArray(content)) {
+    if (content.some((b) => b.type === 'tool_result')) return null
+    const text = content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+    return text ? text.slice(0, 200) : null
+  }
+  return null
 }
 
 /**

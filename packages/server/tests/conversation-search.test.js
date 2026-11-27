@@ -5,6 +5,21 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { searchConversations, extractSearchableText } from '../src/conversation-search.js'
 
+const NOISE_STRINGS = [
+  '<task-notification>background task finished</task-notification>',
+  '<ci-monitor-event name="x">green</ci-monitor-event>',
+  '<system-reminder>be brief</system-reminder>',
+  '<command-name>/clear</command-name>',
+  '<command-message>clear</command-message>',
+  '<command-args>now</command-args>',
+  '<local-command-stdout>ok</local-command-stdout>',
+  '<local-command-stderr>oops</local-command-stderr>',
+  '<local-command-caveat>caveat</local-command-caveat>',
+  '<bash-input>ls</bash-input>',
+  '<bash-stdout>out</bash-stdout>',
+  '<bash-stderr>err</bash-stderr>',
+]
+
 // Helper to create a fake JSONL conversation file
 function makeEntry(type, text, cwd) {
   const entry = { type }
@@ -60,6 +75,31 @@ describe('conversation-search', () => {
       const entry = { type: 'user', message: { content: [{ type: 'tool_result', content: 'secret' }] } }
       assert.equal(extractSearchableText(entry), '')
     })
+
+    describe('user strings no person typed (#9363)', () => {
+      for (const noise of NOISE_STRINGS) {
+        it(`does not index ${noise.slice(0, 22)}`, () => {
+          assert.equal(extractSearchableText({ type: 'user', message: { content: noise } }), '')
+        })
+      }
+
+      for (const flag of ['isMeta', 'isCompactSummary', 'isSidechain']) {
+        it(`does not index a string entry flagged ${flag}`, () => {
+          assert.equal(extractSearchableText({ type: 'user', [flag]: true, message: { content: 'plain text' } }), '')
+        })
+      }
+
+      it('still indexes a string prompt that only mentions a tag mid-text', () => {
+        const text = 'why does <system-reminder> show up?'
+        assert.equal(extractSearchableText({ type: 'user', message: { content: text } }), text)
+      })
+
+      it('leaves array user content and assistant string content as before', () => {
+        const wrapped = '<system-reminder>x</system-reminder>'
+        assert.equal(extractSearchableText({ type: 'user', message: { content: [{ type: 'text', text: wrapped }] } }), wrapped)
+        assert.equal(extractSearchableText({ type: 'assistant', message: { content: wrapped } }), wrapped)
+      })
+    })
   })
 
   describe('searchConversations', () => {
@@ -68,6 +108,39 @@ describe('conversation-search', () => {
     beforeEach(async () => {
       projectDir = join(tmpDir, `-test-project-${Date.now()}`)
       await mkdir(projectDir, { recursive: true })
+    })
+
+    it('does not match wrapper-only user strings, previews the first real prompt, and finds it', async () => {
+      const str = (content) => JSON.stringify({ type: 'user', cwd: '/test', message: { content } })
+      const lines = [
+        str('<local-command-stdout>zebrafish</local-command-stdout>'),
+        str('<system-reminder>zebrafish</system-reminder>'),
+        str('refactor the quokka module'),
+      ]
+      await writeFile(join(projectDir, 'noise.jsonl'), lines.join('\n'))
+
+      assert.equal((await searchConversations('zebrafish', { projectsDir: tmpDir })).length, 0)
+      const hits = await searchConversations('quokka', { projectsDir: tmpDir })
+      assert.equal(hits.length, 1)
+      assert.equal(hits[0].preview, 'refactor the quokka module')
+    })
+
+    it('previews a real prompt after noise when the match is in assistant text', async () => {
+      const lines = [
+        JSON.stringify({ type: 'user', cwd: '/test', message: { content: '<command-name>/clear</command-name>' } }),
+        JSON.stringify({ type: 'user', message: { content: 'first real prompt' } }),
+        makeEntry('assistant', 'the axolotl answer'),
+      ]
+      await writeFile(join(projectDir, 'noise2.jsonl'), lines.join('\n'))
+      const hits = await searchConversations('axolotl', { projectsDir: tmpDir })
+      assert.equal(hits[0].preview, 'first real prompt')
+    })
+
+    it('still finds a prompt that only mentions a tag mid-text', async () => {
+      await writeFile(join(projectDir, 'mention.jsonl'), JSON.stringify({ type: 'user', cwd: '/test', message: { content: 'why does <system-reminder> keep appearing wombat' } }))
+      const hits = await searchConversations('wombat', { projectsDir: tmpDir })
+      assert.equal(hits.length, 1)
+      assert.ok(hits[0].preview.includes('<system-reminder>'))
     })
 
     it('returns empty array when no files match', async () => {
