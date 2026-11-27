@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { realpath as realRealpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
@@ -221,11 +221,14 @@ describe('check_git_repo spawn budget (#8972)', () => {
 })
 
 describe('check_git_repo bounds the whole probe (#8998)', () => {
-  const BOUND_MS = 40
+  const SHORT_MS = 40
+  const GENEROUS_MS = 5000
   const DEADLINE_MS = 2000
   let base
+  let boundMs
 
   beforeEach(() => {
+    boundMs = SHORT_MS
     base = mkdtempSync(join(homedir(), '.chroxy-test-8998-'))
     mkdirSync(join(base, 'repo'), { recursive: true })
     execFileSync(GIT, ['init', '-q', join(base, 'repo')])
@@ -235,16 +238,18 @@ describe('check_git_repo bounds the whole probe (#8998)', () => {
     rmSync(base, { recursive: true, force: true })
   })
 
-  // `faulty` decides how a path whose name contains "bad" behaves; every other
-  // path (including home) goes to the real realpath.
+  // `faulty` decides how a path whose basename starts with "bad-8998-" behaves;
+  // every other path (including home) goes to the real realpath. The bound is
+  // read lazily through `boundMs`, so the real fifth probe on the SAME ops and
+  // socket can run under a generous bound while the faulty ones saw the short one.
   function ops(sent, faulty) {
     return createBrowserOps(
       (_ws, msg) => sent.push(msg),
       (cwd) => resolveSessionCwd(cwd, new Map(), 60_000),
       (absPath, cwd) => validatePathWithinCwd(absPath, cwd, new Map(), 60_000),
       {
-        gitProbeTimeoutMs: BOUND_MS,
-        gitProbeRealpath: (p) => (String(p).includes('bad') ? faulty(p) : realRealpath(p)),
+        gitProbeTimeoutMs: () => boundMs,
+        gitProbeRealpath: (p) => (basename(String(p)).startsWith('bad-8998-') ? faulty(p) : realRealpath(p)),
       },
     )
   }
@@ -261,7 +266,7 @@ describe('check_git_repo bounds the whole probe (#8998)', () => {
     }
   }
 
-  const badPaths = (n) => Array.from({ length: n }, (_, i) => `${base}/bad${i}`)
+  const badPaths = (n) => Array.from({ length: n }, (_, i) => `${base}/bad-8998-${i}`)
 
   it('a never-settling realpath answers null after the bound and frees the slot', async () => {
     const sent = []
@@ -274,6 +279,7 @@ describe('check_git_repo bounds the whole probe (#8998)', () => {
     const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
     assert.deepEqual(['h0', 'h1', 'h2', 'h3'].map((id) => byId[id]), [null, null, null, null])
     // All four slots were held by hung probes; a fifth distinct path must be probed for real.
+    boundMs = GENEROUS_MS
     await withinDeadline(o.checkGitRepo(ws, `${base}/repo`, 'fifth'), 'fifth probe')
     assert.equal(sent.find((m) => m.requestId === 'fifth').isGitRepo, true)
   })
@@ -288,8 +294,33 @@ describe('check_git_repo bounds the whole probe (#8998)', () => {
     )
     const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
     assert.deepEqual(['f0', 'f1', 'f2', 'f3'].map((id) => byId[id]), [null, null, null, null])
-    await o.checkGitRepo(ws, `${base}/repo`, 'fifth')
+    boundMs = GENEROUS_MS
+    await withinDeadline(o.checkGitRepo(ws, `${base}/repo`, 'fifth'), 'fifth probe')
     assert.equal(sent.find((m) => m.requestId === 'fifth').isGitRepo, true)
+  })
+
+  it('a slow-but-live probe that finishes after the bound is dropped and a fresh probe starts', async () => {
+    const sent = []
+    let slow = true
+    let lateDone = Promise.resolve()
+    const o = ops(sent, () => {
+      if (!slow) return realRealpath(join(base, 'repo'))
+      // Resolves to the real repo, but only ~3x the bound later.
+      lateDone = new Promise((resolve) => {
+        setTimeout(() => resolve(realRealpath(join(base, 'repo'))), SHORT_MS * 3)
+      })
+      return lateDone
+    })
+    const ws = {}
+    const p = `${base}/bad-8998-slow`
+    await withinDeadline(o.checkGitRepo(ws, p, 'late'), 'slow probe')
+    assert.equal(sent.find((m) => m.requestId === 'late').isGitRepo, null, 'bound fired first')
+    await lateDone // let the abandoned work finish; no timer outlives the test
+    await new Promise((r) => setTimeout(r, SHORT_MS))
+    slow = false
+    boundMs = GENEROUS_MS
+    await withinDeadline(o.checkGitRepo(ws, p, 'again'), 'fresh probe')
+    assert.equal(sent.find((m) => m.requestId === 'again').isGitRepo, true, 'a fresh probe ran; the late result was not reused')
   })
 })
 

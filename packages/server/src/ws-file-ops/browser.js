@@ -150,16 +150,20 @@ function isBrowsable(realPath, homeReal, opts = {}) {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
- * @param {{ realpath?: Function, readdir?: Function, gitProbeRealpath?: Function, gitProbeTimeoutMs?: number }} [deps]
+ * @param {{ realpath?: Function, readdir?: Function, gitProbeRealpath?: Function, gitProbeTimeoutMs?: number|(() => number) }} [deps]
  *   test seam: realpath/readdir for the catalog directory scans; gitProbeRealpath/gitProbeTimeoutMs
- *   for the check_git_repo probe only (#8998)
+ *   for the check_git_repo probe only (#8998); gitProbeTimeoutMs may be a getter so a test can change
+ *   the bound between probes (test-only, production uses the constant)
  * @returns {Object} browser operation methods
  */
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, deps = {}) {
   const catalogRealpath = deps.realpath ?? realpath
   const catalogReaddir = deps.readdir ?? readdir
   const gitProbeRealpath = deps.gitProbeRealpath ?? realpath
-  const gitProbeTimeoutMs = deps.gitProbeTimeoutMs ?? GIT_PROBE_TIMEOUT_MS
+  const gitProbeTimeoutMs = () => {
+    const t = deps.gitProbeTimeoutMs ?? GIT_PROBE_TIMEOUT_MS
+    return typeof t === 'function' ? t() : t
+  }
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath, opts = {}) {
@@ -875,11 +879,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
   // #8998 — race the whole probe against a timer that answers null. The timer
   // is cleared when the work wins; the abandoned work never rejects (it catches
-  // internally), so a late result is simply dropped.
+  // internally), so a late result is simply dropped. git's own spawn timeout is
+  // also 5 s and starts later, so a slow git now answers null ("cannot tell")
+  // rather than false; that is intended, null leaves the worktree switch enabled.
   async function probeGitRepo(trimmed, opts) {
     let timer
     const bound = new Promise((resolveBound) => {
-      timer = setTimeout(() => resolveBound(null), gitProbeTimeoutMs)
+      timer = setTimeout(() => resolveBound(null), gitProbeTimeoutMs())
     })
     try {
       return await Promise.race([probeGitRepoUnbounded(trimmed, opts), bound])
