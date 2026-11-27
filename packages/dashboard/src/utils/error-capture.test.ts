@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { installErrorCapture } from './error-capture'
+import { failStorage, restoreStorage } from './storage-fault.testSupport'
 import { ERROR_HISTORY_KEY, __resetErrorHistoryForTests, readErrorHistory } from './error-history'
 
 let uninstall: () => void
@@ -11,7 +12,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   uninstall()
-  vi.restoreAllMocks()
+  restoreStorage()
 })
 
 const propError = () => new TypeError("Cannot read properties of undefined (reading 'dimensions')")
@@ -50,8 +51,8 @@ describe('installErrorCapture', () => {
   })
 
   it('swallows a throw inside the recorder (storage and time formatting hostile)', () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('x') })
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('x') })
+    failStorage('getItem')
+    failStorage('setItem')
     vi.spyOn(Date.prototype, 'toISOString').mockImplementation(() => { throw new Error('clock') })
     // jsdom reports an exception thrown by a listener on window.onerror; the capture path must not throw at all.
     const seen = vi.fn()
@@ -96,6 +97,26 @@ describe('installErrorCapture', () => {
     }]))
     uninstall = installErrorCapture()
     expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBeNull()
+  })
+
+  it('a stale uninstall never deletes a newer install\'s guard (first(); install; first(); install)', () => {
+    uninstall()
+    const first = installErrorCapture()
+    first()
+    const second = installErrorCapture()
+    first() // stale and repeated
+    const third = installErrorCapture()
+    expect(third).toBe(second)
+    uninstall = third
+    // vitest counts add/removeEventListener calls to decide whether an error event is "unhandled";
+    // the repeated stale removal above skews that count, so give it a listener of its own.
+    const noop = (): void => {}
+    window.addEventListener('error', noop)
+    window.dispatchEvent(new ErrorEvent('error', { error: propError() }))
+    window.removeEventListener('error', noop)
+    const list = readErrorHistory()
+    expect(list).toHaveLength(1)
+    expect(list[0]!.count).toBe(1)
   })
 
   it('stops recording after uninstall', () => {

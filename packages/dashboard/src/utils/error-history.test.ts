@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ERROR_HISTORY_KEY,
+  peekErrorHistory,
   __resetErrorHistoryForTests,
   __setModuleUrlForTests,
   pruneErrorHistory,
@@ -12,6 +13,7 @@ import {
   subscribeErrorHistory,
 } from './error-history'
 import { formatErrorReport } from './error-report'
+import { failStorage, restoreStorage } from './storage-fault.testSupport'
 
 const BUNDLE = 'index-Dvf46w8T.js'
 const ASSETS = '/dashboard/assets'
@@ -50,7 +52,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  vi.restoreAllMocks()
+  restoreStorage()
   document.head.querySelectorAll('script').forEach(s => s.remove())
   vi.useRealTimers()
 })
@@ -204,8 +206,8 @@ describe('bounds and retention', () => {
 
 describe('storage failure', () => {
   it('serves from the in-memory ring and never throws when storage throws', () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
+    failStorage('setItem', 'quota')
+    failStorage('getItem', 'denied')
     const spy = vi.spyOn(console, 'error')
     expect(() => recordDashboardError({ category: 'window-error', error: propError() })).not.toThrow()
     expect(() => recordDashboardError({ category: 'window-error', error: propError() })).not.toThrow()
@@ -218,7 +220,7 @@ describe('storage failure', () => {
   })
 
   it('keeps serving from memory when only the write fails', () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    failStorage('setItem', 'quota')
     const listener = vi.fn()
     subscribeErrorHistory(listener)
     recordDashboardError({ category: 'window-error', error: propError() })
@@ -291,7 +293,7 @@ describe('currentAssetBasenames', () => {
     addScript(`${location.origin}${ASSETS}/chunk-2Q5K7J3B-yng0oyO0.js`)
     vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
       entry(`${ASSETS}/cose-bilkent-JH36ORCC-ywTmjP-W.js?v=2`, 'script'),
-      entry(`${ASSETS}/mod-AbCd1234.mjs`, 'link'),
+      entry(`${ASSETS}/mod-AbCd1234.mjs`, 'script'),
     ] as unknown as PerformanceEntryList)
     expect([...currentAssetBasenames()].sort()).toEqual(
       [BUNDLE, 'chunk-2Q5K7J3B-yng0oyO0.js', 'cose-bilkent-JH36ORCC-ywTmjP-W.js', 'mod-AbCd1234.mjs'].sort())
@@ -331,6 +333,31 @@ describe('currentAssetBasenames', () => {
       entry(`${ASSETS}/style-AbCd1234.css`, 'link'),
     ] as unknown as PerformanceEntryList)
     expect([...currentAssetBasenames()]).toEqual([BUNDLE])
+  })
+
+  it('does not admit a link-initiated resource entry', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      entry(`${ASSETS}/pre-AbCd1234.js`, 'link'),
+    ] as unknown as PerformanceEntryList)
+    expect(currentAssetBasenames().has('pre-AbCd1234.js')).toBe(false)
+  })
+
+  it('admits only module or untyped script elements', () => {
+    const typed = addScript(`${location.origin}${ASSETS}/text-AbCd1234.js`)
+    typed.setAttribute('type', 'text/plain')
+    const mod = addScript(`${location.origin}${ASSETS}/mod-AbCd1234.js`)
+    mod.setAttribute('type', 'module')
+    const set = currentAssetBasenames()
+    expect(set.has('text-AbCd1234.js')).toBe(false)
+    expect(set.has('mod-AbCd1234.js')).toBe(true)
+  })
+
+  it('inspects at most 200 script elements', () => {
+    document.head.querySelectorAll('script').forEach(s => s.remove())
+    for (let i = 0; i < 205; i++) addScript(`${location.origin}${ASSETS}/s${i}-AbCd${String(1000 + i)}.js`)
+    const set = currentAssetBasenames()
+    expect(set.has('s199-AbCd1199.js')).toBe(true)
+    expect(set.has('s200-AbCd1200.js')).toBe(false)
   })
 
   it('inspects at most 200 resource entries', () => {
@@ -391,12 +418,12 @@ describe('in-memory ring semantics', () => {
 
   it('after a quota failure on an existing key, the newest error is visible (dirty ring wins)', () => {
     recordDashboardError({ category: 'window-error', error: err('first') })
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    failStorage('setItem', 'quota')
     recordDashboardError({ category: 'window-error', error: err('second') })
     const list = readErrorHistory()
     expect(list).toHaveLength(2)
     expect(list[0]!.text).toContain('second')
-    vi.restoreAllMocks()
+    restoreStorage()
     // a later successful write ends the dirty state and persists everything
     recordDashboardError({ category: 'window-error', error: err('third') })
     const stored = JSON.parse(localStorage.getItem(ERROR_HISTORY_KEY)!) as unknown[]
@@ -460,14 +487,31 @@ describe('expiry deletes, bounded work', () => {
     expect(readErrorHistory()[0]!.stack.join('').length).toBeLessThan(400)
   })
 
-  it('drops events beyond 10 per second, then resumes', () => {
+  it('drops REPEATS beyond 10 per second, then resumes', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
-    for (let i = 0; i < 15; i++) recordDashboardError({ category: 'window-error', error: err(`prop${'abcdefghijklmno'[i]}x`) })
-    expect(readErrorHistory()).toHaveLength(10)
+    for (let i = 0; i < 15; i++) recordDashboardError({ category: 'window-error', error: err('same') })
+    expect(readErrorHistory()[0]!.count).toBe(10)
     vi.advanceTimersByTime(1001)
-    recordDashboardError({ category: 'window-error', error: err('later') })
-    expect(readErrorHistory()).toHaveLength(11)
+    recordDashboardError({ category: 'window-error', error: err('same') })
+    expect(readErrorHistory()[0]!.count).toBe(11)
+  })
+
+  it('never drops the first occurrence of a new key, even over budget', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    for (let i = 0; i < 10; i++) recordDashboardError({ category: 'window-error', error: err('same') })
+    recordDashboardError({ category: 'window-error', error: err('real') })
+    const list = readErrorHistory()
+    expect(list.some(e => e.text.includes('real'))).toBe(true)
+    expect(list.some(e => e.text.includes('same') && e.count === 10)).toBe(true)
+  })
+
+  it('lets render errors bypass the budget', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    for (let i = 0; i < 14; i++) recordDashboardError({ category: 'render', error: err('same') })
+    expect(readErrorHistory()[0]!.count).toBe(14)
   })
 
   it('gives colliding hashes distinct ids', () => {
@@ -489,5 +533,112 @@ describe('expiry deletes, bounded work', () => {
     })
     localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([e('[message omitted]'), e('[message omitted]')]))
     expect(readErrorHistory()).toHaveLength(1)
+  })
+})
+
+describe('write-side size budget', () => {
+  it('twenty maximum-shape entries round-trip: the newest survive and nothing is wiped', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    // Long identifier-shaped component paths and 12 frames: the largest shape the normalisers admit.
+    const seg = 'Alpha'.repeat(8) // the longest word-shaped identifier the normalisers keep
+    const path = `${seg}.${seg}.${seg}.${seg}` // a 4-segment member path: the longest name shape
+    const comp = Array.from({ length: 15 }, (_, k) => `    at ${path.slice(0, -1)}${'abcdefghijklmno'[k]}`).join('\n')
+    const frames = Array.from({ length: 12 }, (_, k) => `    at ${path.slice(0, -1)}${'abcdefghijkl'[k]} (${location.origin}${ASSETS}/${BUNDLE}:${100 + k}:${200 + k})`).join('\n')
+    for (let i = 0; i < 20; i++) {
+      vi.advanceTimersByTime(1500)
+      const e = Object.assign(new TypeError(`Cannot read properties of undefined (reading '${'abcdefghijklmnopqrst'[i]}ender')`), {
+        stack: `TypeError: x\n${frames}`,
+      })
+      recordDashboardError({ category: 'render', error: e, componentStack: `\n${comp}` })
+      // never a wipe: once the budget bites, the retained count must hold, not drop to one
+      expect(readErrorHistory().length).toBeGreaterThanOrEqual(Math.min(i + 1, 8))
+    }
+    const stored = localStorage.getItem(ERROR_HISTORY_KEY)!
+    expect(stored.length).toBeLessThanOrEqual(48 * 1024)
+    const list = readErrorHistory()
+    expect(list.length).toBeGreaterThan(0)
+    expect(list.length).toBeLessThan(20) // the budget evicted the oldest rather than the read wiping all
+    expect(list[0]!.text).toContain('tender') // the newest survived
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).not.toBeNull() // and the read did not reset it
+  })
+})
+
+describe('external clear versus the dirty ring', () => {
+  const err = (p: string) => new TypeError(`Cannot read properties of undefined (reading '${p}')`)
+
+  it('the user clear wins over a dirty ring (record, failed write, external remove, record)', () => {
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    failStorage('setItem', 'quota')
+    recordDashboardError({ category: 'window-error', error: err('second') })
+    localStorage.removeItem(ERROR_HISTORY_KEY) // the other tab clears
+    window.dispatchEvent(new StorageEvent('storage', { key: ERROR_HISTORY_KEY, newValue: null }))
+    restoreStorage()
+    recordDashboardError({ category: 'window-error', error: err('third') })
+    const stored = JSON.parse(localStorage.getItem(ERROR_HISTORY_KEY)!) as { text: string }[]
+    expect(stored).toHaveLength(1)
+    expect(stored[0]!.text).toContain('third')
+  })
+
+  it('a storage clear() (key null) also wins over a dirty ring', () => {
+    failStorage('setItem', 'quota')
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    window.dispatchEvent(new StorageEvent('storage', { key: null }))
+    restoreStorage()
+    expect(readErrorHistory()).toEqual([])
+  })
+
+  it('merges our unsaved entries into another tab\'s new value and stays dirty until a write succeeds', () => {
+    failStorage('setItem', 'quota')
+    recordDashboardError({ category: 'window-error', error: err('mine') })
+    const now = new Date().toISOString()
+    const theirs = [{
+      id: 'oth123', time: now, firstTime: now, count: 1, category: 'window-error', platform: 'web',
+      version: '1.0.0', name: 'TypeError', template: 'read-props-of',
+      text: "Cannot read properties of undefined (reading 'theirs')", stack: [], componentStack: [],
+    }]
+    window.dispatchEvent(new StorageEvent('storage', { key: ERROR_HISTORY_KEY, newValue: JSON.stringify(theirs) }))
+    const merged = readErrorHistory()
+    expect(merged.map(e => e.text).join(' ')).toMatch(/mine/)
+    expect(merged.map(e => e.text).join(' ')).toMatch(/theirs/)
+    expect(merged).toHaveLength(2)
+    restoreStorage()
+    // the next successful write persists the merged list
+    recordDashboardError({ category: 'window-error', error: err('later') })
+    const stored = JSON.parse(localStorage.getItem(ERROR_HISTORY_KEY)!) as unknown[]
+    expect(stored).toHaveLength(3)
+  })
+})
+
+describe('dirty-ring expiry', () => {
+  it('quota failure, +31 days, storage restored, prune: the key is gone', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-01T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: new TypeError("Cannot read properties of undefined (reading 'first')") })
+    failStorage('setItem', 'quota')
+    vi.setSystemTime(new Date('2026-10-02T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: new TypeError("Cannot read properties of undefined (reading 'second')") })
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).not.toBeNull()
+    restoreStorage()
+    vi.setSystemTime(new Date('2026-11-05T00:00:00.000Z'))
+    pruneErrorHistory()
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBeNull()
+    expect(readErrorHistory()).toEqual([])
+  })
+})
+
+describe('peekErrorHistory (first paint)', () => {
+  it('never writes, while readErrorHistory deletes what expired', () => {
+    const now = new Date().toISOString()
+    const mk = (time: string, id: string) => ({
+      id, time, firstTime: time, count: 1, category: 'render', platform: 'web', version: '1.0.0',
+      name: 'Error', template: null, text: '[message omitted]', stack: [], componentStack: [],
+    })
+    const value = JSON.stringify([mk(now, 'new123'), mk('2020-01-01T00:00:00.000Z', 'old123')])
+    localStorage.setItem(ERROR_HISTORY_KEY, value)
+    expect(peekErrorHistory()).toHaveLength(1)
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBe(value)
+    expect(readErrorHistory()).toHaveLength(1)
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).not.toBe(value)
   })
 })

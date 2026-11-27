@@ -67,12 +67,19 @@ describe('DiagnosticsSettingsSection', () => {
     render(<DiagnosticsSettingsSection />)
     const id = readErrorHistory()[0]!.id
     const btn = screen.getByTestId(`diagnostics-select-${id}`)
-    expect(btn.getAttribute('aria-controls')).toBe(`diagnostics-detail-${id}`)
+    expect(btn.hasAttribute('aria-controls')).toBe(false) // only set while the row is open
     fireEvent.click(btn)
+    expect(btn.getAttribute('aria-controls')).toBe(`diagnostics-detail-${id}`)
     expect(document.getElementById(`diagnostics-detail-${id}`)).not.toBeNull()
     expect(screen.getByRole('heading', { name: 'Stack' })).toBeInTheDocument()
     expect(screen.getByTestId('diagnostics-stack').getAttribute('aria-label')).toBeTruthy()
     expect(screen.getByTestId('diagnostics-report').getAttribute('aria-label')).toBeTruthy()
+    for (const t of ['diagnostics-stack', 'diagnostics-report']) {
+      expect(screen.getByTestId(t).getAttribute('role')).toBe('region')
+      expect(screen.getByTestId(t).getAttribute('tabindex')).toBe('0')
+    }
+    // the status live region exists before any copy, with empty text
+    expect(screen.getByTestId('diagnostics-copy-status').textContent).toBe('')
   })
 
   it('expands only one row when two errors collide on the same hash', () => {

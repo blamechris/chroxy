@@ -39,7 +39,8 @@ export function installErrorCapture(target: Window = window): () => void {
   const uninstall = (): void => {
     target.removeEventListener('error', onError)
     target.removeEventListener('unhandledrejection', onRejection)
-    installed.delete(target)
+    // Idempotent, and a stale uninstall must not delete a newer install's guard.
+    if (installed.get(target) === uninstall) installed.delete(target)
   }
   installed.set(target, uninstall)
   try { pruneErrorHistory() } catch { /* never block startup */ }

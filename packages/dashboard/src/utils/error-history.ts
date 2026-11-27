@@ -70,6 +70,8 @@ const MAX_STORED_LINES = 60
 const MAX_STORED_LINE_CHARS = 256
 /** A stored value larger than this is not ours (20 entries of normalised frames are a few KB). */
 const MAX_STORED_BYTES = 64 * 1024
+/** What the writer allows: 3/4 of the read cap, so a value we wrote is never one we would reset. */
+const MAX_WRITE_BYTES = 48 * 1024
 /** Storm control: at most this many recorded events per rolling second. */
 const MAX_EVENTS_PER_SECOND = 10
 
@@ -86,6 +88,7 @@ const MAX_EVENTS_PER_SECOND = 10
  */
 const HASHED_ASSET_RE = /^[A-Za-z0-9_.-]{1,72}-[A-Za-z0-9_-]{8}\.m?js$/
 const MAX_RESOURCE_ENTRIES = 200
+const MAX_SCRIPT_ELEMENTS = 200
 
 let moduleUrl: string | null = null
 try {
@@ -128,11 +131,16 @@ function admittedBasename(raw: unknown, origin: string, dir: string): string | n
 }
 
 /**
- * The dashboard's own loaded script basenames. Admission needs ALL of: same-origin http(s);
- * a direct child of this module's own `assets/` directory; Vite's hashed-asset name; and, for
- * resource-timing entries, a script or link (modulepreload) initiator. Computed on demand,
- * never stored. Outside a built bundle (dev server, tests) the set is empty, which makes
- * every frame location `<unknown>`.
+ * The dashboard's own loaded script basenames.
+ *
+ * Admission requires a same-origin http(s) script under the dashboard's own built assets
+ * directory with a Vite-hashed name: a `<script>` element (module or untyped) or a
+ * resource-timing entry initiated by a script. Creating such a URL needs script or DOM
+ * injection into the dashboard page, which already defeats the page. This is a containment
+ * rule, not a proof against a build inventory; full build-inventory proof is a tracked
+ * follow-up. At most 200 script elements and 200 resource entries are inspected. Computed on
+ * demand, never stored. Outside a built bundle (dev server, tests) the set is empty, which
+ * makes every frame location `<unknown>`.
  */
 export function currentAssetBasenames(): Set<string> {
   const out = new Set<string>()
@@ -147,7 +155,15 @@ export function currentAssetBasenames(): Set<string> {
       if (b) out.add(b)
     }
     try {
-      for (const s of Array.from(document.scripts)) add(s.src)
+      const scripts = document.scripts
+      const n = Math.min(scripts.length, MAX_SCRIPT_ELEMENTS)
+      for (let i = 0; i < n; i++) {
+        const el = scripts[i]
+        if (!el) continue
+        const type = el.getAttribute('type')
+        if (type !== null && type !== '' && type !== 'module') continue
+        add(el.src)
+      }
     } catch { /* keep what we have */ }
     try {
       if (typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function') {
@@ -155,7 +171,7 @@ export function currentAssetBasenames(): Set<string> {
         const n = Math.min(entries.length, MAX_RESOURCE_ENTRIES)
         for (let i = 0; i < n; i++) {
           const e = entries[i] as { name?: unknown; initiatorType?: unknown }
-          if (e.initiatorType !== 'script' && e.initiatorType !== 'link') continue
+          if (e.initiatorType !== 'script') continue
           add(e.name)
         }
       }
@@ -280,12 +296,14 @@ function buildEntry(src: ErrorSource, assets: AssetBasenames, nowMs: number): Er
 // only when storage is unavailable (getItem throws), or while `dirty`: a write failed, so the
 // persisted value is older than the ring. A later successful write, or a clear, ends dirty.
 // When storage works and the key is absent (another tab cleared it), the history is empty and
-// the ring is dropped; it is never resurrected.
+// the ring is dropped; it is never resurrected. A cross-tab `storage` event that REMOVES the
+// key (or clear()s storage) wins over a dirty ring; one that carries a new value is MERGED
+// with the dirty ring (see onStorageEvent) and the page stays dirty until a write succeeds.
 
 let memory: ErrorHistoryEntry[] = []
 let dirty = false
 let recording = false
-let recent: number[] = []
+let recent: { t: number; key: string }[] = []
 const listeners = new Set<() => void>()
 
 function notify(): void {
@@ -307,6 +325,13 @@ function prune(list: ErrorHistoryEntry[], nowMs: number): ErrorHistoryEntry[] {
   return out.slice(0, MAX_HISTORY_ENTRIES)
 }
 
+/** Evict the oldest entries until the serialized list fits the write budget (below the read cap). */
+function fitBudget(list: ErrorHistoryEntry[]): ErrorHistoryEntry[] {
+  let l = list
+  while (l.length > 0 && JSON.stringify(l).length > MAX_WRITE_BYTES) l = l.slice(0, -1)
+  return l
+}
+
 function revalidateAll(list: unknown[], assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
   return list.map(e => revalidate(e, assets, nowMs)).filter((e): e is ErrorHistoryEntry => e !== null)
 }
@@ -321,15 +346,24 @@ function persist(list: ErrorHistoryEntry[]): boolean {
   }
 }
 
-function readAll(assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
+/** `writeBack` false: a pure read (first paint); nothing is written to storage. */
+function readAll(assets: AssetBasenames, nowMs: number, writeBack: boolean): ErrorHistoryEntry[] {
   let text: string | null
   try {
     text = localStorage.getItem(ERROR_HISTORY_KEY)
   } catch {
     // storage unavailable: the ring is all there is
-    return prune(revalidateAll(memory, assets, nowMs), nowMs)
+    memory = prune(revalidateAll(memory, assets, nowMs), nowMs)
+    return memory
   }
-  if (dirty) return prune(revalidateAll(memory, assets, nowMs), nowMs)
+  if (dirty) {
+    // Expiry reconciles a dirty ring too: an emptied ring tries removeItem, a shrunken one
+    // tries to write itself, regardless of earlier failures. Success ends dirty.
+    const kept = prune(revalidateAll(memory, assets, nowMs), nowMs)
+    memory = kept
+    if (writeBack && persist(kept)) dirty = false
+    return kept
+  }
   if (text === null) {
     memory = []
     return []
@@ -341,26 +375,36 @@ function readAll(assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
   if (!Array.isArray(parsed)) {
     // oversized, corrupt or an unexpected shape: reset to empty
     memory = []
-    try { localStorage.removeItem(ERROR_HISTORY_KEY) } catch { /* ignore */ }
+    if (writeBack) { try { localStorage.removeItem(ERROR_HISTORY_KEY) } catch { /* ignore */ } }
     return []
   }
   clampedOnRead = false
   const clean = prune(revalidateAll(parsed.slice(0, MAX_HISTORY_ENTRIES * 3), assets, nowMs), nowMs)
   memory = clean
   // Expiry deletes, it does not just hide: write back whenever anything was dropped.
-  if (clean.length !== parsed.length || clampedOnRead) persist(clean)
+  if (writeBack && (clean.length !== parsed.length || clampedOnRead)) persist(clean)
   return clean
 }
 
 function writeAll(list: ErrorHistoryEntry[]): void {
-  memory = list
-  dirty = !persist(list)
+  const fitted = fitBudget(list)
+  memory = fitted
+  dirty = !persist(fitted)
 }
 
-/** Recent errors, newest first, every field re-validated. Never throws. */
+/** Recent errors, newest first, every field re-validated. Never throws. Prunes storage. */
 export function readErrorHistory(assets?: AssetBasenames, nowMs: number = Date.now()): ErrorHistoryEntry[] {
   try {
-    return readAll(assets ?? currentAssetBasenames(), nowMs)
+    return readAll(assets ?? currentAssetBasenames(), nowMs, true)
+  } catch {
+    return []
+  }
+}
+
+/** Like readErrorHistory but never writes (safe during render). */
+export function peekErrorHistory(assets?: AssetBasenames, nowMs: number = Date.now()): ErrorHistoryEntry[] {
+  try {
+    return readAll(assets ?? currentAssetBasenames(), nowMs, false)
   } catch {
     return []
   }
@@ -371,26 +415,32 @@ export function pruneErrorHistory(): void {
   readErrorHistory()
 }
 
-function overStormBudget(nowMs: number): boolean {
-  recent = recent.filter(t => nowMs - t < 1000 && t <= nowMs)
-  if (recent.length >= MAX_EVENTS_PER_SECOND) return true
-  recent.push(nowMs)
+/**
+ * Storm control. Rate-limits REPEATS only: the first occurrence of a dedupe key is never
+ * dropped, and render errors bypass the budget. Returns true when the event must be dropped.
+ */
+function overStormBudget(nowMs: number, key: string, known: boolean, category: ErrorCategory): boolean {
+  recent = recent.filter(r => nowMs - r.t < 1000 && r.t <= nowMs)
+  if (category === 'render') return false
+  const isRepeat = known || recent.some(r => r.key === key)
+  if (recent.length >= MAX_EVENTS_PER_SECOND && isRepeat) return true
+  recent.push({ t: nowMs, key })
   return false
 }
 
-/** Record one error. Never throws, never logs, and drops nested or storm-rate calls. */
+/** Record one error. Never throws, never logs, and drops nested or storm-rate repeat calls. */
 export function recordDashboardError(src: ErrorSource): void {
   if (recording) return
   recording = true
   try {
     const nowMs = Date.now()
-    if (overStormBudget(nowMs)) return
     const assets = currentAssetBasenames()
     const entry = buildEntry(src, assets, nowMs)
     if (entry.template === 'resize-observer-loop') return // browser noise, not a defect
-    const list = readAll(assets, nowMs)
+    const list = readAll(assets, nowMs, true)
     const key = dedupeKey(entry)
     const i = list.findIndex(e => dedupeKey(e) === key)
+    if (overStormBudget(nowMs, key, i >= 0, entry.category)) return
     let next: ErrorHistoryEntry[]
     if (i >= 0) {
       const prev = list[i]!
@@ -431,14 +481,55 @@ export function subscribeErrorHistory(listener: () => void): () => void {
   return () => { listeners.delete(listener) }
 }
 
-// Another tab wrote or cleared the key: a mirror ring is stale, and open views must refresh.
+/**
+ * Another tab wrote or cleared the key.
+ *  - key removed (`newValue` null) or `clear()` (`key` null): the user's clear wins, including
+ *    over a dirty ring. Nothing is resurrected.
+ *  - new value while dirty: MERGE our unsaved ring into the incoming list (dedupe by key keeps
+ *    the newer time and the larger count; then cap, id uniqueness and the size budget) and stay
+ *    dirty until a write succeeds.
+ *  - new value while clean: the ring is only a mirror; drop it.
+ */
+function onStorageEvent(ev: StorageEvent): void {
+  try {
+    if (ev.key !== null && ev.key !== ERROR_HISTORY_KEY) return
+    if (ev.key === null || ev.newValue === null) {
+      memory = []
+      dirty = false
+    } else if (dirty) {
+      const nowMs = Date.now()
+      const assets = currentAssetBasenames()
+      let incoming: ErrorHistoryEntry[] = []
+      if (ev.newValue.length <= MAX_STORED_BYTES) {
+        try {
+          const parsed: unknown = JSON.parse(ev.newValue)
+          if (Array.isArray(parsed)) incoming = revalidateAll(parsed.slice(0, MAX_HISTORY_ENTRIES * 3), assets, nowMs)
+        } catch { /* an unreadable incoming value contributes nothing */ }
+      }
+      const byKey = new Map<string, ErrorHistoryEntry>()
+      for (const e of [...memory, ...incoming]) {
+        const k = dedupeKey(e)
+        const have = byKey.get(k)
+        if (!have) byKey.set(k, e)
+        else byKey.set(k, {
+          ...(Date.parse(e.time) > Date.parse(have.time) ? e : have),
+          count: Math.min(MAX_COUNT, Math.max(e.count, have.count)),
+          firstTime: Date.parse(e.firstTime) < Date.parse(have.firstTime) ? e.firstTime : have.firstTime,
+        })
+      }
+      memory = fitBudget(prune(Array.from(byKey.values()), nowMs))
+    } else {
+      memory = []
+    }
+  } catch {
+    memory = []
+  }
+  notify()
+}
+
 if (typeof window !== 'undefined') {
   try {
-    window.addEventListener('storage', (ev: StorageEvent) => {
-      if (ev.key !== null && ev.key !== ERROR_HISTORY_KEY) return
-      if (!dirty) memory = []
-      notify()
-    })
+    window.addEventListener('storage', onStorageEvent)
   } catch { /* no window events: the view just refreshes on its own renders */ }
 }
 

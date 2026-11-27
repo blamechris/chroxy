@@ -14,6 +14,7 @@ import {
   clearErrorHistory,
   currentAssetBasenames,
   formatHistoryEntry,
+  peekErrorHistory,
   readErrorHistory,
   subscribeErrorHistory,
   type ErrorHistoryEntry,
@@ -26,12 +27,12 @@ const CATEGORY_LABEL: Record<string, string> = {
 }
 
 export function DiagnosticsSettingsSection() {
-  const [entries, setEntries] = useState<ErrorHistoryEntry[]>(() => readErrorHistory())
+  const [entries, setEntries] = useState<ErrorHistoryEntry[]>(() => peekErrorHistory())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   useEffect(() => {
-    setEntries(readErrorHistory())
+    setEntries(readErrorHistory()) // prunes storage; render itself never writes
     return subscribeErrorHistory(() => setEntries(readErrorHistory()))
   }, [])
 
@@ -79,7 +80,7 @@ export function DiagnosticsSettingsSection() {
                     type="button"
                     className="diagnostics-entry-button"
                     aria-expanded={open}
-                    aria-controls={`diagnostics-detail-${e.id}`}
+                    aria-controls={open ? `diagnostics-detail-${e.id}` : undefined}
                     onClick={() => select(e.id)}
                     data-testid={`diagnostics-select-${e.id}`}
                   >
@@ -101,13 +102,13 @@ export function DiagnosticsSettingsSection() {
                   {open && (
                     <div className="diagnostics-detail" id={`diagnostics-detail-${e.id}`}>
                       <h5 className="diagnostics-subheading">Stack</h5>
-                      <pre className="diagnostics-pre" data-testid="diagnostics-stack" aria-label="Stack frames">
+                      <pre className="diagnostics-pre" data-testid="diagnostics-stack" aria-label="Stack frames" role="region" tabIndex={0}>
                         {e.stack.length > 0 ? e.stack.join('\n') : '(none)'}
                       </pre>
                       <p className="settings-hint">
                         This is exactly what Copy report copies. Review it first.
                       </p>
-                      <pre className="diagnostics-pre" data-testid="diagnostics-report" aria-label="Report preview, exactly what Copy report copies">{report}</pre>
+                      <pre className="diagnostics-pre" data-testid="diagnostics-report" aria-label="Report preview, exactly what Copy report copies" role="region" tabIndex={0}>{report}</pre>
                       <div className="settings-field">
                         <button
                           type="button"
@@ -117,11 +118,9 @@ export function DiagnosticsSettingsSection() {
                         >
                           Copy report
                         </button>
-                        {copyState !== 'idle' && (
-                          <span className="settings-hint" role="status" data-testid="diagnostics-copy-status">
-                            {copyState === 'copied' ? 'Copied' : 'Copy failed'}
-                          </span>
-                        )}
+                        <span className="settings-hint" role="status" data-testid="diagnostics-copy-status">
+                          {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : ''}
+                        </span>
                       </div>
                     </div>
                   )}
