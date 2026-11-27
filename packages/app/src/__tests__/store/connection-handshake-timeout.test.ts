@@ -144,6 +144,25 @@ describe('#5962 client-side handshake timeout (mobile app)', () => {
     ws.restore();
   });
 
+  // #9159 — every other teardown (connect, onclose, onerror, disconnect) clears
+  // serverDefaultProvider so an older daemon never inherits a previous
+  // connection's advertisement; the handshake-timeout teardown must too.
+  // provider_list normally arrives only after auth_ok, so the field is already
+  // null here in practice; seeding it models a future message-ordering change.
+  it('clears serverDefaultProvider when the handshake times out (#9159)', async () => {
+    const ws = installMockWebSocket();
+    await openConnected(ws);
+    useConnectionStore.setState({ serverDefaultProvider: 'codex' });
+    expect(useConnectionStore.getState().serverDefaultProvider).toBe('codex');
+
+    jest.advanceTimersByTime(HANDSHAKE_TIMEOUT_MS);
+    await flushPromises();
+
+    expect(useConnectionStore.getState().serverDefaultProvider).toBeNull();
+
+    ws.restore();
+  });
+
   it('clears the timer on auth_ok — no spurious fire on a healthy connect', async () => {
     const ws = installMockWebSocket();
     const socket = await openConnected(ws);

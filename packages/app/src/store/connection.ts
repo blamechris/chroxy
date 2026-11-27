@@ -1591,7 +1591,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             socket.onerror = null;
             socket.onmessage = null;
             try { socket.close(); } catch { /* already closing */ }
-            set({ socket: null });
+            // Clear the server default like every other teardown (#9159).
+            set({ socket: null, serverDefaultProvider: null });
             // Mirror the onerror first-write-wins guard so a paired drop can't
             // double-write the phase/error; then hand off to the ladder.
             if (!reconnectScheduler.scheduled) {

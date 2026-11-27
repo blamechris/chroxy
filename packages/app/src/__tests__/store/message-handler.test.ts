@@ -23,6 +23,8 @@ import {
   startHeartbeat,
   stopHeartbeat,
   HEARTBEAT_INTERVAL_MS,
+  prepareEagerKeyExchange,
+  setPendingKeyPair,
 } from '../../store/message-handler';
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
@@ -7687,6 +7689,35 @@ describe('#7696 — the factory DEFAULT silent gates the failure alerts', () => 
     _testMessageHandler.handle({ type: 'pair_fail', reason: 'pairing_failed' });
 
     expect(alertSpy).not.toHaveBeenCalled();
+  });
+});
+
+// #9159 — every pre-auth teardown that drops the socket also drops the server's
+// advertised default provider, so an older daemon never inherits a previous
+// connection's advertisement. provider_list normally arrives only after auth_ok,
+// so the field is already null on these paths in practice; seeding it models a
+// future message-ordering change. The identity-refusal teardown
+// (applyIdentityRefusal) has no row: reaching it needs a signed key_exchange_ok
+// against a pinned identity, which this harness cannot mint cheaply.
+describe('#9159 — pre-auth teardowns clear serverDefaultProvider', () => {
+  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, boolean]> = [
+    ['auth_fail', { type: 'auth_fail', reason: 'bad token' }, {}, false],
+    ['pair_fail', { type: 'pair_fail', reason: 'pairing_failed' }, {}, false],
+    ['key_exchange_ok with an invalid publicKey', { type: 'key_exchange_ok' }, {}, true],
+    ['auth_ok from a server too old to confirm pairing', { type: 'auth_ok', serverMode: 'cli' }, { isPairing: true }, false],
+  ];
+  it.each(cases)('%s', (_name, frame, ctxOverrides, needsKeyPair) => {
+    const store = createMockStore({ socket: {} as any, serverDefaultProvider: 'codex' } as any);
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext({ silent: true, ...ctxOverrides }));
+    if (needsKeyPair) prepareEagerKeyExchange();
+    try {
+      _testMessageHandler.handle(frame);
+    } finally {
+      if (needsKeyPair) setPendingKeyPair(null);
+    }
+    expect(store.getState().socket).toBeNull();
+    expect(store.getState().serverDefaultProvider).toBeNull();
   });
 });
 
