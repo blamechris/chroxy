@@ -194,6 +194,9 @@ function resolvedAnswer(current: string | undefined, resolved: PermissionResolve
  */
 export const PERMISSION_STOPPED_REASON = 'stopped'
 
+// PERMISSION_ABORTED_REASON and PERMISSION_TIMEOUT_REASON (below) are no longer read by this
+// handler (#8952: it reads PERMISSION_NO_DECISION_REASON_OUTCOMES). They stay as public exports
+// for external callers of @chroxy/store-core; do not remove them.
 /**
  * #8374: the `permission_resolved` reason for every OTHER abort of the turn's
  * controller -- a dead provider process, a stalled stream's watchdog, a
