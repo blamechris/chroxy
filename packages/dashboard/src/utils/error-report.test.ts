@@ -1,5 +1,7 @@
 /** #9235 — the allowlist classifier is the privacy boundary for stored/copied error reports. */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   classifyErrorMessage, normalizeStack, normalizeComponentStack, formatErrorReport,
   MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, MAX_MESSAGE_CHARS, isWordShaped, VOWELLESS_ABBREVIATIONS, type ErrorReportEntry, type StackOptions,
@@ -13,6 +15,11 @@ const ns = (stack: unknown, opts?: StackOptions) => normalizeStack(stack, { asse
 const fr = (entry: ErrorReportEntry) => formatErrorReport(entry, { assetBasenames: ASSETS })
 
 const OMIT = '[message omitted]'
+// Credential-shaped fixtures are assembled at run time from parts, so this source never
+// contains a literal that a secret scanner matches. GitHub secret scanning raised a
+// false-positive alert on an inline AWS-example-shaped key id here (#9360). The values
+// are synthetic either way; the last describe block below keeps the file clean.
+const tok = (...parts: string[]) => parts.join('')
 const GHP = `ghp_${'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'}` // 36 alphanumerics after ghp_
 
 // One positive case per template string: [name, template id, message].
@@ -424,7 +431,7 @@ describe('formatErrorReport', () => {
   })
 
   it('a poisoned stored entry reaches the clipboard without any secret', () => {
-    const secret = 'sk-ant-api03-ABCDEFGHIJKLMNOP SECRET /Users/alice/private'
+    const secret = `${tok('sk-', 'ant-', 'api03-')}ABCDEFGHIJKLMNOP SECRET /Users/alice/private`
     const poisoned = {
       time: `2026-01-01T00:00:00Z ${secret}`,
       version: secret, platform: secret, category: secret, count: secret,
@@ -714,8 +721,8 @@ describe('word-shape rule: each clause', () => {
 describe('R3: credential markers inside identifiers', () => {
   const T36 = 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
   const PREFIXED = [
-    `ghp_${T36}_suffix`, `x_ghp_${T36}`, `gho_${T36}`, `ghu_${T36}`, `ghs_${T36}`, `ghr_${T36}`, 'github_pat_11ABCDEFG0abcdefghij_xyz',
-    'AIzaSyAbcdefghij', 'AKIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE', 'sk_live_abc', 'sk_test_abc', 'rk_live_abc', 'rk_test_abc', 'pk_live_abc',
+    `ghp_${T36}_suffix`, `x_ghp_${T36}`, `gho_${T36}`, `ghu_${T36}`, `ghs_${T36}`, `ghr_${T36}`, tok('github_', 'pat_', '11ABCDEFG0abcdefghij_xyz'),
+    'AIzaSyAbcdefghij', tok('AK', 'IA', 'IOSFODNN7EXAMPLE'), tok('AS', 'IA', 'IOSFODNN7EXAMPLE'), 'sk_live_abc', 'sk_test_abc', 'rk_live_abc', 'rk_test_abc', 'pk_live_abc',
     'whsec_abc', 'shpat_abc', 'dckr_pat_abc', 'glsa_abc', `hf_${'a'.repeat(20)}`, `oauth_${'a'.repeat(16)}`, `npm_${'a'.repeat(20)}`,
   ]
   it.each(PREFIXED)('a slot containing %s is [REDACTED]', (id) => {
@@ -868,5 +875,24 @@ describe('R4: the [REDACTED] sentinel survives re-validation', () => {
   it('formatErrorReport keeps the sentinel entry', () => {
     const out = fr({ time: 0, version: '1.2.3', platform: 'web', category: 'render', count: 1, name: 'Error', message: 'x', stack: [], componentStack: ['[REDACTED]', 'Foo'] })
     expect(out).toContain('  [REDACTED]\n  Foo')
+  })
+})
+
+describe('this test file carries no scanner-matching credential literal', () => {
+  // The patterns are the shapes GitHub secret scanning and common scanners match. Fixtures
+  // above build such values at run time with tok(), so the SOURCE must never match.
+  const SCANNER_SHAPES: Array<[string, RegExp]> = [
+    ['AWS key id', /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[A-Z0-9]{16}\b/],
+    ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36}\b/],
+    ['GitHub fine-grained PAT', /\bgithub_pat_[A-Za-z0-9_]{22,}/],
+    ['Google API key', /\bAIza[0-9A-Za-z_-]{35}\b/],
+    ['Stripe key', /\b[rs]k_(?:live|test)_[0-9A-Za-z]{24,}/],
+    ['Slack token', /\bxox[bpas]-[0-9A-Za-z-]{10,}/],
+    ['Anthropic / OpenAI key', /\bsk-(?:ant|proj)-[A-Za-z0-9_-]{8,}/],
+    ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/],
+  ]
+  it.each(SCANNER_SHAPES)('no %s literal', (_name, re) => {
+    const src = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+    expect(re.test(src)).toBe(false)
   })
 })
