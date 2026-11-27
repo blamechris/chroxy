@@ -567,6 +567,7 @@ const MUST_KEEP: string[] = [
   'useMemoizedCallbackHookV3Wrapper9',
   '_private', '$el', 'i', 'x', '__proto__', 'onClick', 'setState', 'React', 'useEffect', 'ChatView', 'MessageBubble', 'ASIANMarketData',
   'npm_config_cache', 'handleSessionListUpdateResponseV2Handler', 'a_very_long_snake_case_identifier_name', 'useChatViewScrollRestoration',
+  'XMLHttpRequest', 'escapeHtml', 'isHttpUrl', 'httpsAgent', 'HTMLLIElement', 'CtrlKey', 'rgbaToHex',
   'this', 'undefined', 'getElementById', 'webpackJsonpCallback'
 ]
 
@@ -638,6 +639,10 @@ describe('word-shape rule: each clause', () => {
     expect(isWordShaped('myth')).toBe(true) // y counts
     expect(isWordShaped('fnc')).toBe(true) // 3 letters: exempt
     expect(isWordShaped('doBlkz')).toBe(false) // Blkz
+  })
+  it('vowelless web abbreviations are exempt only as a whole chunk', () => {
+    for (const ok of ['Http', 'Https', 'Html', 'Xhtml', 'Ctrl', 'rgba', 'HTTP', 'getHttp', 'HTMLLIElement']) expect(isWordShaped(ok), ok).toBe(true)
+    for (const bad of ['Httpx', 'Htmlzq', 'Ctrlz', 'Httpsxy', 'Qwrt', 'HTMLQWZ', 'Xhtmlx']) expect(isWordShaped(bad), bad).toBe(false)
   })
   it('a lowercase chunk is at most 14 and an uppercase-only chunk at most 5', () => {
     expect(isWordShaped('abcdefghijklmno'.replace(/[a-z]/g, 'a'))).toBe(false) // 15 letters

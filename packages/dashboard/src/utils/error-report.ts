@@ -114,6 +114,12 @@ const isUpper = (c: number) => c >= 65 && c <= 90
 const isDigitCode = (c: number) => c >= 48 && c <= 57
 const isHexCode = (c: number) => isDigitCode(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
 const VOWELS = 'aeiouyAEIOUY'
+/**
+ * Vowelless web abbreviations, exempt from the vowel and consonant-run clauses. Compared
+ * case-insensitively and only as a WHOLE chunk (`Http`, `https`, `Html`), so `Httpx` or
+ * `Htmlzq` are not exempt. Shorter ones (btn, src, svg, xml, url) are never vowel-checked.
+ */
+const VOWELLESS_ABBREVIATIONS: ReadonlySet<string> = new Set(['html', 'http', 'https', 'xhtml', 'ctrl', 'rgba'])
 
 /**
  * The word-shape admission rule for ONE identifier segment (no `.`). Conservative and
@@ -125,7 +131,8 @@ const VOWELS = 'aeiouyAEIOUY'
  *     (`Session`), a run of 2+ uppercase letters (an acronym; when a lowercase letter
  *     follows, its last uppercase goes to the next chunk: `HTTPStream` = `HTTP` + `Stream`),
  *     digit runs and `_`/`$` separators; then
- *       - every chunk with a lowercase letter and 4+ characters contains a vowel [aeiouy];
+ *       - every chunk with a lowercase letter and 4+ characters contains a vowel [aeiouy],
+ *         except the whole-chunk abbreviations html, http, https, xhtml, ctrl, rgba (any case);
  *       - no chunk with a lowercase letter is longer than 14 or holds a run of 5 or more
  *         consecutive consonants (a vowel is [aeiouy]);
  *       - no uppercase-only chunk is longer than 5;
@@ -162,6 +169,7 @@ export function isWordShaped(seg: string): boolean {
   // Judge one alphabetic chunk [s, e); `upperOnly` when it has no lowercase letter.
   const chunk = (s0: number, e: number): boolean => {
     const len = e - s0
+    const exempt = len <= 5 && VOWELLESS_ABBREVIATIONS.has(seg.slice(s0, e).toLowerCase())
     let hasLower = false
     let hasVowel = false
     let consonants = 0
@@ -175,12 +183,25 @@ export function isWordShaped(seg: string): boolean {
     }
     if (hasLower) {
       if (len > 14) return false
-      if (len >= 4 && !hasVowel) return false
-      if (maxConsonants > 4) return false
+      if (!exempt && len >= 4 && !hasVowel) return false
+      if (!exempt && maxConsonants > 4) return false
     } else if (len > 5) return false
     if (len === 1) singles++
     if (len <= 2) shorts++
     return singles <= 2 && shorts <= 2
+  }
+  // An uppercase-only run. One longer than 5 is allowed only if it starts with an exempt
+  // abbreviation (`HTMLLI` in `HTMLLIElement` = HTML + LI) followed by at most 2 more letters, which are judged
+  // as their own chunk.
+  const acronym = (s0: number, e: number): boolean => {
+    if (e - s0 > 5) {
+      for (const abbr of VOWELLESS_ABBREVIATIONS) {
+        if (seg.slice(s0, s0 + abbr.length).toLowerCase() === abbr && e - s0 - abbr.length <= 2) {
+          return chunk(s0, s0 + abbr.length) && chunk(s0 + abbr.length, e)
+        }
+      }
+    }
+    return chunk(s0, e)
   }
   let i = 0
   while (i < n) {
@@ -199,13 +220,13 @@ export function isWordShaped(seg: string): boolean {
         if (!chunk(i, j)) return false
         i = j
       } else if (u < n && isLower(seg.charCodeAt(u))) {
-        if (!chunk(i, u - 1)) return false
+        if (!acronym(i, u - 1)) return false
         let j = u
         while (j < n && isLower(seg.charCodeAt(j))) j++
         if (!chunk(u - 1, j)) return false
         i = j
       } else {
-        if (!chunk(i, u)) return false
+        if (!acronym(i, u)) return false
         i = u
       }
     } else {
