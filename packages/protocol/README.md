@@ -20,6 +20,13 @@ npm run build   -w packages/protocol   # tsc → dist/  (also runs on `prepare`)
 npm test        -w packages/protocol   # node --test (tsx loader)
 ```
 
+## `redaction` is a generated copy
+
+`src/redaction.js` (shipped as `@chroxy/protocol/redaction`) is a byte-identical copy of
+`packages/server/src/redaction.js`, which is the one authored source. Edit the server file,
+then run `npm run sync-redaction -w packages/protocol && npm run build -w packages/protocol`
+and commit all three (`tests/redaction-sync.test.js` fails on any drift).
+
 ## Gotcha — new schema files need their dist committed
 
 `dist/` is prebuilt and committed. After editing `src/schemas`, rebuild and stage

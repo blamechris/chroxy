@@ -36,6 +36,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "sync-redaction": "node scripts/sync-redaction.mjs",
     "prepare": "tsc",
     "test": "node --import tsx/esm --import ../../scripts/lib/no-test-force-exit-hook.mjs --import ../../scripts/lib/assert-match-payload-guard-hook.mjs --test tests/*.test.js"
   },

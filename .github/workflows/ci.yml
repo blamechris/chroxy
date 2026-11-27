@@ -1810,19 +1810,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Link the @chroxy/protocol workspace package
-        # #9235 — this job runs no `npm ci`, and some script tests import
-        # dependency-free server modules (deploy-daemon.mjs -> small-file.js ->
-        # trusted-file-read.js -> logger.js -> redaction.js). redaction.js now
-        # re-exports `@chroxy/protocol/redaction`, which resolves only through
-        # the workspace link `npm ci` would create. Create exactly that link:
-        # that subpath is tracked, dependency-free dist, so nothing else is
-        # needed. Every other job installs, so it already has the link.
-        run: |
-          mkdir -p node_modules/@chroxy
-          ln -s ../../packages/protocol node_modules/@chroxy/protocol
-          node --input-type=module -e "await import('@chroxy/protocol/redaction')" 2>&1 || { echo '::error::@chroxy/protocol/redaction does not resolve through the workspace link'; exit 1; }
-
       - name: Parse-check every tracked shell script
         # #7504 — nothing in .github/ had ever parsed these. Every tracked *.sh
         # file is invoked from a workflow step, a git hook or by hand; none is
