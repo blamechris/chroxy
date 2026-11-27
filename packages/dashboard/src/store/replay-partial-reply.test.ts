@@ -188,7 +188,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(msgs().some((m) => m.responseSplits !== undefined)).toBe(false)
     })
 
-    it('B-2 full reload mid-turn, server order (snapshot BEFORE its tool rows): text above the card, the rest below', () => {
+    it('a full reload mid-turn, in the server\'s order (snapshot BEFORE its tool rows): text above the card, the rest below', () => {
       send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
       send(user(1))
       send(openSnapshot(A + '42', t1Split))
@@ -197,7 +197,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42'])
     })
 
-    it('Codex 2: a live delta after that reload extends the TAIL below the card', () => {
+    it('a live delta after that reload extends the TAIL below the card', () => {
       send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
       send(user(1))
       send(openSnapshot(A + '42', t1Split))
@@ -207,7 +207,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42.'])
     })
 
-    it('B-2 delta replay mid-turn, server order: the same layout', () => {
+    it('a delta replay mid-turn, in the server\'s order: the same layout', () => {
       send({ type: 'history_replay_start', fullHistory: false, latestSeq: 3 })
       send(openSnapshot(A + '42', t1Split))
       send(toolStart('t1', 2)); send(toolResult('t1', 3))
@@ -297,7 +297,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(layout().map((l) => l.replace(/-cont-\d+/, '-cont-#'))).toEqual(before)
     })
 
-    it('C2: a mid-sentence interruption replays as live drew it: ONE bubble m1 above the card', () => {
+    it('a mid-sentence interruption replays as live drew it: ONE bubble m1 above the card', () => {
       const text = 'Let me check the file first.'
       send({ type: 'history_replay_start', fullHistory: true, latestSeq: 4 })
       send(user(1))
@@ -307,7 +307,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(layout()).toEqual(['user_input', `m1:${text}`, 'tool:t1'])
     })
 
-    it('C4 / Codex 3: an earlier tool row that is not held (older than a delta replay window): exact layout, no repeat', () => {
+    it('an earlier tool row that is not held (older than a delta replay window): exact layout, no repeat', () => {
       send({ type: 'history_replay_start', fullHistory: false, latestSeq: 7 })
       send(toolStart('t2', 5)); send(toolResult('t2', 6))
       send(entry(A + B + C, splits, 7))
@@ -315,7 +315,7 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
       expect(layout()).toEqual([`m1-seg-1:${A + B}`, 'tool:t2', `m1:${C}`])
     })
 
-    it('S-1: a live message that lands in the middle of a chunked replay stays after the replayed reply', () => {
+    it('a live message that lands in the middle of a chunked replay stays after the replayed reply', () => {
       send({ type: 'history_replay_start', fullHistory: true, latestSeq: 6 })
       send(user(1))
       send(toolStart('t1', 2)); send(toolResult('t1', 3))

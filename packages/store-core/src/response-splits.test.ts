@@ -86,12 +86,12 @@ describe('layoutReplayedReplies', () => {
     expect(JSON.parse(JSON.stringify(input))).toEqual(copy)
   })
 
-  it('B-2: the open snapshot arrives BEFORE its own tool rows (the server splices it at its start seq): it is laid out once they are held', () => {
+  it('the open snapshot arrives BEFORE its own tool rows (the server splices it at its start seq): it is laid out once they are held', () => {
     const out = layoutReplayedReplies([user(), withSplits(reply(A2 + 'Charlie'), [split1]), tool('tu1')])!
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-0', A2], ['tu1'], ['m1', 'Charlie']])
   })
 
-  it('B-2: consecutive tool rows after the snapshot: the tail goes below the whole run', () => {
+  it('consecutive tool rows after the snapshot: the tail goes below the whole run', () => {
     const out = layoutReplayedReplies([user(), withSplits(reply(A2 + 'Charlie'), [split1]), tool('tu1'), tool('tu2')])!
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-0', A2], ['tu1'], ['tu2'], ['m1', 'Charlie']])
   })
@@ -101,7 +101,7 @@ describe('layoutReplayedReplies', () => {
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-0', A2], ['tu1'], ['tu2'], ['m1', C]])
   })
 
-  it('B-1: with the stale prefix gone, an evicted tool row is simply not an anchor: no split, text once', () => {
+  it('with the stale prefix gone, an evicted tool row is simply not an anchor: no split, text once', () => {
     const out = layoutReplayedReplies([user(), withSplits(reply('A. B. '), [{ at: 3, toolUseId: 't1' }])])!
     expect(shape(out)).toEqual([['user_input'], ['m1', 'A. B. ']])
   })
@@ -111,12 +111,12 @@ describe('layoutReplayedReplies', () => {
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-1', A2 + B], ['tu2'], ['m1', C]])
   })
 
-  it('S-1: a live message that landed mid-replay stays AFTER the reply it did not precede', () => {
+  it('a live message that landed mid-replay stays AFTER the reply it did not precede', () => {
     const out = layoutReplayedReplies([user(), tool('tu1'), withSplits(reply(A2 + C), [split1]), { id: 'm2', type: 'response', content: 'live', timestamp: 9 }])!
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-0', A2], ['tu1'], ['m1', C], ['m2', 'live']])
   })
 
-  it('S-5: anchors out of transcript order are not followed (only the in-order prefix splits)', () => {
+  it('anchors out of transcript order are not followed (only the in-order prefix splits)', () => {
     const text = 'A. B. C.'
     const out = layoutReplayedReplies([user(), tool('tu1'), tool('tu2'), withSplits(reply(text), [{ at: 3, toolUseId: 'tu2' }, { at: 6, toolUseId: 'tu1' }])])!
     expect(shape(out)).toEqual([['user_input'], ['tu1'], ['m1-seg-0', 'A. '], ['tu2'], ['m1', 'B. C.']])
@@ -147,7 +147,7 @@ describe('layoutReplayedReplies', () => {
   })
 })
 
-describe('a corrupt or restored responseSplits value (A nit 1)', () => {
+describe('a corrupt or restored responseSplits value', () => {
   it.each([
     ['a string', 'oops'],
     ['an object', { at: 3, toolUseId: 'tu1' }],
@@ -228,7 +228,7 @@ describe('handleMessage: a replayed reply carries its splits only when it is a N
   })
 })
 
-describe('S-2: a held EMPTY first slot', () => {
+describe('a held EMPTY first slot', () => {
   const held = [user(), reply('', 'm1'), tool('tu1')]
   const text = 'Let me check. Done now.'
 
@@ -271,7 +271,7 @@ describe('what the client already holds is never split or repeated (whole-entry 
   })
 })
 
-describe('the full replay swap, then the layout (#9009 / #9023, B-1, S-3)', () => {
+describe('the full replay swap, then the layout (#9009 / #9023)', () => {
   afterEach(() => resetReplayReconcile({ clearCursors: true }))
 
   function swapAndLay(prefix: ChatMessage[], replayed: ChatMessage[], streaming: string | null) {
@@ -286,19 +286,19 @@ describe('the full replay swap, then the layout (#9009 / #9023, B-1, S-3)', () =
     return layoutReplayedRepliesAtReplayEnd(SID, swapped) ?? swapped
   }
 
-  it('B-1 (duplicate): the client held [u, m1 "A. ", t1, m1-cont "B. "]; the ring evicted t1 and kept the whole entry: "B. " shows once', () => {
+  it('duplicate case: the client held [u, m1 "A. ", t1, m1-cont "B. "]; the ring evicted t1 and kept the whole entry: "B. " shows once', () => {
     const prefix = [user(), reply('A. ', 'm1'), { ...tool('t1'), toolResult: 'ok' } as ChatMessage, reply('B. ', 'm1-cont-5')]
     const out = swapAndLay(prefix, [user(), withSplits(reply('A. B. '), [{ at: 3, toolUseId: 't1' }])], 'm1-cont-5')
     expect(shape(out)).toEqual([['user_input'], ['m1', 'A. B. ']])
   })
 
-  it('B-1 (loss): the same with the tool row still held in the replay: nothing lost, nothing twice', () => {
+  it('loss case: the same with the tool row still held in the replay: nothing lost, nothing twice', () => {
     const prefix = [user(), reply('A. ', 'm1'), { ...tool('t1'), toolResult: 'ok' } as ChatMessage, reply('B. ', 'm1-cont-5')]
     const out = swapAndLay(prefix, [user(), tool('t1'), withSplits(reply('A. B. '), [{ at: 3, toolUseId: 't1' }])], 'm1-cont-5')
     expect(shape(out)).toEqual([['user_input'], ['m1-seg-0', 'A. '], ['t1'], ['m1', 'B. ']])
   })
 
-  it('S-3: live growth beyond the last split lands in the TAIL below the card, not on a piece above it', () => {
+  it('live growth beyond the last split lands in the TAIL below the card, not on a piece above it', () => {
     const prefix = [user(), reply('A. ', 'm1'), { ...tool('t1'), toolResult: 'ok' } as ChatMessage, reply('B. and more', 'm1-cont-5')]
     const replayed = [user(), tool('t1'), withSplits(reply('A. B. '), [{ at: 3, toolUseId: 't1' }])]
     const out = swapAndLay(prefix, replayed, 'm1-cont-5')

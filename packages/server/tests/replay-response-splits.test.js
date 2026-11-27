@@ -138,7 +138,7 @@ describe('recording where tool calls interrupted a reply (#9024)', () => {
     assert.equal(h._streamSplits.size, 0)
   })
 
-  it('S-4: a >50 KB reply keeps only the splits that lie inside the clipped text, through a persist/restore round trip', () => {
+  it('a >50 KB reply keeps only the splits that lie inside the clipped text, through a persist/restore round trip', () => {
     const h = new SessionMessageHistory()
     h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
     h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(10) })
@@ -172,7 +172,7 @@ describe('recording where tool calls interrupted a reply (#9024)', () => {
     assert.equal('splits' in h3.truncateEntry(reply(h3)), false, 'a split exactly at the clip is dropped')
   })
 
-  it('B2-1: a history page clips a long reply and its split points together', () => {
+  it('a history page clips a long reply and its split points together', () => {
     // escape-heavy text (a JSON quote is two bytes) so the ~40 KB reply is over the page's entry budget
     const q = (n) => '"'.repeat(n)
     const h = new SessionMessageHistory()
@@ -198,6 +198,22 @@ describe('recording where tool calls interrupted a reply (#9024)', () => {
     const gw = historyWireEntry(reply(g), g)
     assert.ok(gw.content.endsWith('[truncated]'))
     assert.equal('splits' in gw, false)
+  })
+
+  it('a split never falls between the two halves of a surrogate pair', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'ab\ud83d' }) // high half only so far
+    h.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ude00 done' })
+    h.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.deepEqual(reply(h).splits, [{ at: 2, toolUseId: 'tu1' }])
+    const h2 = new SessionMessageHistory()
+    h2.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h2.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ud83d' })
+    h2.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h2.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.equal('splits' in reply(h2), false, 'a split at 0 is no split')
   })
 
   it('the entry keeps its splits through a state-file round trip', () => {
@@ -273,7 +289,7 @@ describe('what a replay sends (#9024)', () => {
     }
   }))
 
-  it('Codex 1: an old client\'s delta replays across an open then closed split stream lose nothing and repeat nothing', withManager(async (mgr, sid) => {
+  it('an old client\'s delta replays across an open then closed split stream lose nothing and repeat nothing', withManager(async (mgr, sid) => {
     // An old client: has the in-flight capability, knows nothing of `splits`.
     mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'go', timestamp: 1 })
     rec(mgr, sid, ['BEFORE ', { tool: 'tu1' }])
@@ -288,7 +304,7 @@ describe('what a replay sends (#9024)', () => {
     assert.deepEqual(replies(later).map((m) => [m.messageId, m.content]), [['m1', 'BEFORE AFTER']])
   }))
 
-  it('Codex 1 (variant): a client without the in-flight capability gets the reply when the stream closes, even if its text all came before a tool', withManager(async (mgr, sid) => {
+  it('a client without the in-flight capability gets the reply when the stream closes, even if its text all came before a tool', withManager(async (mgr, sid) => {
     rec(mgr, sid, ['all of it', { tool: 'tu1' }])
     const mid = await replay(mgr, sid, { clientCapabilities: new Set() }, { forceFull: true })
     assert.deepEqual(replies(mid), [])
