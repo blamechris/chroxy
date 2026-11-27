@@ -226,16 +226,23 @@ const MACHINE_PROSE_PREFIXES = [
   '<local-command-stdout>',
   '<local-command-stderr>',
   '<local-command-caveat>',
+  // Bash mode (`!cmd`): the command and its output are recorded as wrapped strings.
+  '<bash-input>',
+  '<bash-stdout>',
+  '<bash-stderr>',
+  '<command-args>',
 ]
 
 /**
  * True when a string-content `user` entry is a prompt a person typed.
- * `isMeta` and `isCompactSummary` entries are excluded by flag; the rest by the
- * wrapper the harness puts at the start of the text.
+ * `isMeta`, `isCompactSummary` and `isSidechain` entries are excluded by flag
+ * (a sidechain's string "prompt" is a subagent's Task prompt, written into the same
+ * file by older Claude Code versions, not something the person typed; the runner's
+ * extractor skips them too); the rest by the wrapper the harness puts at the start.
  */
 export function isTypedPromptString(entry, content) {
   if (typeof content !== 'string') return false
-  if (entry.isMeta === true || entry.isCompactSummary === true) return false
+  if (entry.isMeta === true || entry.isCompactSummary === true || entry.isSidechain === true) return false
   const text = content.trim()
   if (!text) return false
   return !MACHINE_PROSE_PREFIXES.some((p) => text.startsWith(p))

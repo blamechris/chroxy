@@ -367,6 +367,12 @@ describe('readConversationHistoryWithMetaAsync — parsed message shapes (#7520:
             tui('n8', '2026-01-01T00:00:07Z', '<task-notification>\n<task-id>x</task-id>\n</task-notification>'),
             tui('n9', '2026-01-01T00:00:08Z', '<ci-monitor-event kind="x">done</ci-monitor-event>'),
             tui('n10', '2026-01-01T00:00:09Z', '\n  <system-reminder>leading whitespace</system-reminder>'),
+            tui('n11', '2026-01-01T00:00:09Z', '<bash-input>ls -la</bash-input>'),
+            tui('n12', '2026-01-01T00:00:09Z', '<bash-stdout>total 0</bash-stdout><bash-stderr></bash-stderr>'),
+            tui('n13', '2026-01-01T00:00:09Z', '<bash-stderr>not found</bash-stderr>'),
+            tui('n14', '2026-01-01T00:00:09Z', '<command-args>--verbose</command-args>'),
+            // A subagent's Task prompt written into the same file (older Claude Code).
+            tui('n15', '2026-01-01T00:00:09Z', 'Search the repo for the config loader', { isSidechain: true }),
           ]
           const filePath = writeJsonl('noise.jsonl', [
             ...noise,
