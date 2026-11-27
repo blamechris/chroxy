@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode, type CSSProperties } from 'react'
 import { writeText } from '../utils/clipboard'
+import { formatLiveErrorReport, recordDashboardError } from '../utils/error-history'
 
 interface ErrorBoundaryProps {
   children: ReactNode
@@ -8,6 +9,8 @@ interface ErrorBoundaryState {
   error: Error | null
   /** #9234 — React component stack from componentDidCatch, shown + copyable. */
   componentStack: string | null
+  /** When the error was caught: keeps the report stable across re-renders. */
+  caughtAt: number
   copyState: 'idle' | 'copied' | 'failed'
 }
 
@@ -44,6 +47,7 @@ const reloadStyle: CSSProperties = {
   border: 'none',
   borderRadius: 8,
   padding: '8px 16px',
+  minHeight: 44,
   fontWeight: 600,
   cursor: 'pointer',
 }
@@ -54,9 +58,11 @@ const copyStyle: CSSProperties = {
   border: '1px solid var(--scrollbar-thumb)',
   borderRadius: 8,
   padding: '8px 16px',
+  minHeight: 44,
   cursor: 'pointer',
 }
 const copyStatusStyle: CSSProperties = { marginLeft: 8, fontSize: 12, color: 'var(--text-dim)' }
+const savedNoteStyle: CSSProperties = { margin: '12px 0 0', fontSize: 12, color: 'var(--text-dim)' }
 const detailsStyle: CSSProperties = { marginTop: 16, color: 'var(--text-dim)' }
 const preStyle: CSSProperties = {
   marginTop: 8,
@@ -78,31 +84,31 @@ const preStyle: CSSProperties = {
  * of a blank page.
  */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { error: null, componentStack: null, copyState: 'idle' }
+  state: ErrorBoundaryState = { error: null, componentStack: null, caughtAt: 0, copyState: 'idle' }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error, componentStack: null, copyState: 'idle' }
+    return { error, componentStack: null, caughtAt: Date.now(), copyState: 'idle' }
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('[ErrorBoundary] render error:', error, info.componentStack)
+    // #9235 — the one place a render error is recorded (never from getDerivedStateFromError,
+    // which can run more than once). Stores classifier output only.
+    recordDashboardError({ category: 'render', error, componentStack: info.componentStack })
     this.setState({ componentStack: info.componentStack ?? null })
   }
 
-  /** #9234 — the operator reloaded before copying anything; make it one click. */
-  private buildDetails(): string {
-    const { error, componentStack } = this.state
-    return [
-      `time: ${new Date().toISOString()}`,
-      `path: ${window.location.pathname}`,
-      `message: ${error?.message ?? ''}`,
-      `stack:\n${error?.stack ?? '(none)'}`,
-      `componentStack:${componentStack ?? ' (none)'}`,
-    ].join('\n')
+  /**
+   * #9235 — the exact text shown in the detail pane and copied: allowlisted engine template,
+   * normalised frames and component names. The raw message and stack are never shown or copied.
+   */
+  private buildReport(): string {
+    const { error, componentStack, caughtAt } = this.state
+    return formatLiveErrorReport({ category: 'render', error, componentStack }, caughtAt || Date.now())
   }
 
   private handleCopy = async (): Promise<void> => {
-    const ok = await writeText(this.buildDetails())
+    const ok = await writeText(this.buildReport())
     this.setState({ copyState: ok ? 'copied' : 'failed' })
   }
 
@@ -111,7 +117,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   render(): ReactNode {
-    const { error, componentStack, copyState } = this.state
+    const { error, copyState } = this.state
     if (!error) return this.props.children
     return (
       <div style={overlay} role="alert" data-testid="error-boundary">
@@ -134,20 +140,19 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             onClick={this.handleCopy}
             data-testid="error-boundary-copy"
           >
-            Copy details
+            Copy report
           </button>
           {copyState !== 'idle' && (
             <span style={copyStatusStyle} role="status" data-testid="error-boundary-copy-status">
               {copyState === 'copied' ? 'Copied' : 'Copy failed'}
             </span>
           )}
+          <p style={savedNoteStyle} data-testid="error-boundary-saved-note">
+            Saved locally in Settings → Diagnostics. Nothing is uploaded.
+          </p>
           <details style={detailsStyle}>
             <summary>Error detail</summary>
-            <pre style={preStyle}>
-              {error.message}
-              {error.stack ? `\n\n${error.stack}` : ''}
-              {componentStack ? `\n\nComponent stack:${componentStack}` : ''}
-            </pre>
+            <pre style={preStyle} data-testid="error-boundary-report">{this.buildReport()}</pre>
           </details>
         </div>
       </div>

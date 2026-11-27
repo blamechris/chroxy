@@ -12,6 +12,7 @@ import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { SessionDefaultsNoticeBanner } from './CreateSessionModal'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
 import { SessionArchiveSettingsSection } from './SessionArchiveSettingsSection'
+import { DiagnosticsSettingsSection } from './DiagnosticsSettingsSection'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -2191,6 +2192,9 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               )}
             </section>
           )}
+
+          {/* #9235: local error history with review-before-copy reports. Not gated on Tauri. */}
+          <DiagnosticsSettingsSection />
 
           {inTauri && (
             <section className="settings-section">
