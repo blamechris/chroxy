@@ -4,6 +4,10 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "declaration": true,
+    // redaction.js is shipped verbatim from the server (#9235); JS is copied
+    // and its .d.ts emitted, never type-checked.
+    "allowJs": true,
+    "checkJs": false,
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
