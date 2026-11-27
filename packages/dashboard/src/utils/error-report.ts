@@ -6,26 +6,32 @@
  * truncation bypasses are endless. So this module never scrubs. It ALLOWLISTS:
  *
  *   - a message survives only if the WHOLE string matches a known JavaScript-engine error
- *     template, and every variable slot in it is identifier-shaped;
- *   - a stack frame survives only as `name @ basename:line:col`, where the name is
- *     identifier-shaped and the location is an http(s) bundle asset (`*.js|mjs|cjs`);
+ *     template, and every variable slot in it is a word-shaped identifier (below);
+ *   - a stack frame survives only as `name @ basename:line:col`, where the name is a
+ *     word-shaped identifier and the basename is one of the caller's own loaded scripts;
  *   - everything else becomes `[message omitted]` / `<anonymous>` / `<unknown>`.
  *
- * No output string is ever a substring of the input except a validated slot. Slots then
- * go through the shared redaction rules, because an identifier can still be a credential
- * (a `ghp_…` token used as a property key).
+ * No output string is ever a substring of the input except a validated slot.
+ *
+ * Guarantees, stated honestly:
+ *   - FAIL CLOSED for diagnostics. Anything not recognised is dropped, even if that loses a
+ *     useful report. A minified or unusual name that does not look like words is masked.
+ *   - BEST EFFORT for credentials. The word-shape admission rule is a conservative positive
+ *     allowlist: an identifier is kept only if it reads like words (bounded length, few
+ *     digits, vowel-bearing lowercase chunks, short acronyms, not hex). Known credential
+ *     prefixes are masked first, then the shared redaction rules run. This rejects random
+ *     tokens; it cannot be proven to reject every possible secret.
+ *   - ACCEPTED RESIDUAL. An identifier-shaped slot can still carry session content, e.g.
+ *     `PatientAliceHIVPositive` used as a property key: nothing can tell that from a real
+ *     identifier. The model accepts it, and PR 3's Copy flow shows the report for review
+ *     before anything is copied.
+ *   - File locations are kept only when their basename is in the caller-supplied
+ *     `assetBasenames` set, which is a TRUSTED input (see `StackOptions`).
  *
  * Linear time: every regex here is anchored, uses simple character classes and has no
  * nested or overlapping quantifier. The identifier class excludes `.`, so a dotted path
  * is unambiguous. All input is cut to a fixed size BEFORE any regex sees it, and the
  * stack walkers use `indexOf`/`slice`, never a split of the whole input.
- *
- * Accepted residual: an identifier-shaped slot can still carry session content, e.g.
- * `PatientAliceHIVPositive` used as a property key. Nothing can tell that from a real
- * identifier; the model accepts it, and the Copy flow shows the report for review before
- * anything is copied. Credentials are the part this module does defend (prefix and opaque-
- * token rules below), and file locations are kept only when they are the dashboard's OWN
- * loaded scripts, supplied by the caller (`assetBasenames`), never inferred from the text.
  *
  * Pure: no storage, no DOM, never throws. Storage and UI are layered on top elsewhere.
  */
@@ -36,8 +42,6 @@ const REDACTED = '[REDACTED]'
 const ANONYMOUS = '<anonymous>'
 const UNKNOWN = '<unknown>'
 
-/** A message longer than this cannot be an engine template. */
-const MAX_MESSAGE_CHARS = 300
 const MAX_STACK_LINES = 200
 /** A line longer than this is cut before parsing, and any frame it holds is dropped to anonymous/unknown. */
 const MAX_LINE_CHARS = 512
@@ -63,57 +67,174 @@ const REDACTED_SRC = '\\[REDACTED\\]'
 
 const ID_RE = new RegExp(`^${ID_SRC}$`)
 const PATH_RE = new RegExp(`^${PATH_SRC}$`)
+const DIGITS_RE = /^\d{1,10}$/
 
 /**
- * Known credential prefixes. A slot, name or basename that CONTAINS one is masked whole.
- * The shared patterns need a trailing word boundary, so `ghp_<36>_suffix` slips past them.
- * Hyphenated prefixes (glpat-, xoxb-, xoxp-, xoxa-, xoxs-) cannot occur inside an identifier,
- * so they are not listed; `ya29.` can (it separates path segments), so it is.
+ * Credential markers. A slot, name or basename that CONTAINS one is masked whole, because
+ * the shared patterns need a trailing word boundary (`ghp_<36>_suffix` slips past them).
+ *
+ * Plain substrings (identifier-safe): ghp_, gho_, ghu_, ghs_, ghr_, github_pat_, AIza,
+ * sk_live_, sk_test_, rk_live_, rk_test_, pk_live_, ya29., whsec_, shpat_, dckr_pat_, glsa_.
+ * Shape-gated, so ordinary names such as `npm_config_cache` or `ASIANMarketData` survive:
+ * `npm_` + 20 alphanumerics, `hf_` + 20 alphanumerics, `oauth_` + 16 alphanumerics,
+ * `AKIA`/`ASIA` + 16 of [A-Z0-9].
  */
 const CREDENTIAL_PREFIXES: readonly string[] = [
-  'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'AIza', 'AKIA', 'ASIA',
-  'sk_live_', 'sk_test_', 'rk_live_', 'pk_live_', 'ya29.', 'oauth_', 'npm_',
+  'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'AIza',
+  'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'pk_live_', 'ya29.',
+  'whsec_', 'shpat_', 'dckr_pat_', 'glsa_',
 ]
-
-const OPAQUE_MIN = 24
-
+const CREDENTIAL_SHAPES: readonly RegExp[] = [
+  /npm_[A-Za-z0-9]{20}/,
+  /hf_[A-Za-z0-9]{20}/,
+  /oauth_[A-Za-z0-9]{16}/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+]
 /**
- * Opaque-token defence in depth: any maximal alphanumeric run of at least 24 characters
- * whose character class (lower / upper / digit) changes at least once every 3 characters.
- * Random base62 and hex tokens change class about every 1.6-2 characters; camelCase words
- * change about every 6-8 (`handleSessionListUpdateResponse` is 4 changes in 31 chars), and
- * an all-lowercase or all-uppercase run never changes. A plain digit-ratio rule would miss
- * about half of random base62 tokens (expected ratio 16%), so transition density is used.
+ * Hyphenated families. They cannot occur in an identifier, so they are checked on BASENAMES
+ * only (which allow `-`): glpat-, xoxb-, xoxp-, xoxa-, xoxs-, and `sk-` (which covers
+ * sk-ant- and sk-proj-) at the start of a name or after `.`, `_` or `-`.
  */
-function hasOpaqueRun(s: string): boolean {
-  let runStart = 0
-  let changes = 0
-  let prev = -1
-  for (let i = 0; i <= s.length; i++) {
-    const c = i < s.length ? s.charCodeAt(i) : 0
-    const cls = c >= 48 && c <= 57 ? 2 : c >= 65 && c <= 90 ? 1 : c >= 97 && c <= 122 ? 0 : -1
-    if (cls < 0) {
-      if (i - runStart >= OPAQUE_MIN && changes * 3 >= i - runStart) return true
-      runStart = i + 1
-      changes = 0
-      prev = -1
-      continue
+const HYPHEN_PREFIXES: readonly string[] = ['glpat-', 'xoxb-', 'xoxp-', 'xoxa-', 'xoxs-']
+
+function hasCredentialMarker(s: string, hyphenated: boolean): boolean {
+  for (const p of CREDENTIAL_PREFIXES) if (s.includes(p)) return true
+  for (const re of CREDENTIAL_SHAPES) if (re.test(s)) return true
+  if (hyphenated) {
+    for (const p of HYPHEN_PREFIXES) if (s.includes(p)) return true
+    for (let i = s.indexOf('sk-'); i >= 0; i = s.indexOf('sk-', i + 1)) {
+      if (i === 0 || '._-'.includes(s.charAt(i - 1))) return true
     }
-    if (prev >= 0 && cls !== prev) changes++
-    prev = cls
   }
   return false
 }
 
-function hasCredentialMarker(s: string): boolean {
-  for (const p of CREDENTIAL_PREFIXES) if (s.includes(p)) return true
-  return hasOpaqueRun(s)
+const isLower = (c: number) => c >= 97 && c <= 122
+const isUpper = (c: number) => c >= 65 && c <= 90
+const isDigitCode = (c: number) => c >= 48 && c <= 57
+const isHexCode = (c: number) => isDigitCode(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+const VOWELS = 'aeiouyAEIOUY'
+
+/**
+ * The word-shape admission rule for ONE identifier segment (no `.`). Conservative and
+ * positive: a segment is kept only if ALL hold.
+ *   - 1 to 40 characters, only [A-Za-z0-9_$];
+ *   - at most 4 digits in total and no digit run longer than 3;
+ *   - not hex-only (8 or more characters, all [0-9a-fA-F]);
+ *   - split into chunks: a lowercase run optionally led by ONE uppercase letter
+ *     (`Session`), a run of 2+ uppercase letters (an acronym; when a lowercase letter
+ *     follows, its last uppercase goes to the next chunk: `HTTPStream` = `HTTP` + `Stream`),
+ *     digit runs and `_`/`$` separators; then
+ *       - every chunk with a lowercase letter and 4+ characters contains a vowel [aeiouy];
+ *       - no chunk with a lowercase letter is longer than 14 or holds a run of 5 or more
+ *         consecutive consonants (a vowel is [aeiouy]);
+ *       - no uppercase-only chunk is longer than 5;
+ *       - at most 2 one-letter alphabetic chunks (`i`, `x`), and at most 2 chunks of 1-2
+ *         letters in all (the "short fragments" rule: random mixed-case strings are mostly
+ *         1-2 letter fragments, real camelCase has few; added to the base rule after
+ *         measuring that without it about 18% of random base62 24-mers were admitted).
+ * Random hex, base62, base36 and base64url tokens fail one of these with overwhelming
+ * probability (see the corpus tests); real camelCase, snake_case and PascalCase names pass.
+ */
+export function isWordShaped(seg: string): boolean {
+  const n = seg.length
+  if (n === 0 || n > 40) return false
+  let digits = 0
+  let run = 0
+  let hexOnly = true
+  for (let i = 0; i < n; i++) {
+    const c = seg.charCodeAt(i)
+    if (isDigitCode(c)) {
+      digits++
+      run++
+      if (run > 3) return false
+    } else {
+      run = 0
+      if (!isLower(c) && !isUpper(c) && c !== 95 && c !== 36) return false
+    }
+    if (!isHexCode(c)) hexOnly = false
+  }
+  if (digits > 4) return false
+  if (n >= 8 && hexOnly) return false
+
+  let singles = 0
+  let shorts = 0
+  // Judge one alphabetic chunk [s, e); `upperOnly` when it has no lowercase letter.
+  const chunk = (s0: number, e: number): boolean => {
+    const len = e - s0
+    let hasLower = false
+    let hasVowel = false
+    let consonants = 0
+    let maxConsonants = 0
+    for (let k = s0; k < e; k++) {
+      if (isLower(seg.charCodeAt(k))) hasLower = true
+      if (VOWELS.includes(seg.charAt(k))) {
+        hasVowel = true
+        consonants = 0
+      } else if (++consonants > maxConsonants) maxConsonants = consonants
+    }
+    if (hasLower) {
+      if (len > 14) return false
+      if (len >= 4 && !hasVowel) return false
+      if (maxConsonants > 4) return false
+    } else if (len > 5) return false
+    if (len === 1) singles++
+    if (len <= 2) shorts++
+    return singles <= 2 && shorts <= 2
+  }
+  let i = 0
+  while (i < n) {
+    const c = seg.charCodeAt(i)
+    if (isLower(c)) {
+      let j = i
+      while (j < n && isLower(seg.charCodeAt(j))) j++
+      if (!chunk(i, j)) return false
+      i = j
+    } else if (isUpper(c)) {
+      let u = i
+      while (u < n && isUpper(seg.charCodeAt(u))) u++
+      if (u - i === 1) {
+        let j = u
+        while (j < n && isLower(seg.charCodeAt(j))) j++
+        if (!chunk(i, j)) return false
+        i = j
+      } else if (u < n && isLower(seg.charCodeAt(u))) {
+        if (!chunk(i, u - 1)) return false
+        let j = u
+        while (j < n && isLower(seg.charCodeAt(j))) j++
+        if (!chunk(u - 1, j)) return false
+        i = j
+      } else {
+        if (!chunk(i, u)) return false
+        i = u
+      }
+    } else {
+      i++ // digit run or `_` / `$` separator
+    }
+  }
+  return true
 }
 
-/** Run a validated slot through the shared redaction rules and the credential markers; a changed slot is masked whole. */
+/** Every dotted segment must be word-shaped. */
+function isWordShapedPath(path: string): boolean {
+  let start = 0
+  for (;;) {
+    const dot = path.indexOf('.', start)
+    const end = dot < 0 ? path.length : dot
+    if (!isWordShaped(path.slice(start, end))) return false
+    if (dot < 0) return true
+    start = dot + 1
+  }
+}
+
+/**
+ * Admit one validated identifier slot: credential markers first, then the word-shape rule,
+ * then the shared redaction rules. Anything refused is masked whole.
+ */
 function redactSlot(slot: string): string {
   try {
-    if (hasCredentialMarker(slot)) return REDACTED
+    if (hasCredentialMarker(slot, false)) return REDACTED
+    if (!isWordShapedPath(slot)) return REDACTED
     return redactValue(slot) === slot ? slot : REDACTED
   } catch {
     return REDACTED
@@ -125,14 +246,15 @@ function redactSlot(slot: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * (see `ERROR_TEMPLATE_PATTERNS` below.) `{id}` an identifier, `{path}` a dotted path of at most 4 identifiers, `{nullish}` the
- * literal `undefined` or `null`. Everything else is literal text. `{id}`/`{path}` also
+ * `{id}` an identifier, `{path}` a dotted path of at most 4 identifiers, `{key}` an
+ * identifier or a digit-only property key of at most 10 digits (`reading '0'`), `{nullish}`
+ * the literal `undefined` or `null`. Everything else is literal text. `{id}`/`{path}` also
  * accept the literal `[REDACTED]`, so that already-classified text re-validates to itself.
  */
 export const ERROR_TEMPLATE_PATTERNS: ReadonlyArray<readonly [id: string, pattern: string]> = [
   // V8
-  ['read-props-of', "Cannot read properties of {nullish} (reading '{id}')"],
-  ['cannot-set-props-of', "Cannot set properties of {nullish} (setting '{id}')"],
+  ['read-props-of', "Cannot read properties of {nullish} (reading '{key}')"],
+  ['cannot-set-props-of', "Cannot set properties of {nullish} (setting '{key}')"],
   ['not-a-function', '{path} is not a function'],
   ['not-a-constructor', '{path} is not a constructor'],
   ['not-iterable', '{path} is not iterable'],
@@ -149,7 +271,7 @@ export const ERROR_TEMPLATE_PATTERNS: ReadonlyArray<readonly [id: string, patter
   ['not-defined', "Can't find variable: {id}"],
   ['max-call-stack', 'Maximum call stack size exceeded.'],
   // SpiderMonkey (Firefox)
-  ['cannot-access-property', "can't access property \"{id}\", {path} is {nullish}"],
+  ['cannot-access-property', "can't access property \"{key}\", {path} is {nullish}"],
   ['cannot-access-before-init', "can't access lexical declaration '{id}' before initialization"],
   ['assignment-to-constant', "invalid assignment to const '{id}'"],
   ['cannot-convert-to-object', "can't convert {nullish} to object"],
@@ -168,7 +290,7 @@ interface CompiledTemplate {
   re: RegExp
   /** The pieces between placeholders, `parts.length === kinds.length + 1`. */
   parts: string[]
-  kinds: Array<'id' | 'path' | 'nullish'>
+  kinds: Array<'id' | 'path' | 'key' | 'nullish'>
 }
 
 function escapeLiteral(s: string): string {
@@ -180,16 +302,17 @@ function compile([id, pattern]: readonly [string, string]): CompiledTemplate {
   const kinds: CompiledTemplate['kinds'] = []
   let src = '^'
   let last = 0
-  const placeholder = /\{(id|path|nullish)\}/g
+  const placeholder = /\{(id|path|key|nullish)\}/g
   for (let m = placeholder.exec(pattern); m; m = placeholder.exec(pattern)) {
     const lit = pattern.slice(last, m.index)
     parts.push(lit)
     src += escapeLiteral(lit)
-    const kind = m[1] as 'id' | 'path' | 'nullish'
+    const kind = m[1] as 'id' | 'path' | 'key' | 'nullish'
     kinds.push(kind)
     src += kind === 'id' ? `(${ID_SRC}|${REDACTED_SRC})`
       : kind === 'path' ? `(${PATH_SRC}|${REDACTED_SRC})`
-        : '(undefined|null)'
+        : kind === 'key' ? `(${ID_SRC}|\\d{1,10}|${REDACTED_SRC})`
+          : '(undefined|null)'
     last = m.index + m[0].length
   }
   const tail = pattern.slice(last)
@@ -199,6 +322,16 @@ function compile([id, pattern]: readonly [string, string]): CompiledTemplate {
 }
 
 const COMPILED: readonly CompiledTemplate[] = ERROR_TEMPLATE_PATTERNS.map(compile)
+
+/** Longest slot text each placeholder can match: an id is 64, a path 4x64+3, `undefined` is 9. */
+const SLOT_MAX = { id: 64, path: 4 * 64 + 3, key: 64, nullish: 9 } as const
+
+/**
+ * The longest message any template can match, computed from the table so it cannot drift:
+ * a longer message is not a template, and is never handed to a regex.
+ */
+export const MAX_MESSAGE_CHARS: number = Math.max(...COMPILED.map(t =>
+  t.parts.reduce((sum, p) => sum + p.length, 0) + t.kinds.reduce((sum, k) => sum + SLOT_MAX[k], 0)))
 
 /** The set of stable template ids, for tests and for the Diagnostics UI. */
 export const ERROR_TEMPLATE_IDS: readonly string[] = Array.from(new Set(ERROR_TEMPLATE_PATTERNS.map(t => t[0])))
@@ -230,7 +363,8 @@ export function classifyErrorMessage(name: unknown, message: unknown): Classifie
       // invariant visible and local) and then redacted.
       const slot = kind === 'nullish' ? raw
         : raw === REDACTED ? REDACTED
-          : (kind === 'id' ? ID_RE : PATH_RE).test(raw) ? redactSlot(raw) : null
+          : kind === 'key' && DIGITS_RE.test(raw) ? raw
+            : (kind === 'path' ? PATH_RE : ID_RE).test(raw) ? redactSlot(raw) : null
       if (slot === null) return omitted
       text += slot + (t.parts[i + 1] ?? '')
     }
@@ -250,6 +384,14 @@ export type AssetBasenames = ReadonlySet<string>
 
 export interface StackOptions {
   maxFrames?: number
+  /**
+   * The basenames of the dashboard's OWN loaded scripts (`document.scripts`, the module's
+   * `import.meta.url`), captured at report time by the caller. This is a TRUSTED input:
+   * it must never be read from a stored entry, a report or anything else that came from
+   * outside the running dashboard, because membership is the only thing that lets a
+   * location through. Absent or empty, every location is `<unknown>` (fail closed). A
+   * member is still refused if it carries a credential marker or is changed by redaction.
+   */
   assetBasenames?: AssetBasenames
 }
 
@@ -264,41 +406,51 @@ function isDigits(s: string): boolean {
   return true
 }
 
+interface SplitLocation { base: string; line: string; col: string }
+
 /**
- * `basename:line:col` for an http(s) bundle asset, else `<unknown>`. Only the basename
- * survives: userinfo, host, directories, query and fragment are never copied.
+ * Structure only: an http(s) URL with a path, ending `:line:col` (digits, at most 7 each).
+ * Returns the basename after the last `/` of the part before any `?` or `#`; userinfo, host,
+ * directories, query and fragment are never copied. Whether the basename may be kept is
+ * `keepLocation`'s job.
  */
-function normalizeLocation(loc: string, assets: AssetBasenames | undefined): string {
+function splitLocation(loc: string): SplitLocation | null {
   const colIdx = loc.lastIndexOf(':')
-  if (colIdx < 0) return UNKNOWN
+  if (colIdx < 0) return null
   const lineIdx = loc.lastIndexOf(':', colIdx - 1)
-  if (lineIdx < 0) return UNKNOWN
+  if (lineIdx < 0) return null
   const col = loc.slice(colIdx + 1)
   const line = loc.slice(lineIdx + 1, colIdx)
-  if (!isDigits(line) || !isDigits(col)) return UNKNOWN
-  let url = loc.slice(0, lineIdx)
+  if (!isDigits(line) || !isDigits(col)) return null
+  const url = loc.slice(0, lineIdx)
   let rest: string
   if (url.startsWith('http://')) rest = url.slice(7)
   else if (url.startsWith('https://')) rest = url.slice(8)
-  else return UNKNOWN
-  // Everything from the first `?` or `#` is query/fragment; it is dropped, never inspected.
+  else return null
   const q = rest.search(/[?#]/)
   if (q >= 0) rest = rest.slice(0, q)
-  url = rest
-  const slash = url.lastIndexOf('/')
-  if (slash < 0) return UNKNOWN // host only, no path: nothing here is a bundle asset
-  const base = url.slice(slash + 1)
-  return keepLocation(base, line, col, assets)
+  const slash = rest.lastIndexOf('/')
+  if (slash < 0) return null // host only, no path
+  return { base: rest.slice(slash + 1), line, col }
+}
+
+/** `basename:line:col` for one of the caller's own assets, else `<unknown>`. */
+function normalizeLocation(loc: string, assets: AssetBasenames | undefined): string {
+  const parts = splitLocation(loc)
+  return parts ? keepLocation(parts.base, parts.line, parts.col, assets) : UNKNOWN
 }
 
 /**
  * The ONE validator for a `basename:line:col` location, used for raw URLs and for stored
  * `name @ loc` output alike: the basename must be a member of the caller's asset set, be
- * bundle-shaped, survive redaction unchanged and carry no credential marker.
+ * bundle-shaped, carry no credential marker (including the hyphenated families, which
+ * basenames may contain) and survive redaction unchanged. The word-shape rule is NOT applied
+ * here: bundler hashes such as `index-BkL3mZ9x.js` are legitimate, and set membership is the
+ * gate.
  */
 function keepLocation(base: string, line: string, col: string, assets: AssetBasenames | undefined): string {
   if (!assets || typeof assets.has !== 'function' || !assets.has(base)) return UNKNOWN
-  if (!BUNDLE_BASENAME_RE.test(base) || hasCredentialMarker(base)) return UNKNOWN
+  if (!BUNDLE_BASENAME_RE.test(base) || hasCredentialMarker(base, true)) return UNKNOWN
   try {
     if (redactValue(base) !== base) return UNKNOWN
   } catch {
@@ -376,10 +528,13 @@ function parseFrame(rawLine: string, truncated: boolean, assets: AssetBasenames 
       if (c === 32 || c === 9) { nameOk = false; break }
     }
     if (!nameOk) return null
-    if (truncated) return `${ANONYMOUS} @ ${UNKNOWN}`
-    const loc = line.slice(at + 1)
-    if (loc.length === 0 || /\s/.test(loc)) return null
-    return `${at === 0 ? ANONYMOUS : normalizeName(line.slice(0, at))} @ ${normalizeLocation(loc, assets)}`
+    // A frame only if the part after the `@` is a structurally valid http(s) location with
+    // line:col; anything else (`alice@example.com`, `fn@[native code]`, a truncated line) is
+    // not a frame and is skipped entirely.
+    if (truncated) return null
+    const parts = splitLocation(line.slice(at + 1))
+    if (!parts) return null
+    return `${at === 0 ? ANONYMOUS : normalizeName(line.slice(0, at))} @ ${keepLocation(parts.base, parts.line, parts.col, assets)}`
   }
   return null
 }

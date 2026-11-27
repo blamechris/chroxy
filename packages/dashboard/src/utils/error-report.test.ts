@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   classifyErrorMessage, normalizeStack, normalizeComponentStack, formatErrorReport,
-  MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, type ErrorReportEntry, type StackOptions,
+  MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, MAX_MESSAGE_CHARS, isWordShaped, type ErrorReportEntry, type StackOptions,
 } from './error-report'
 
 /** The dashboard's own loaded scripts: the ONLY basenames a location may keep. */
@@ -62,7 +62,7 @@ describe('classifyErrorMessage: templates', () => {
   it('every template VARIANT (pattern string) has a positive row, not just every id', () => {
     const loose = (pattern: string) => new RegExp(`^${pattern
       .replace(/[\\^$.*+?()[\]|/]/g, '\\$&')
-      .replace(/\{(?:id|path|nullish)\}/g, '.+')}$`)
+      .replace(/\{(?:id|path|key|nullish)\}/g, '.+')}$`)
     const uncovered = ERROR_TEMPLATE_PATTERNS.filter(([id, pattern]) =>
       !POSITIVE.some(([, tid, msg]) => tid === id && loose(pattern).test(msg)))
     expect(uncovered).toEqual([])
@@ -299,7 +299,7 @@ describe('normalizeStack', () => {
     const long = `at ${'a'.repeat(300)} (http://localhost/dashboard/assets/${'b'.repeat(400)}.js:1:2)`
     expect(ns(long)).toEqual(['<anonymous> @ <unknown>'])
     const longJsc = `fn@http://localhost/${'b'.repeat(600)}.js:1:2`
-    expect(ns(longJsc)).toEqual(['<anonymous> @ <unknown>'])
+    expect(ns(longJsc)).toEqual([]) // a truncated fn@loc cannot be verified: skipped
     // a long non-frame line stays skipped
     expect(ns(`${'x'.repeat(2000)}`)).toEqual([])
   })
@@ -480,14 +480,6 @@ describe('R1: locations need the caller\'s asset set', () => {
     expect(ns('fn @ index-abc123.js:1:2')).toEqual(['fn @ index-abc123.js:1:2'])
   })
 
-  it('a member of the set is still dropped if redaction or a credential marker flags it', () => {
-    for (const base of [`${TOKEN}.js`, 'npm_config.js', `${'aB3'.repeat(10)}.js`]) {
-      const set = new Set([base])
-      expect(normalizeStack(`at fn (https://h/${base}:1:2)`, { assetBasenames: set }), base).toEqual(['fn @ <unknown>'])
-      expect(normalizeStack(`fn @ ${base}:1:2`, { assetBasenames: set }), base).toEqual(['fn @ <unknown>'])
-    }
-  })
-
   it('still requires http(s) for a raw URL even when the basename is a member', () => {
     expect(ns('at fn (file:///x/a.js:1:2)')).toEqual(['fn @ <unknown>'])
     expect(ns('at fn (data:,/a.js:1:2)')).toEqual(['fn @ <unknown>'])
@@ -534,12 +526,147 @@ describe('R2: closed header fields', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// The two corpora for the word-shape admission rule (#9235 PR 2, second review fold-in)
+// ---------------------------------------------------------------------------
+
+/** Deterministic PRNG (LCG): the corpora must not change between runs. */
+function lcg(seed: number): () => number {
+  let s = seed >>> 0
+  return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 2 ** 32 }
+}
+const LOWER = 'abcdefghijklmnopqrstuvwxyz'
+const UPPER = LOWER.toUpperCase()
+const DIGIT = '0123456789'
+function randomString(rnd: () => number, alphabet: string, n: number): string {
+  let out = ''
+  for (let i = 0; i < n; i++) out += alphabet.charAt(Math.floor(rnd() * alphabet.length))
+  return out
+}
+function sample(seed: number, alphabet: string, n: number, count: number): string[] {
+  const rnd = lcg(seed)
+  return Array.from({ length: count }, () => randomString(rnd, alphabet, n))
+}
+
+const RANDOM_BODY = 'Qz7LmP3xVb9KdR2sTn5WcY8uHf4JgE6a'
+const MUST_REDACT: string[] = [
+  'ec4dcab55ef2997145102abb08905fa1', // hex
+  'ghcKYWA3Kj6gqgDm3fWty_9DRBTHuBXSbOm5vEEcDy4', // base64url
+  'zkzxQdaiQNTSpudgfgdFZRrdiB9W43FtbqregFYA', // AWS-secret shape
+  '123e4567e89b12d3a456426614174000', // undashed UUID
+  ...sample(101, LOWER + UPPER + DIGIT, 24, 8), // random base62, 24
+  ...sample(102, LOWER + UPPER + DIGIT, 32, 8), // random base62, 32
+  ...sample(103, LOWER + DIGIT, 24, 8), // random base36 lowercase, 24
+  ...sample(104, LOWER + UPPER, 24, 8), // random mixed letters, 24
+  ...['whsec_', 'shpat_', 'hf_', 'dckr_pat_', 'glsa_', 'rk_test_'].map(p => `${p}${RANDOM_BODY}`),
+]
+
+const MUST_KEEP: string[] = [
+  'dimensions', 'handleSessionListUpdateResponse', 'SessionTabBarOverflowMenuItem', 'sendUtf8EncodedMessageToServer',
+  'decodeBase64UrlToUint8Array', 'base64ToUint8ArrayBuffer', 'decodeUTF8ToUTF16ArrayBuffer', 'HTTP2StreamToHTTP1Message',
+  'useMemoizedCallbackHookV3Wrapper9',
+  '_private', '$el', 'i', 'x', '__proto__', 'onClick', 'setState', 'React', 'useEffect', 'ChatView', 'MessageBubble', 'ASIANMarketData',
+  'npm_config_cache', 'handleSessionListUpdateResponseV2Handler', 'a_very_long_snake_case_identifier_name', 'useChatViewScrollRestoration',
+  'this', 'undefined', 'getElementById', 'webpackJsonpCallback'
+]
+
+describe('word-shape rule: MUST-REDACT corpus', () => {
+  it.each(MUST_REDACT.map(t => [t] as const))('%s is refused as a slot, a frame name and a component name', (tok) => {
+    // A token that does not even start like an identifier never reaches the word-shape rule:
+    // the template regex omits the whole message, the frame name becomes <anonymous>.
+    const startsId = /^[A-Za-z_$]/.test(tok)
+    expect(startsId ? isWordShaped(tok) : false).toBe(false)
+    const outs = [
+      classifyErrorMessage('TypeError', `${tok} is not a function`).text,
+      classifyErrorMessage('TypeError', `a.${tok} is not a function`).text,
+      classifyErrorMessage('TypeError', `Cannot read properties of undefined (reading '${tok}')`).text,
+      ...ns(`at ${tok} (http://localhost/a.js:1:2)`), ...ns(`${tok}@http://localhost/a.js:1:2`), ...normalizeComponentStack(`at ${tok}`),
+    ]
+    for (const o of outs) expect(o.includes(tok), o).toBe(false)
+    if (startsId) {
+      expect(classifyErrorMessage('TypeError', `${tok} is not a function`).text).toBe('[REDACTED] is not a function')
+      expect(ns(`at ${tok} (http://localhost/a.js:1:2)`)).toEqual(['[REDACTED] @ a.js:1:2'])
+      expect(normalizeComponentStack(`at ${tok}`)).toEqual(['[REDACTED]'])
+    }
+  })
+
+  it('statistically: random tokens almost never get in (fixed seeds, 2000 samples per class)', () => {
+    // Only a token that starts like an identifier can reach the rule, so samples start with a letter.
+    const slip = (alphabet: string, n: number, seed: number): number =>
+      sample(seed, alphabet, n, 2000).map(t => `k${t.slice(1)}`).filter(isWordShaped).length / 2000
+    expect(slip(LOWER + UPPER + DIGIT, 24, 201)).toBeLessThan(0.02)
+    expect(slip(LOWER + UPPER + DIGIT, 32, 202)).toBeLessThan(0.01)
+    expect(slip(LOWER + DIGIT, 24, 203)).toBeLessThan(0.06)
+    expect(slip(LOWER + UPPER, 24, 204)).toBeLessThan(0.04)
+    expect(slip(DIGIT + 'abcdef', 32, 205)).toBe(0)
+    expect(slip(LOWER + UPPER + DIGIT + '_', 43, 206)).toBe(0)
+  })
+})
+
+describe('word-shape rule: MUST-KEEP corpus', () => {
+  it.each(MUST_KEEP.map(t => [t] as const))('%s is kept', (id) => {
+    expect(isWordShaped(id)).toBe(true)
+    expect(classifyErrorMessage('TypeError', `${id} is not a function`).text).toBe(`${id} is not a function`)
+    expect(ns(`at ${id} (http://localhost/a.js:1:2)`)).toEqual([`${id} @ a.js:1:2`])
+    expect(normalizeComponentStack(`at ${id}`)).toEqual([id])
+  })
+})
+
+describe('word-shape rule: each clause', () => {
+  it('length 40 is kept and 41 is refused', () => {
+    expect(isWordShaped(`${'handle_'.repeat(5)}abcde`)).toBe(true) // 40
+    expect(isWordShaped(`${'handle_'.repeat(5)}abcdef`)).toBe(false) // 41
+    expect(isWordShaped('aeiou'.repeat(8))).toBe(false) // 40 chars but one 40-letter chunk
+  })
+  it('digits: at most 4 in total and no run longer than 3', () => {
+    expect(isWordShaped('a1b2c3d4')).toBe(false) // 4 digits but 8 one-letter... short chunks
+    expect(isWordShaped('utf8Value12')).toBe(true) // 3 digits
+    expect(isWordShaped('base64Value')).toBe(true)
+    expect(isWordShaped('value123')).toBe(true) // run of 3
+    expect(isWordShaped('value1234')).toBe(false) // run of 4
+    expect(isWordShaped('valueOne1Two2Three3Four4Five5')).toBe(false) // 5 digits in total
+    expect(isWordShaped('valueOne1Two2Three3Four4')).toBe(true) // 4 in total
+  })
+  it('hex-only of 8 or more is refused (the hex rule), 7 is not', () => {
+    expect(isWordShaped('deadbeef')).toBe(false)
+    expect(isWordShaped('DEADBEEF')).toBe(false)
+    expect(isWordShaped('facade')).toBe(true)
+    expect(isWordShaped('abcdefab')).toBe(false)
+  })
+  it('the vowel rule: a 4+ letter lowercase chunk needs a vowel [aeiouy]', () => {
+    expect(isWordShaped('zkzx')).toBe(false)
+    expect(isWordShaped('myth')).toBe(true) // y counts
+    expect(isWordShaped('fnc')).toBe(true) // 3 letters: exempt
+    expect(isWordShaped('doBlkz')).toBe(false) // Blkz
+  })
+  it('a lowercase chunk is at most 14 and an uppercase-only chunk at most 5', () => {
+    expect(isWordShaped('abcdefghijklmno'.replace(/[a-z]/g, 'a'))).toBe(false) // 15 letters
+    expect(isWordShaped('internationally')).toBe(false) // 15
+    expect(isWordShaped('internationa')).toBe(true) // 12
+    expect(isWordShaped('HTTPS')).toBe(true)
+    expect(isWordShaped('ASIANX')).toBe(false) // 6 uppercase
+    expect(isWordShaped('HTTPStream')).toBe(true) // HTTP + Stream
+  })
+  it('at most 2 one-letter chunks, and at most 2 chunks of 1-2 letters in all', () => {
+    expect(isWordShaped('aXbYc')).toBe(false)
+    expect(isWordShaped('xA')).toBe(true)
+    expect(isWordShaped('getElByIdOrNm')).toBe(false) // El By Id Or Nm: too many short fragments
+  })
+  it('a run of 5 consonants in a chunk is refused', () => {
+    expect(isWordShaped('strengths')).toBe(false)
+    expect(isWordShaped('length')).toBe(true)
+  })
+  it('non-identifier characters are refused', () => {
+    for (const bad of ['', 'a-b', 'a b', 'a.b', "a'b", 'é']) expect(isWordShaped(bad), bad).toBe(false)
+  })
+})
+
 describe('R3: credential markers inside identifiers', () => {
   const T36 = 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
   const PREFIXED = [
     `ghp_${T36}_suffix`, `x_ghp_${T36}`, `gho_${T36}`, `ghu_${T36}`, `ghs_${T36}`, `ghr_${T36}`, 'github_pat_11ABCDEFG0abcdefghij_xyz',
-    'AIzaSyAbcdefghij', 'AKIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE', 'sk_live_abc', 'sk_test_abc', 'rk_live_abc', 'pk_live_abc',
-    'oauth_token_value', 'npm_abc',
+    'AIzaSyAbcdefghij', 'AKIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE', 'sk_live_abc', 'sk_test_abc', 'rk_live_abc', 'rk_test_abc', 'pk_live_abc',
+    'whsec_abc', 'shpat_abc', 'dckr_pat_abc', 'glsa_abc', `hf_${'a'.repeat(20)}`, `oauth_${'a'.repeat(16)}`, `npm_${'a'.repeat(20)}`,
   ]
   it.each(PREFIXED)('a slot containing %s is [REDACTED]', (id) => {
     const r = classifyErrorMessage('TypeError', `Cannot read properties of undefined (reading '${id}')`)
@@ -551,21 +678,104 @@ describe('R3: credential markers inside identifiers', () => {
   it('ya29. inside a dotted path is masked', () => {
     expect(classifyErrorMessage('TypeError', 'a.ya29.b is not a function').text).toBe('[REDACTED] is not a function')
   })
-
-  it('an opaque token (>= 24 chars, class changes at least every 3 chars) is masked', () => {
-    for (const tok of [T36, 'f3a9c1d27b8e4056a1b2c3d4e5f60718', 'Zx9Qw3Er7Ty1Ui5Op2As6Df0Gh4Jk8', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4']) {
-      expect(classifyErrorMessage('TypeError', `${tok} is not a function`).text, tok).toBe('[REDACTED] is not a function')
-    }
-  })
-  it('normal long names are kept: camelCase, snake, lowercase, uppercase', () => {
-    for (const id of ['handleSessionListUpdateResponse', 'handleSessionListUpdateResponseV2Handler', 'a_very_long_snake_case_identifier_name', 'ALL_UPPERCASE_CONSTANT_NAME_HERE', 'abcdefghijklmnopqrstuvwxyzabcdefghij', 'useChatViewScrollRestoration']) {
+  it('shape-gated families keep ordinary names: npm_config_cache, oauth_token, hf_value, AKIA/ASIA words', () => {
+    for (const id of ['npm_config_cache', 'oauth_token', 'hf_value', 'ASIANMarketData', 'AKIAlike']) {
       expect(classifyErrorMessage('TypeError', `${id} is not a function`).text, id).toBe(`${id} is not a function`)
     }
   })
-  it('a 23-char run is below the opaque threshold', () => {
-    const id = 'a1B2c3D4e5F6g7H8i9J0k1L'
-    expect(id).toHaveLength(23)
-    expect(classifyErrorMessage('TypeError', `${id} is not a function`).text).toBe(`${id} is not a function`)
+})
+
+describe('F3: layers that only a specific input can exercise', () => {
+  it('(a) redactValue is load-bearing for slots: a word-shaped JWT in a path slot is masked by redaction alone', () => {
+    const jwt = 'eyJhaaaaaaaa.zaaaaaaa.yaaaaaaa'
+    expect(jwt.split('.').every(isWordShaped)).toBe(true) // the word-shape rule does NOT catch it
+    expect(classifyErrorMessage('TypeError', `${jwt} is not a function`).text).toBe('[REDACTED] is not a function')
+  })
+  it('(b) redactValue is load-bearing for locations: a word-shaped JWT-like asset name is refused', () => {
+    const base = 'eyJhaaaaaaaa.zaaaaaaa.yaaaaaaa.js'
+    const set = new Set([base])
+    expect(normalizeStack(`at fn (https://h/${base}:1:2)`, { assetBasenames: set })).toEqual(['fn @ <unknown>'])
+    expect(normalizeStack(`fn @ ${base}:1:2`, { assetBasenames: set })).toEqual(['fn @ <unknown>'])
+  })
+  it('(c) a line longer than the cap whose first 513 chars look like a valid frame stays anonymous/unknown', () => {
+    const core = ' (https://h/a.js:1:2)'
+    const head = `at ${'f'.repeat(513 - 3 - core.length)}${core}`
+    expect(head).toHaveLength(513)
+    expect(ns(`${head}EXTRA`)).toEqual(['<anonymous> @ <unknown>'])
+    expect(ns(head)).toEqual(['<anonymous> @ <unknown>']) // 513 is already past the 512 cap
+    // a 512-char line is within the cap, so the location is read
+    expect(ns(`at ${'f'.repeat(512 - 3 - core.length)}${core}`)).toEqual(['<anonymous> @ a.js:1:2'])
+  })
+  it('(d) whitespace before the @ is never a frame, even with a valid location after it', () => {
+    expect(ns('Alice Smith@https://h/a.js:1:2')).toEqual([])
+    expect(ns('Error: a@https://h/a.js:1:2')).toEqual([])
+  })
+  it('(e) the message cap is exactly the longest legal template; the next character cannot be a template', () => {
+    const SLOT = { id: 'a'.repeat(64), key: 'a'.repeat(64), path: Array.from({ length: 4 }, () => 'a'.repeat(64)).join('.'), nullish: 'undefined' } as const
+    const longest = ERROR_TEMPLATE_PATTERNS
+      .map(([, pattern]) => pattern.replace(/\{(id|path|key|nullish)\}/g, (_, k: keyof typeof SLOT) => SLOT[k]))
+      .reduce((a, b) => (b.length > a.length ? b : a))
+    expect(longest.length).toBe(MAX_MESSAGE_CHARS)
+    expect(classifyErrorMessage('TypeError', longest).template).not.toBeNull()
+    expect(classifyErrorMessage('TypeError', `${longest}x`).template).toBeNull()
+    expect(classifyErrorMessage('TypeError', `x${longest}`).template).toBeNull()
+    // The cap is derived from the table, so it cannot be a stale hand-written number. It is
+    // the regex's own upper bound, so no input exactly one over it can be accepted by the
+    // regex alone: the cap guards the input size the regexes ever see, not a verdict.
+    expect(MAX_MESSAGE_CHARS).toBeGreaterThan(300)
+  })
+})
+
+describe('F4: JSC fn@loc needs a valid http(s) location with line:col', () => {
+  it('rejects non-locations entirely (no frame at all)', () => {
+    for (const line of ['alice@example.com', 'fn@[native code]', 'fn@http://h/a.js', 'fn@http://h/a.js:1', 'fn@file:///x/a.js:1:2', 'fn@ftp://h/a.js:1:2', 'fn@http://host:1:2', 'fn@', '@']) {
+      expect(ns(line), line).toEqual([])
+    }
+  })
+  it('a valid location outside the asset set is a frame with an unknown location', () => {
+    expect(ns('fn@http://h/zz.js:1:2')).toEqual(['fn @ <unknown>'])
+    expect(ns('@http://h/a.js:1:2')).toEqual(['<anonymous> @ a.js:1:2'])
+  })
+})
+
+describe('F5: digit-only property keys', () => {
+  it.each([
+    ["Cannot read properties of undefined (reading '0')", 'read-props-of'],
+    ["Cannot read properties of null (reading '4294967295')", 'read-props-of'],
+    ["Cannot set properties of undefined (setting '12')", 'cannot-set-props-of'],
+    ['can\'t access property "5", a.b is undefined', 'cannot-access-property'],
+  ])('%s is kept', (message, template) => {
+    const r = classifyErrorMessage('TypeError', message)
+    expect(r.template).toBe(template)
+    expect(r.text).toBe(message)
+  })
+  it.each([
+    "Cannot read properties of undefined (reading '12345678901')", "Cannot read properties of undefined (reading '1a')",
+    "Cannot read properties of undefined (reading '-1')", "Cannot read properties of undefined (reading '')", "Cannot read properties of undefined (reading '1.5')",
+  ])('%s is omitted', (message) => {
+    expect(classifyErrorMessage('TypeError', message).text).toBe(OMIT)
+  })
+  it('digit keys are only for key slots, not for function or variable names', () => {
+    expect(classifyErrorMessage('TypeError', '0 is not a function').text).toBe(OMIT)
+    expect(classifyErrorMessage('TypeError', "Cannot access '0' before initialization").text).toBe(OMIT)
+  })
+})
+
+describe('D2: credential-bearing members of the asset set', () => {
+  const MEMBERS = [
+    'glpat-abcdefghij.js', 'xoxb-123-456.js', 'xoxp-123-456.js', 'xoxa-123-456.js', 'xoxs-123-456.js', 'sk-abcdef.js', 'sk-ant-abc.js',
+    'sk-proj-abc.js', 'index-sk-abc.js', 'rk_test_abc.js', 'whsec_abc.js', 'ghp_abc.js', `npm_${'a'.repeat(20)}.js`, `AKIA${'A1'.repeat(8)}.js`,
+  ]
+  it.each(MEMBERS)('member %s becomes <unknown> on both branches', (base) => {
+    const set = new Set([base])
+    expect(normalizeStack(`at fn (https://h/${base}:1:2)`, { assetBasenames: set })).toEqual(['fn @ <unknown>'])
+    expect(normalizeStack(`fn @ ${base}:1:2`, { assetBasenames: set })).toEqual(['fn @ <unknown>'])
+  })
+  it('legitimate bundler hashes are kept: the word-shape rule is NOT applied to basenames', () => {
+    const set = new Set(['index-BkL3mZ9x.js', 'task-list-Qz7LmP3x.js', 'vendor-react-Zx9Qw3Er.js'])
+    expect(normalizeStack('at fn (https://h/assets/index-BkL3mZ9x.js:1:2)', { assetBasenames: set })).toEqual(['fn @ index-BkL3mZ9x.js:1:2'])
+    expect(normalizeStack('at fn (https://h/assets/task-list-Qz7LmP3x.js:1:2)', { assetBasenames: set })).toEqual(['fn @ task-list-Qz7LmP3x.js:1:2'])
+    expect(normalizeStack('fn @ vendor-react-Zx9Qw3Er.js:1:2', { assetBasenames: set })).toEqual(['fn @ vendor-react-Zx9Qw3Er.js:1:2'])
   })
 })
 
