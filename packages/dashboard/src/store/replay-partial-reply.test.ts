@@ -161,6 +161,174 @@ describe('a replayed partial reply, through the real handler (#9022)', () => {
     expect(msgs()[3]!.content).toBe('STREAM-LINE 1\n')
   })
 
+  describe('a reply a tool call interrupted is laid out around its tool cards when the replay ends (#9024)', () => {
+    const A = 'Alpha one. '
+    const B = 'Bravo two. '
+    const C = 'Charlie three. '
+    const splits = [{ at: A.length, toolUseId: 't1' }, { at: (A + B).length, toolUseId: 't2' }]
+    const entry = (content: string, sp: unknown, seq?: number) => ({
+      type: 'message', messageType: 'response', messageId: 'm1', content, timestamp: 3, splits: sp,
+      ...(seq === undefined ? {} : { historySeq: seq }),
+    })
+    const toolResult = (id: string, seq: number) => ({ type: 'tool_result', toolUseId: id, result: 'ok', historySeq: seq })
+    const layout = () => msgs().map((m) => (m.type === 'response' ? `${m.id}:${m.content}` : m.type === 'tool_use' ? `tool:${m.toolUseId}` : m.type))
+    // The wire order the SERVER produces for an open stream: the snapshot (no historySeq) is
+    // spliced in at the seq its text began, i.e. BEFORE the tool rows that followed it.
+    const openSnapshot = (text: string, sp: unknown) => entry(text, sp)
+    const t1Split = [{ at: A.length, toolUseId: 't1' }]
+
+    it('a reload of a finished turn: text, card, text, card, text, with exact ids', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 6 })
+      send(user(1))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send(toolStart('t2', 4)); send(toolResult('t2', 5))
+      send(entry(A + B + C, splits, 6))
+      send({ type: 'history_replay_end', latestSeq: 6 })
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', `m1-seg-1:${B}`, 'tool:t2', `m1:${C}`])
+      expect(msgs().some((m) => m.responseSplits !== undefined)).toBe(false)
+    })
+
+    it('a full reload mid-turn, in the server\'s order (snapshot BEFORE its tool rows): text above the card, the rest below', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A + '42', t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42'])
+    })
+
+    it('a live delta after that reload extends the TAIL below the card', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A + '42', t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      send({ type: 'stream_delta', messageId: 'm1', delta: '.' }); flush()
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42.'])
+    })
+
+    it('a delta replay mid-turn, in the server\'s order: the same layout', () => {
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 3 })
+      send(openSnapshot(A + '42', t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      expect(layout()).toEqual([`m1-seg-0:${A}`, 'tool:t1', 'm1:42'])
+    })
+
+    it('a snapshot that ends exactly at the card (empty tail), then a live delta: the new text is shown once, below the card', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A, t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1'])
+      send({ type: 'stream_delta', messageId: 'm1', delta: 'Bravo' }); flush()
+      expect(count('Bravo')).toBe(1)
+      expect(count('Alpha one.')).toBe(1)
+      expect(msgs()[msgs().length - 1]!.type).toBe('response')
+    })
+
+    it('an open snapshot, then the closing entry on a cursor replay: held [seg-0, tool, m1] completes the tail once', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A + '42', t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      clearDeltaBuffers(); resetReplayReconcile()
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 4 })
+      send(entry(A + '42.', t1Split, 4))
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42.'])
+    })
+
+    it('an open snapshot, then the closing entry on a cursor replay: held [seg-0, tool] (empty tail) gets the rest below the card, once', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A, t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      clearDeltaBuffers(); resetReplayReconcile()
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 4 })
+      send(entry(A + 'Bravo.', t1Split, 4))
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      expect(msgs().map((m) => m.type)).toEqual(['user_input', 'response', 'tool_use', 'response'])
+      expect(msgs().filter((m) => m.type === 'response').map((m) => m.content)).toEqual([A, 'Bravo.'])
+    })
+
+    it('a client that watched the turn live and then reloads shows each text once, in order, and the live stream carries on', () => {
+      send(user())
+      send({ type: 'agent_busy' })
+      send({ type: 'stream_start', messageId: 'm1' })
+      send({ type: 'stream_delta', messageId: 'm1', delta: A }); flush()
+      send({ type: 'tool_start', messageId: 't1', toolUseId: 't1', tool: 'Read', input: { file_path: '/a' } })
+      send({ type: 'tool_result', toolUseId: 't1', result: 'ok' })
+      vi.advanceTimersByTime(1000)
+      send({ type: 'stream_delta', messageId: 'm1', delta: B }); flush()
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 })
+      send(user(1))
+      send(openSnapshot(A + B, t1Split))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'history_replay_end', latestSeq: 3 })
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', `m1:${B}`])
+      send({ type: 'stream_delta', messageId: 'm1', delta: C }); flush()
+      // the live remap to the old continuation bubble (gone with the swap) opens a new one:
+      // as before this change, each text once and in order
+      for (const word of ['Alpha one.', 'Bravo two.', 'Charlie three.']) expect(count(word)).toBe(1)
+      expect(msgs().findIndex((m) => m.content.includes('Charlie'))).toBeGreaterThan(msgs().findIndex((m) => m.type === 'tool_use'))
+    })
+
+    it('a delta reconnect after the turn was watched live adds nothing', () => {
+      send(user(1))
+      send({ type: 'agent_busy' })
+      send({ type: 'stream_start', messageId: 'm1' })
+      send({ type: 'stream_delta', messageId: 'm1', delta: A }); flush()
+      send({ type: 'tool_start', messageId: 't1', toolUseId: 't1', tool: 'Read', input: { file_path: '/a' } })
+      send({ type: 'tool_result', toolUseId: 't1', result: 'ok' })
+      vi.advanceTimersByTime(1000)
+      send({ type: 'stream_delta', messageId: 'm1', delta: B }); flush()
+      send({ type: 'stream_end', messageId: 'm1' })
+      const before = layout().map((l) => l.replace(/-cont-\d+/, '-cont-#'))
+      clearDeltaBuffers()
+      resetReplayReconcile()
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 4 })
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send(entry(A + B, t1Split, 4))
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      expect(layout().map((l) => l.replace(/-cont-\d+/, '-cont-#'))).toEqual(before)
+    })
+
+    it('a mid-sentence interruption replays as live drew it: ONE bubble m1 above the card', () => {
+      const text = 'Let me check the file first.'
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 4 })
+      send(user(1))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send(entry(text, [{ at: 'Let me check the'.length, toolUseId: 't1' }], 4))
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      expect(layout()).toEqual(['user_input', `m1:${text}`, 'tool:t1'])
+    })
+
+    it('an earlier tool row that is not held (older than a delta replay window): exact layout, no repeat', () => {
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 7 })
+      send(toolStart('t2', 5)); send(toolResult('t2', 6))
+      send(entry(A + B + C, splits, 7))
+      send({ type: 'history_replay_end', latestSeq: 7 })
+      expect(layout()).toEqual([`m1-seg-1:${A + B}`, 'tool:t2', `m1:${C}`])
+    })
+
+    it('a live message that lands in the middle of a chunked replay stays after the replayed reply', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 6 })
+      send(user(1))
+      send(toolStart('t1', 2)); send(toolResult('t1', 3))
+      send({ type: 'message', messageType: 'response', messageId: 'live-1', content: 'LIVE', timestamp: 9 })
+      send(entry(A + C, t1Split, 4))
+      send({ type: 'history_replay_end', latestSeq: 4 })
+      const ids = layout()
+      expect(ids.indexOf(`m1-seg-0:${A}`)).toBeLessThan(ids.indexOf('tool:t1'))
+      expect(ids.indexOf(`m1:${C}`)).toBeGreaterThan(ids.indexOf('tool:t1'))
+      expect(ids.indexOf(`m1:${C}`)).toBeLessThan(ids.findIndex((l) => l.startsWith('live-1')))
+    })
+  })
+
   describe('delta replay with the snapshot sent regardless of the cursor (S3)', () => {
     function heldStream(...deltas: string[]) {
       send({ ...user(4) })

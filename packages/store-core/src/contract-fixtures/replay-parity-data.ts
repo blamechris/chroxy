@@ -456,7 +456,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
     },
     {
       "name": "text-around-a-tool",
-      "description": "claude-sdk text, a tool call, then more text in the same turn. The live client splits the turn into two bubbles around the tool; the replay records one response entry per stream.",
+      "description": "claude-sdk text, a tool call, then more text in the same turn. The live client splits the turn into two bubbles around the tool; the history keeps ONE response entry and says where the tool fell (`splits`), so the replay lays it out the same (#9024).",
       "providers": [
         "claude-sdk"
       ],
@@ -607,6 +607,452 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "messageType": "response",
           "content": "Let me read the file. It exports one constant.",
           "messageId": "m1",
+          "splits": [
+            {
+              "at": 22,
+              "toolUseId": "tu1"
+            }
+          ],
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 3
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 4,
+          "replayed": true
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ]
+    },
+    {
+      "name": "text-between-two-tools",
+      "description": "claude-sdk text, tool, text, tool, text in one turn: three bubbles live; the one recorded entry carries two splits and the replay lays out the same three (#9024).",
+      "providers": [
+        "claude-sdk"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "Reading the file. "
+          }
+        ],
+        [
+          "tool_start",
+          {
+            "messageId": "tu1",
+            "toolUseId": "tu1",
+            "tool": "Read",
+            "input": null
+          }
+        ],
+        [
+          "tool_result",
+          {
+            "toolUseId": "tu1",
+            "result": "ok",
+            "truncated": false,
+            "input": {
+              "file_path": "/repo/a.js"
+            }
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "Now running the tests. "
+          }
+        ],
+        [
+          "tool_start",
+          {
+            "messageId": "tu2",
+            "toolUseId": "tu2",
+            "tool": "Bash",
+            "input": null
+          }
+        ],
+        [
+          "tool_result",
+          {
+            "toolUseId": "tu2",
+            "result": "ok",
+            "truncated": false,
+            "input": {
+              "command": "npm test"
+            }
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "All green."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.0123,
+            "duration": 4200,
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 40
+            },
+            "sessionId": "s1"
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "Reading the file. ",
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Read",
+          "input": null,
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "ok",
+          "truncated": false,
+          "input": {
+            "file_path": "/repo/a.js"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "Now running the tests. ",
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_start",
+          "messageId": "tu2",
+          "toolUseId": "tu2",
+          "tool": "Bash",
+          "input": null,
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu2",
+          "result": "ok",
+          "truncated": false,
+          "input": {
+            "command": "npm test"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "All green.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Read",
+          "input": {
+            "file_path": "/repo/a.js"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "ok",
+          "truncated": false,
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "tool_start",
+          "messageId": "tu2",
+          "toolUseId": "tu2",
+          "tool": "Bash",
+          "input": {
+            "command": "npm test"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 3
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu2",
+          "result": "ok",
+          "truncated": false,
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 4
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "Reading the file. Now running the tests. All green.",
+          "messageId": "m1",
+          "splits": [
+            {
+              "at": 18,
+              "toolUseId": "tu1"
+            },
+            {
+              "at": 41,
+              "toolUseId": "tu2"
+            }
+          ],
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 5
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 6,
+          "replayed": true
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ]
+    },
+    {
+      "name": "text-mid-sentence-tool",
+      "description": "claude-sdk: the tool call interrupts a sentence. Live does NOT split (the text after it is the same sentence), so the replay must not either: one bubble above the card (#9024, #4999).",
+      "providers": [
+        "claude-sdk"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "Let me check the"
+          }
+        ],
+        [
+          "tool_start",
+          {
+            "messageId": "tu1",
+            "toolUseId": "tu1",
+            "tool": "Read",
+            "input": null
+          }
+        ],
+        [
+          "tool_result",
+          {
+            "toolUseId": "tu1",
+            "result": "ok",
+            "truncated": false,
+            "input": {
+              "file_path": "/repo/a.js"
+            }
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": " file first."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.0123,
+            "duration": 4200,
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 40
+            },
+            "sessionId": "s1"
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "Let me check the",
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Read",
+          "input": null,
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "ok",
+          "truncated": false,
+          "input": {
+            "file_path": "/repo/a.js"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": " file first.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Read",
+          "input": {
+            "file_path": "/repo/a.js"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "ok",
+          "truncated": false,
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "Let me check the file first.",
+          "messageId": "m1",
+          "splits": [
+            {
+              "at": 16,
+              "toolUseId": "tu1"
+            }
+          ],
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 3

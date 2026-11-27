@@ -54,6 +54,7 @@ import {
   // #8518 — the ordering hint: a late thinking block goes above the tool row /
   // answer it was thought before, not at the end.
   placeThinkingBubble,
+  layoutReplayedRepliesAtReplayEnd,
   // #7326 — the chip for a truncated / refused / stopped turn (turn-outcome-marker.ts).
   appendTurnOutcomeMarker,
   handleAuthOk as sharedAuthOk,
@@ -2977,6 +2978,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
           }
         } else {
           reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
+        // #9024 — a replayed reply that recorded where tool calls interrupted its text
+        // is laid out around those tool cards now the replay (and its swap) is over:
+        // every tool row is held, the stale prefix is gone and nothing is inserted
+        // while the replay's append provenance is still recorded. A delta replay ends
+        // here too. (The dashboard's flat, no-session-state fallback has no
+        // replay-end path, so a reply there stays one bubble.)
+        if (endTargetId) {
+          updateSession(endTargetId, (ss) => {
+            const laidOut = layoutReplayedRepliesAtReplayEnd(endTargetId, ss.messages);
+            return laidOut ? { messages: laidOut as SessionState['messages'] } : {};
+          });
         }
         // #6808 — a checkpoint restore parks "what this restore did" for the NEW
         // session. It was shown at session_switched; a full-history replay wipes

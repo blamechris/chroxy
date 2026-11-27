@@ -140,6 +140,10 @@ export function streamKindOf(entry) {
   return undefined
 }
 
+/** #9024: the most tool-call split points one reply entry records, and the longest tool id one may name (the protocol's `splits` schema mirrors both). */
+export const MAX_REPLY_SPLITS = 64
+export const MAX_SPLIT_TOOL_ID_LENGTH = 256
+
 /** `{ input }` when there is one, else nothing: an absent input is an absent key. */
 function inputField(input) {
   return input === undefined ? {} : { input }
@@ -210,6 +214,12 @@ export class SessionMessageHistory extends EventEmitter {
     // a replay has no entry for it; this is where that text belongs in the replay
     // (before every entry recorded after the stream began). Cleared with the stream.
     this._streamStartSeqs = new Map()
+    // #9024 -- sessionId:messageId -> [{ at, toolUseId }]: where tool calls interrupted an
+    // open reply stream. `at` is how much of the stream's text existed when the call
+    // started. A reply is recorded as ONE entry at stream_end (after the tool cards), so
+    // a replay lost where each tool call fell in the text; the entry carries these as
+    // `splits` and the client lays the text out around the cards again. Cleared with the stream.
+    this._streamSplits = new Map()
     this._historyTruncated = new Map()  // sessionId -> boolean
     // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
     // Every entry pushed into the ring buffer is stamped with a strictly
@@ -345,6 +355,7 @@ export class SessionMessageHistory extends EventEmitter {
         this._streamKinds.delete(key)
         this._streamPrecedes.delete(key)
         this._streamStartSeqs.delete(key)
+        this._streamSplits.delete(key)
       }
     }
     return closedMessageIds
@@ -363,9 +374,10 @@ export class SessionMessageHistory extends EventEmitter {
    * capability), as is a stream that has produced no text yet.
    *
    * @param {string} sessionId
-   * @returns {Array<{ messageId: string, content: string, startSeq: number }>}
+   * @returns {Array<{ messageId: string, content: string, startSeq: number, splits: Array<{ at: number, toolUseId: string }> }>}
    *   `startSeq` is the seq the next recorded entry had when its first text arrived:
-   *   the reply belongs before every entry with `_seq >= startSeq`.
+   *   the reply belongs before every entry with `_seq >= startSeq`. `splits` are the
+   *   tool calls that interrupted it so far (#9024), as the closing entry will carry.
    */
   getPendingResponseStreams(sessionId) {
     const prefix = sessionId + ':'
@@ -377,6 +389,7 @@ export class SessionMessageHistory extends EventEmitter {
         messageId: key.slice(prefix.length),
         content,
         startSeq: this._streamStartSeqs.get(key) ?? Infinity,
+        splits: (this._streamSplits.get(key) ?? []).map((split) => ({ ...split })),
       })
     }
     return out
@@ -785,6 +798,7 @@ export class SessionMessageHistory extends EventEmitter {
       case 'stream_start': {
         const key = `${sessionId}:${data.messageId}`
         this._pendingStreams.set(key, '')
+        this._streamSplits.delete(key)
         // #6630 / #8282: a reasoning stream must not be recorded as a reply.
         if (data.thinking === true) {
           this._streamKinds.set(key, 'thinking')
@@ -834,6 +848,8 @@ export class SessionMessageHistory extends EventEmitter {
         this._streamPrecedes.delete(key)
         const wasTruncated = this._truncatedStreams.has(key)
         this._streamStartSeqs.delete(key)
+        const splits = this._streamSplits.get(key)
+        this._streamSplits.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
         // A reasoning stream is recorded even with no text: current Claude models
         // return the block with its signature only, so the SDK opens and closes a
@@ -866,6 +882,10 @@ export class SessionMessageHistory extends EventEmitter {
             // belongs above keeps saying so, so a reload orders it the way the live
             // client did. Absent for a block that arrived in order.
             ...(thinkingPrecedes ? { thinkingPrecedes } : {}),
+            // #9024: where tool calls interrupted this reply's text, so a reload lays it
+            // out around the tool cards as the live client did. Additive: a client that
+            // does not read it shows the one entry as before.
+            ...(kind !== 'thinking' && splits?.length ? { splits } : {}),
             timestamp: Date.now(),
           }, sessionId)
         }
@@ -903,6 +923,7 @@ export class SessionMessageHistory extends EventEmitter {
         break
 
       case 'tool_start':
+        this._noteReplySplit(sessionId, data.toolUseId)
         this._pushHistory(history, {
           type: 'tool_start',
           messageId: data.messageId,
@@ -1036,6 +1057,43 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #9024 -- note where a tool call interrupted each open reply stream of the session.
+   *
+   * A `tool_start` carries no stream id, so it applies to EVERY open non-thinking reply
+   * stream of the session (there is normally one). A reply that is not the tool's owner
+   * then carries a split naming a tool row that is not its own, which is harmless: the
+   * client lays a reply out only around tool rows it holds, in transcript order.
+   *
+   * A split is kept only when the stream has text since the previous one, so a run of
+   * tool calls in a row keeps the first (the text sits above it, and no text sits
+   * between them). The list is bounded in count and in the length of the id, and a
+   * call with no usable id splits nothing: an unusable split must never become a
+   * position on a client.
+   *
+   * @param {string} sessionId
+   * @param {unknown} toolUseId
+   */
+  _noteReplySplit(sessionId, toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0 || toolUseId.length > MAX_SPLIT_TOOL_ID_LENGTH) return
+    const prefix = sessionId + ':'
+    for (const [key, content] of this._pendingStreams) {
+      if (!key.startsWith(prefix) || !content) continue
+      if (this._streamKinds.get(key) === 'thinking') continue
+      const splits = this._streamSplits.get(key) ?? []
+      if (splits.length >= MAX_REPLY_SPLITS) continue
+      if (content.length <= (splits.at(-1)?.at ?? 0)) continue
+      // Never between the two halves of a surrogate pair: the next delta carries the low
+      // half, and a piece must not start with half a character.
+      let at = content.length
+      const lastUnit = content.charCodeAt(at - 1)
+      if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) at -= 1
+      if (at <= (splits.at(-1)?.at ?? 0)) continue
+      splits.push({ at, toolUseId })
+      this._streamSplits.set(key, splits)
+    }
+  }
+
+  /**
    * Push an entry to the history array, trimming to max size.
    * @param {Array} history
    * @param {object} entry
@@ -1161,6 +1219,14 @@ export class SessionMessageHistory extends EventEmitter {
     delete clone._seq
     if (typeof clone.content === 'string' && clone.content.length > MAX) {
       clone.content = clone.content.slice(0, MAX) + '[truncated]'
+      // #9024: a split past the clipped text points into text that is gone (or into the
+      // marker). One out-of-range point makes a client drop the whole list, so keep only
+      // those strictly inside what was kept (one AT the clip would leave the marker alone as a tail).
+      if (Array.isArray(clone.splits)) {
+        const kept = clone.splits.filter((split) => split && typeof split.at === 'number' && split.at < MAX)
+        if (kept.length > 0) clone.splits = kept
+        else delete clone.splits
+      }
     }
     if (typeof clone.input === 'string' && clone.input.length > MAX) {
       clone.input = clone.input.slice(0, MAX) + '[truncated]'
@@ -1254,6 +1320,9 @@ export class SessionMessageHistory extends EventEmitter {
     for (const key of this._streamStartSeqs.keys()) {
       if (key.startsWith(prefix)) this._streamStartSeqs.delete(key)
     }
+    for (const key of this._streamSplits.keys()) {
+      if (key.startsWith(prefix)) this._streamSplits.delete(key)
+    }
   }
 
   /**
@@ -1266,6 +1335,7 @@ export class SessionMessageHistory extends EventEmitter {
     this._streamKinds.clear()
     this._streamPrecedes.clear()
     this._streamStartSeqs.clear()
+    this._streamSplits.clear()
     this._seqCounters.clear()
     this._seqReserved.clear()
   }

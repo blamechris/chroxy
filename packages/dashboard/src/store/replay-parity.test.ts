@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   REPLAY_PARITY_FIXTURES,
   REPLAY_PARITY_DIVERGENCES,
+  REPLAY_PARITY_REPLY_BUBBLES,
   REPLAY_PARITY_SESSION_ID as SID,
   replayParityModel,
   type ReplayParityFrame,
@@ -140,6 +141,11 @@ describe('live vs replayed transcript -- dashboard (#6630)', () => {
       expect(live.length, `${fx.name}: live transcript is empty`).toBeGreaterThan(0)
       expect(replay.length, `${fx.name}: replayed transcript is empty`).toBeGreaterThan(0)
 
+      const bubbles = REPLAY_PARITY_REPLY_BUBBLES[fx.name]
+      if (bubbles !== undefined) {
+        expect(live.filter((r) => r.type === 'response').length, `${fx.name}: live reply bubbles`).toBe(bubbles)
+        expect(replay.filter((r) => r.type === 'response').length, `${fx.name}: replayed reply bubbles`).toBe(bubbles)
+      }
       const divergence = REPLAY_PARITY_DIVERGENCES[fx.name]
       if (!divergence) {
         expect(replay).toEqual(live)

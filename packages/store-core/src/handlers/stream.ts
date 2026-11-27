@@ -12,9 +12,10 @@
 
 import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
-import { isReplayDuplicate, completeHeldResponseStream } from '../replay-dedup'
+import { isReplayDuplicate, completeHeldResponseStream, isResponseStreamBubbleId } from '../replay-dedup'
 import { getReplayWindowDepth, noteStreamClosed, noteStreamOpen, noteTurnEnded } from '../replay-reconcile'
-import { endsAtSentenceBoundary } from '../sentence-boundary'
+import { postToolSplit } from '../sentence-boundary'
+import { parseResponseSplits } from '../response-splits'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
@@ -347,6 +348,17 @@ export function handleMessage(
   // several bubbles (a continuation split lays a turn out as `m1` and `m1-cont-<ts>`).
   // The entry completes the held stream when it extends it; see
   // `completeHeldResponseStream` for what keeps two distinct responses apart.
+  // #9024: the one held bubble is the EMPTY slot a stream leaves when it opens (a cut
+  // right after `stream_start`) and the entry records tool calls inside its text: the
+  // text began above them, so the slot is filled where it is, and carries the splits so
+  // the replay-end layout cuts it around the cards. (Without splits the empty slot of a
+  // claude-tui reply moves below the tools, which is where that text came after.)
+  const emptySlotSplits = receivingHistoryReplay && msgType === 'response' && stableMessageId
+    && !isReplayedThinking
+    && cachedMessages.some((m) => m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId))
+    && cachedMessages.every((m) => !(m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId)) || m.content === '')
+    ? parseResponseSplits(msg.splits, msg.content.length)
+    : undefined
   if (receivingHistoryReplay && msgType === 'response' && stableMessageId) {
     const completion = completeHeldResponseStream(cachedMessages, stableMessageId, msg.content)
     if (completion) {
@@ -357,8 +369,8 @@ export function handleMessage(
         shouldDispatch: false,
         reconcile: {
           target: completion.target,
-          patch: continuation ? {} : { content: completion.content },
-          ...(completion.moveToEnd ? { moveToEnd: true } : null),
+          patch: continuation ? {} : { content: completion.content, ...(emptySlotSplits ? { responseSplits: emptySlotSplits } : null) },
+          ...(completion.moveToEnd && !emptySlotSplits ? { moveToEnd: true } : null),
           ...(continuation ? { append: [continuation] } : null),
           // The snapshot of a stream that is STILL OPEN carries no historySeq: it is not
           // the stream ending, so it must not clear the live stream marker (#9022).
@@ -556,9 +568,20 @@ export function handleMessage(
   // #8518: a replayed reasoning entry that recorded where it belongs.
   const thinkingPrecedes = isReplayedThinking ? parseThinkingPrecedes(msg.thinkingPrecedes) : undefined
 
+  // #9024: a replayed reply that becomes a new bubble because the client holds none of
+  // the stream's text is appended whole and carries its splits; the replay-end layout
+  // (`layoutReplayedReplies`) cuts it around its tool cards. When the client holds some
+  // of the text, the whole-entry dedup and completion above already decided; nothing is
+  // split then.
+  const responseSplits = receivingHistoryReplay && msgType === 'response' && stableMessageId
+    && !isReplayedThinking
+    && !cachedMessages.some((m) => m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId))
+    ? parseResponseSplits(msg.splits, msg.content.length)
+    : undefined
+
   return {
     shouldDispatch: true,
-    chatMessage,
+    chatMessage: responseSplits ? { ...chatMessage, responseSplits } : chatMessage,
     isRateLimitError,
     errorContent,
     containerLostPatch,
@@ -1661,48 +1684,19 @@ export function sharedStreamDelta(
             }
           }
         }
-        // #4999 — mid-sentence fragmentation gate. The post-#4889 split only
-        // makes sense when the prior bubble's text reached a sentence boundary
-        // (the LLM finished a thought before invoking the tool); otherwise the
-        // tool interrupted mid-sentence and the post-tool delta is the same
-        // sentence continuing. Treat the prior slot as "sentence-complete"
-        // only when its trailing non-whitespace character is a sentence
-        // terminator (`.`, `!`, `?`) or a hard line break (`\n`). A bubble
-        // that ends with a word char, open paren, comma, colon, dash, etc.
-        // is mid-sentence — route the delta back to the existing slot so the
-        // sentence renders as one contiguous bubble (followed by the tool).
-        if (toolAfter) {
-          const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : ''
-          // The rule itself lives in `endsAtSentenceBoundary` (shared with the
-          // replay completion of a held reply, #8444).
-          if (!endsAtSentenceBoundary(priorFullForGate)) {
-            toolAfter = false
-          }
-        }
-        if (toolAfter) {
-          // #4975 — mid-word peel. The LLM sometimes interrupts a text content
-          // block to call a tool, splitting a word across the boundary (e.g.
-          // `"...PR #3.Del"` → tool → `"egating..."`). The post-#4889 split
-          // would otherwise show "Del" in one bubble and "egating..." in
-          // another with the tool between. Detect the mid-word case (last char
-          // of the prior slot's full content is a word char AND the FIRST char
-          // of the incoming post-tool delta is also a word char — both sides
-          // of the boundary must be in a word, else the LLM emitted a normal
-          // word boundary and the peel would wrongly move a complete trailing
-          // word across the tool bubble) and peel the trailing partial word off
-          // the prior slot, seeding the continuation buffer with it. Result:
-          // the word reassembles in the continuation bubble.
-          const priorFull = slot.type === 'response' ? slot.content + bufferedContent : ''
-          const incomingDelta = msg.delta
-          const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta)
-          const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null
-          let priorTail = ''
-          if (midWordMatch && midWordMatch[0].length > 0) {
-            priorTail = midWordMatch[0]
-            // Peel the partial word off the prior slot. It may live in
-            // already-flushed `slot.content` and/or in the still-buffered
-            // `pendingDeltas[deltaId].delta` — strip from buffered first (it
-            // lives at the tail), then from flushed content if needed.
+        // #4999 / #4975 — the split rule (sentence-boundary gate, mid-word peel) is
+        // `postToolSplit`, shared with the replay layout of a reply (#9024). A bubble
+        // that stops mid-sentence is the same sentence continuing: the delta goes
+        // back to the existing slot, above the tool card.
+        const priorFull = slot.type === 'response' ? slot.content + bufferedContent : ''
+        const decision = toolAfter ? postToolSplit(priorFull, msg.delta) : { split: false, carry: '' }
+        if (toolAfter && decision.split) {
+          // Peel the trailing partial word off the prior slot (a mid-word cut). It may
+          // live in already-flushed `slot.content` and/or in the still-buffered
+          // `pendingDeltas[deltaId].delta` — strip from buffered first (it lives at the
+          // tail), then from flushed content if needed.
+          const priorTail = decision.carry
+          if (priorTail.length > 0) {
             let remaining = priorTail.length
             if (bufferedContent.length > 0) {
               const peelFromBuf = Math.min(remaining, bufferedContent.length)

@@ -260,6 +260,13 @@ export const ServerMessageSchema = z.object({
     // #8518: and the ordering hint the live stream_start carried, so a reload puts
     // the bubble where the live client did.
     thinkingPrecedes: ThinkingPrecedesSchema,
+    // #9024: on a REPLAYED `messageType: 'response'` frame (and on the snapshot of a reply
+    // still streaming), where tool calls interrupted the text: `at` is how many characters
+    // of the reply came before the call, `toolUseId` names its tool row. A reply is one
+    // history entry recorded after its tool rows, so this is how a reload lays the text
+    // out around them again. Absent on a reply no tool interrupted and on every live
+    // frame; a client that does not read it shows the one entry, as before.
+    splits: z.array(z.object({ at: z.number().int().nonnegative(), toolUseId: z.string().min(1).max(256) })).max(64).optional(),
     // #7454/#7458: present on REPLAYED frames only (both replay paths map the
     // server-internal `_seq` onto the wire; absent on live broadcasts). The
     // #5555.3 delta-replay cursor — and for user_question the #7420

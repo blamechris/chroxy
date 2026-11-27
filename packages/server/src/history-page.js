@@ -49,6 +49,14 @@ export function historyWireEntry(raw, history) {
     const value = entry[key]
     if (typeof value === 'string') {
       entry[key] = shorten(value)
+      // #9024: a reply's split points index its text. Past the clip they point at text the
+      // page no longer carries (or into the marker), and one such point makes a client drop
+      // the whole list: keep those inside what is kept, and none if none remain.
+      if (key === 'content' && value.length > max && Array.isArray(entry.splits)) {
+        const kept = entry.splits.filter((split) => split && typeof split.at === 'number' && split.at < max)
+        if (kept.length > 0) entry.splits = kept
+        else delete entry.splits
+      }
     } else if (value && typeof value === 'object') {
       let serialized
       try { serialized = JSON.stringify(value) } catch { serialized = '[unserializable]' }

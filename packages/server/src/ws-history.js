@@ -2087,6 +2087,8 @@ function pendingStreamEntries(sessionManager, sessionId) {
       messageType: 'response',
       content: s.content,
       messageId: s.messageId,
+      // #9024: where tool calls have interrupted it so far, as the closing entry will say.
+      ...(s.splits?.length ? { splits: s.splits } : {}),
       timestamp: now,
     },
   }))
