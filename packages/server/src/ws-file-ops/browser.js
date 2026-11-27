@@ -18,6 +18,11 @@ const log = createLogger('ws')
 // #8972 — max distinct check_git_repo probes in flight per socket.
 const MAX_GIT_CHECKS_PER_CLIENT = 4
 
+// #8998 — bound on the WHOLE check_git_repo probe (realpath + stat + git spawn).
+// A hung network mount can stall realpath/stat forever; without this the probe
+// never settles and its per-socket slot is never freed.
+const GIT_PROBE_TIMEOUT_MS = 5000
+
 // #8012 — the message list_directory / browse_files send when `realpath()`
 // failed with one of these codes for a path INSIDE their boundary. Any other
 // code, or any path outside it, gets the handler's generic denial instead
@@ -145,12 +150,20 @@ function isBrowsable(realPath, homeReal, opts = {}) {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
- * @param {{ realpath?: Function, readdir?: Function }} [deps] test seam for the catalog directory scans
+ * @param {{ realpath?: Function, readdir?: Function, gitProbeRealpath?: Function, gitProbeTimeoutMs?: number|(() => number) }} [deps]
+ *   test seam: realpath/readdir for the catalog directory scans; gitProbeRealpath/gitProbeTimeoutMs
+ *   for the check_git_repo probe only (#8998); gitProbeTimeoutMs may be a getter so a test can change
+ *   the bound between probes (test-only, production uses the constant)
  * @returns {Object} browser operation methods
  */
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, deps = {}) {
   const catalogRealpath = deps.realpath ?? realpath
   const catalogReaddir = deps.readdir ?? readdir
+  const gitProbeRealpath = deps.gitProbeRealpath ?? realpath
+  const gitProbeTimeoutMs = () => {
+    const t = deps.gitProbeTimeoutMs ?? GIT_PROBE_TIMEOUT_MS
+    return typeof t === 'function' ? t() : t
+  }
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath, opts = {}) {
@@ -840,6 +853,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * Spawn budget: identical in-flight paths from one socket share one probe,
    * and a socket may have at most MAX_GIT_CHECKS_PER_CLIENT distinct probes in
    * flight; beyond that the reply is `null` without touching the filesystem.
+   * The whole probe (realpath, stat and the git spawn) is bounded at
+   * GIT_PROBE_TIMEOUT_MS: past it the reply is `null` and the slot is freed.
    */
   const inFlightChecks = new WeakMap() // ws -> Map<trimmed path, Promise<boolean|null>>
 
@@ -849,16 +864,33 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     sendFn(ws, msg)
   }
 
-  async function probeGitRepo(trimmed, opts) {
+  async function probeGitRepoUnbounded(trimmed, opts) {
     try {
       const home = homedir()
       // Same form New Session validates (kernel-resolved `..`), see kernelForm.
-      const [realAbs, homeReal] = await Promise.all([realpath(kernelForm(trimmed, home)), realpath(home)])
+      const [realAbs, homeReal] = await Promise.all([gitProbeRealpath(kernelForm(trimmed, home)), gitProbeRealpath(home)])
       if (!isBrowsable(realAbs, homeReal, opts)) return null
       if (!(await stat(realAbs)).isDirectory()) return null
       return await isGitRepo(realAbs)
     } catch {
       return null
+    }
+  }
+
+  // #8998 — race the whole probe against a timer that answers null. The timer
+  // is cleared when the work wins; the abandoned work never rejects (it catches
+  // internally), so a late result is simply dropped. git's own spawn timeout is
+  // also 5 s and starts later, so a slow git now answers null ("cannot tell")
+  // rather than false; that is intended, null leaves the worktree switch enabled.
+  async function probeGitRepo(trimmed, opts) {
+    let timer
+    const bound = new Promise((resolveBound) => {
+      timer = setTimeout(() => resolveBound(null), gitProbeTimeoutMs())
+    })
+    try {
+      return await Promise.race([probeGitRepoUnbounded(trimmed, opts), bound])
+    } finally {
+      clearTimeout(timer)
     }
   }
 
