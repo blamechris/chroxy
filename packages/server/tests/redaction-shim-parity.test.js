@@ -9,7 +9,11 @@ import * as moved from '@chroxy/protocol/redaction'
 describe('server redaction.js shim', () => {
   it('exports exactly the names the protocol module exports', () => {
     assert.deepEqual(Object.keys(shim).sort(), Object.keys(moved).sort())
-    assert.ok(Object.keys(moved).length >= 20, 'the module has its full export surface')
+    // Not vacuous: two empty modules would also have equal key sets. Name the core API
+    // instead of counting exports, so adding an export never needs this line touched.
+    for (const name of ['redactValue', 'redactBounded', 'sanitizeToolInput', 'isSanitizedToolInput']) {
+      assert.equal(typeof moved[name], 'function', `${name} is exported`)
+    }
   })
 
   it('every export is the identical value (one module instance)', () => {
