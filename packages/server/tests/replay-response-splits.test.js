@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
 import { SessionMessageHistory, MAX_REPLY_SPLITS, MAX_SPLIT_TOOL_ID_LENGTH } from '../src/session-message-history.js'
 import { replayHistory, CAPABILITY_HISTORY_INFLIGHT_REPLY } from '../src/ws-history.js'
+import { historyWireEntry, HISTORY_FIELD_CHARS } from '../src/history-page.js'
 
 /**
  * #9024 -- a reply is ONE history entry, recorded at stream_end, after the tool rows of
@@ -160,22 +161,43 @@ describe('recording where tool calls interrupted a reply (#9024)', () => {
     h2.recordHistory('s1', 'tool_start', TOOL('tu1'))
     h2.recordHistory('s1', 'stream_end', { messageId: 'm1' })
     assert.equal('splits' in h2.truncateEntry(reply(h2)), false)
+    // B2-2: a split AT the clip point would leave the marker alone as a tail below the card
+    const h3 = new SessionMessageHistory()
+    h3.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h3.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'y'.repeat(50 * 1024) })
+    h3.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h3.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'tail text' })
+    h3.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.deepEqual(reply(h3).splits, [{ at: 50 * 1024, toolUseId: 'tu1' }])
+    assert.equal('splits' in h3.truncateEntry(reply(h3)), false, 'a split exactly at the clip is dropped')
   })
 
-  it('B3: a split never falls between the two halves of a surrogate pair', () => {
+  it('B2-1: a history page clips a long reply and its split points together', () => {
+    // escape-heavy text (a JSON quote is two bytes) so the ~40 KB reply is over the page's entry budget
+    const q = (n) => '"'.repeat(n)
     const h = new SessionMessageHistory()
     h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
-    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'ab\ud83d' }) // high half only so far
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: q(10) })
     h.recordHistory('s1', 'tool_start', TOOL('tu1'))
-    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ude00 done' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: q(29990) })
+    h.recordHistory('s1', 'tool_start', TOOL('tu2'))
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: q(10000) })
     h.recordHistory('s1', 'stream_end', { messageId: 'm1' })
-    assert.deepEqual(reply(h).splits, [{ at: 2, toolUseId: 'tu1' }])
-    const h2 = new SessionMessageHistory()
-    h2.recordHistory('s1', 'stream_start', { messageId: 'm1' })
-    h2.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ud83d' })
-    h2.recordHistory('s1', 'tool_start', TOOL('tu1'))
-    h2.recordHistory('s1', 'stream_end', { messageId: 'm1' })
-    assert.equal('splits' in reply(h2), false, 'a split at 0 is no split')
+    assert.deepEqual(reply(h).splits.map((sp) => sp.at), [10, 30000])
+    const wire = historyWireEntry(reply(h), h)
+    assert.ok(wire.content.endsWith('[truncated]'), 'the page clipped the reply')
+    assert.equal(wire.content.length, HISTORY_FIELD_CHARS + '[truncated]'.length)
+    assert.deepEqual(wire.splits, [{ at: 10, toolUseId: 'tu1' }], 'the split past the clip is gone')
+    // none left: no field
+    const g = new SessionMessageHistory()
+    g.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    g.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: q(30000) })
+    g.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    g.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: q(10000) })
+    g.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    const gw = historyWireEntry(reply(g), g)
+    assert.ok(gw.content.endsWith('[truncated]'))
+    assert.equal('splits' in gw, false)
   })
 
   it('the entry keeps its splits through a state-file round trip', () => {
@@ -276,11 +298,15 @@ describe('what a replay sends (#9024)', () => {
     assert.deepEqual(replies(later).map((m) => m.content), ['all of it'])
   }))
 
-  it('mid-turn: the snapshot is the whole text so far with its splits, at the place the reply began, and nothing else carries the text', withManager(async (mgr, sid) => {
+  it('mid-turn: the snapshot is the whole text so far with its splits, in the place the reply began (BEFORE its tool_start), and nothing else carries the text', withManager(async (mgr, sid) => {
     mgr._recordHistory(sid, 'message', { type: 'user_input', content: 'go', timestamp: 1 })
     rec(mgr, sid, ['BEFORE ', { tool: 'tu1' }, 'AFTER SO FAR'])
     for (const mode of [{ forceFull: true }, {}]) {
       const sent = await replay(mgr, sid, { historyCursors: { [sid]: 1 } }, mode)
+      const frames = sent.filter((m) => m.type === 'message' || m.type === 'tool_start' || m.type === 'tool_result')
+      const order = frames.map((m) => m.messageType || m.type)
+      // a delta replay from cursor 1 skips the prompt; a full one starts with it
+      assert.deepEqual(order, mode.forceFull ? ['user_input', 'response', 'tool_start', 'tool_result'] : ['response', 'tool_start', 'tool_result'])
       const rs = replies(sent)
       assert.equal(rs.length, 1, 'one reply entry: the text is never in two places')
       assert.equal(rs[0].content, 'BEFORE AFTER SO FAR')

@@ -1221,9 +1221,9 @@ export class SessionMessageHistory extends EventEmitter {
       clone.content = clone.content.slice(0, MAX) + '[truncated]'
       // #9024: a split past the clipped text points into text that is gone (or into the
       // marker). One out-of-range point makes a client drop the whole list, so keep only
-      // those that lie within what was kept.
+      // those strictly inside what was kept (one AT the clip would leave the marker alone as a tail).
       if (Array.isArray(clone.splits)) {
-        const kept = clone.splits.filter((split) => split && typeof split.at === 'number' && split.at <= MAX)
+        const kept = clone.splits.filter((split) => split && typeof split.at === 'number' && split.at < MAX)
         if (kept.length > 0) clone.splits = kept
         else delete clone.splits
       }

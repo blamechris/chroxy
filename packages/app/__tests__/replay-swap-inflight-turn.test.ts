@@ -394,4 +394,48 @@ describe('in-flight turn content survives a full replay swap -- app (#8965)', ()
     send({ type: 'history_replay_end' });
     expect(msgs().filter((m) => m.type === 'tool_use').map((m) => m.id)).toEqual(['tool-1']);
   });
+
+  // #9024 -- the server's wire order for a reply a tool call interrupted: the open-stream
+  // snapshot (no historySeq) is spliced in BEFORE the tool rows that followed its text.
+  describe('a reply a tool call interrupted is laid out when the replay ends (#9024)', () => {
+    const A = 'Alpha one. ';
+    const splits = [{ at: A.length, toolUseId: 't1' }];
+    const snapshot = (content: string) => ({ type: 'message', messageType: 'response', messageId: 'm1', content, timestamp: 3, splits });
+    const tool = (seq: number) => ({ type: 'tool_start', messageId: 't1', toolUseId: 't1', tool: 'Read', input: { file_path: '/a' }, historySeq: seq });
+    const result = (seq: number) => ({ type: 'tool_result', toolUseId: 't1', result: 'ok', historySeq: seq });
+    const user = (seq: number) => ({ type: 'message', messageType: 'user_input', messageId: 'u-1', content: 'do it', timestamp: 2, historySeq: seq });
+    const layout = () => msgs().map((m) => (m.type === 'response' ? `${m.id}:${m.content}` : m.type === 'tool_use' ? `tool:${m.toolUseId}` : m.type));
+
+    it('a full reload mid-turn: text above the card, the rest below, exact ids', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 });
+      send(user(1));
+      send(snapshot(A + '42'));
+      send(tool(2)); send(result(3));
+      send({ type: 'history_replay_end', latestSeq: 3 });
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1', 'm1:42']);
+      expect(msgs().some((m) => m.responseSplits !== undefined)).toBe(false);
+    });
+
+    it('a snapshot ending exactly at the card (empty tail), then a live delta: the new text once, below the card', () => {
+      send({ type: 'history_replay_start', fullHistory: true, latestSeq: 3 });
+      send(user(1));
+      send(snapshot(A));
+      send(tool(2)); send(result(3));
+      send({ type: 'history_replay_end', latestSeq: 3 });
+      expect(layout()).toEqual(['user_input', `m1-seg-0:${A}`, 'tool:t1']);
+      send({ type: 'stream_delta', messageId: 'm1', delta: 'Bravo' });
+      jest.advanceTimersByTime(500);
+      expect(msgs().filter((m) => m.content.includes('Bravo'))).toHaveLength(1);
+      expect(msgs().filter((m) => m.content.includes('Alpha one.'))).toHaveLength(1);
+      expect(msgs()[msgs().length - 1]!.type).toBe('response');
+    });
+
+    it('a delta replay mid-turn: the same layout', () => {
+      send({ type: 'history_replay_start', fullHistory: false, latestSeq: 3 });
+      send(snapshot(A + '42'));
+      send(tool(2)); send(result(3));
+      send({ type: 'history_replay_end', latestSeq: 3 });
+      expect(layout()).toEqual([`m1-seg-0:${A}`, 'tool:t1', 'm1:42']);
+    });
+  });
 });

@@ -3396,6 +3396,28 @@ describe('@chroxy/protocol schemas', () => {
         assert.deepEqual(replayed.data.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
       })
 
+      it('ServerMessageSchema carries the #9024 splits list and pins its bounds', async () => {
+        const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+        const base = { type: 'message', messageType: 'response', content: 'x', timestamp: 1 }
+        const ok = ServerMessageSchema.safeParse({ ...base, splits: [{ at: 3, toolUseId: 'tu1' }, { at: 9, toolUseId: 'tu2' }] })
+        assert.ok(ok.success, JSON.stringify(ok.error?.issues))
+        assert.deepEqual(ok.data.splits, [{ at: 3, toolUseId: 'tu1' }, { at: 9, toolUseId: 'tu2' }])
+        assert.ok(ServerMessageSchema.safeParse(base).success, 'additive: absent is fine')
+        assert.ok(ServerMessageSchema.safeParse({ ...base, splits: [] }).success, 'an empty list is valid')
+        for (const [label, splits] of [
+          ['a float at', [{ at: 1.5, toolUseId: 'tu1' }]],
+          ['a negative at', [{ at: -1, toolUseId: 'tu1' }]],
+          ['an empty id', [{ at: 1, toolUseId: '' }]],
+          ['an over-long id', [{ at: 1, toolUseId: 'x'.repeat(257) }]],
+          ['65 entries', Array.from({ length: 65 }, (_, i) => ({ at: i + 1, toolUseId: `t${i}` }))],
+          ['a non-array', 'tu1'],
+        ]) {
+          assert.ok(!ServerMessageSchema.safeParse({ ...base, splits }).success, `${label} is rejected`)
+        }
+        assert.ok(ServerMessageSchema.safeParse({ ...base, splits: Array.from({ length: 64 }, (_, i) => ({ at: i + 1, toolUseId: `t${i}` })) }).success, '64 entries are the most')
+        assert.ok(ServerMessageSchema.safeParse({ ...base, splits: [{ at: 1, toolUseId: 'x'.repeat(256) }] }).success)
+      })
+
       it('ServerStreamEndSchema accepts the #6391 footer-stat thinkingDurationMs + thinkingTokens', async () => {
         const { ServerStreamEndSchema } = await import('../src/schemas/server.ts')
         // Both stats present (a provider that separates reasoning tokens).

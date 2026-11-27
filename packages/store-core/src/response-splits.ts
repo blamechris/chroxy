@@ -118,8 +118,16 @@ export function layoutReplayedReplies(messages: readonly ChatMessage[]): ChatMes
     if (original.type !== 'response' || !original.responseSplits) continue
     const at = out.indexOf(original)
     if (at === -1) continue
-    const { responseSplits: splits, ...plain } = original
+    const { responseSplits: carried, ...plain } = original
     const bubble: ChatMessage = plain
+    // Re-validate: the field can come back from a persisted transcript. A value that is not
+    // a well-formed list is dropped and the bubble stays whole; nothing may throw here (it
+    // runs inside the replay-end store update).
+    const splits = parseResponseSplits(carried, bubble.content.length)
+    if (!splits) {
+      out = [...out.slice(0, at), bubble, ...out.slice(at + 1)]
+      continue
+    }
     const without = [...out.slice(0, at), ...out.slice(at + 1)]
     const cut = cutReply(without, bubble, splits)
     if (cut.pieces.length === 0 && cut.tailAbove === null) {

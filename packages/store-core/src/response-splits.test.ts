@@ -147,6 +147,22 @@ describe('layoutReplayedReplies', () => {
   })
 })
 
+describe('a corrupt or restored responseSplits value (A nit 1)', () => {
+  it.each([
+    ['a string', 'oops'],
+    ['an object', { at: 3, toolUseId: 'tu1' }],
+    ['a number', 7],
+    ['a list with a junk item', [null]],
+    ['a list out of range', [{ at: 9999, toolUseId: 'tu1' }]],
+  ])('%s: does not throw, strips the field and leaves the bubble whole', (_n, bad) => {
+    const input = [user(), tool('tu1'), { ...reply(A + C), responseSplits: bad } as unknown as ChatMessage]
+    let out: ChatMessage[] | null = null
+    expect(() => { out = layoutReplayedReplies(input) }).not.toThrow()
+    expect(shape(out!)).toEqual([['user_input'], ['tu1'], ['m1', A + C]])
+    expect(out!.every((m) => m.responseSplits === undefined)).toBe(true)
+  })
+})
+
 describe('layoutReplayedRepliesAtReplayEnd: waits for the last replay window of the session', () => {
   afterEach(() => resetReplayReconcile({ clearCursors: true }))
   const rows = () => [user(), tool('tu1'), withSplits(reply('A. B'), [{ at: 3, toolUseId: 'tu1' }])]
