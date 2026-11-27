@@ -37,8 +37,11 @@ export function endsAtSentenceBoundary(text: string): boolean {
 /**
  * What a tool call between two stretches of a reply's text does to the bubble layout:
  * the ONE rule for the live post-tool continuation split (#4889 / #4999 / #4975, in
- * `sharedStreamDelta`) and for laying a replayed reply out the same way (#9024,
- * `placeResponsePieces`), so a reload cannot disagree with what the live client drew.
+ * `sharedStreamDelta`) and for laying a replayed reply out (#9024,
+ * `layoutReplayedReplies`), so the two apply the same test. The replay applies it to
+ * the text before the tool only: live re-checks it on every later delta while a tool
+ * sits below the bubble, so a sentence that finishes AFTER the call splits live and not
+ * in a replay.
  *
  * `prior` is the text of the bubble the call interrupted, `incoming` the text that
  * follows the call (only its first character is read).
@@ -48,7 +51,10 @@ export function endsAtSentenceBoundary(text: string): boolean {
  *     bubble above the tool card.
  *   - otherwise `split: true`, and `carry` is the trailing partial word that moves to
  *     the new bubble when the call cut a word in two (#4975): the last character of
- *     `prior` AND the first of `incoming` are both word characters.
+ *     `prior` AND the first of `incoming` are both word characters. Since a split needs
+ *     a sentence boundary, `prior` cannot end in a word character here, so `carry` is
+ *     always '' when `split` is true: kept because the live code peels by it (dead since
+ *     #4999 put the gate first), not because a replay can ever need it.
  */
 export function postToolSplit(prior: string, incoming: string): { split: boolean; carry: string } {
   if (!endsAtSentenceBoundary(prior)) return { split: false, carry: '' }

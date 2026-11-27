@@ -15,7 +15,7 @@ import { nextMessageId } from '../utils'
 import { isReplayDuplicate, completeHeldResponseStream, isResponseStreamBubbleId } from '../replay-dedup'
 import { getReplayWindowDepth, noteStreamClosed, noteStreamOpen, noteTurnEnded } from '../replay-reconcile'
 import { postToolSplit } from '../sentence-boundary'
-import { parseResponseSplits, type ResponseSplit } from '../response-splits'
+import { parseResponseSplits } from '../response-splits'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
@@ -87,13 +87,6 @@ export type MessagePayload =
        * way the live `stream_start` did. Absent on every other message.
        */
       thinkingPrecedes?: ThinkingPrecedes
-      /**
-       * #9024 — set on a replayed reply (or the snapshot of one still streaming) that
-       * is a NEW bubble and records where tool calls interrupted its text. The caller
-       * adds it with `placeResponsePieces` instead of appending, so the text before a
-       * tool is above that tool's card, as it was live. Absent otherwise.
-       */
-      responseSplits?: ResponseSplit[]
     }
 
 /** A patch for a message the client already holds, found by id (see {@link applyMessageReconcile}). */
@@ -355,6 +348,17 @@ export function handleMessage(
   // several bubbles (a continuation split lays a turn out as `m1` and `m1-cont-<ts>`).
   // The entry completes the held stream when it extends it; see
   // `completeHeldResponseStream` for what keeps two distinct responses apart.
+  // #9024: the one held bubble is the EMPTY slot a stream leaves when it opens (a cut
+  // right after `stream_start`) and the entry records tool calls inside its text: the
+  // text began above them, so the slot is filled where it is, and carries the splits so
+  // the replay-end layout cuts it around the cards. (Without splits the empty slot of a
+  // claude-tui reply moves below the tools, which is where that text came after.)
+  const emptySlotSplits = receivingHistoryReplay && msgType === 'response' && stableMessageId
+    && !isReplayedThinking
+    && cachedMessages.some((m) => m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId))
+    && cachedMessages.every((m) => !(m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId)) || m.content === '')
+    ? parseResponseSplits(msg.splits, msg.content.length)
+    : undefined
   if (receivingHistoryReplay && msgType === 'response' && stableMessageId) {
     const completion = completeHeldResponseStream(cachedMessages, stableMessageId, msg.content)
     if (completion) {
@@ -365,11 +369,8 @@ export function handleMessage(
         shouldDispatch: false,
         reconcile: {
           target: completion.target,
-          patch: continuation ? {} : { content: completion.content },
-          // The empty first slot moves below the tools it sits above when the text arrived
-          // after them (claude-tui). An entry that records tool calls INSIDE its text
-          // (`splits`, #9024) began before them, so the slot stays where it is.
-          ...(completion.moveToEnd && !parseResponseSplits(msg.splits, msg.content.length) ? { moveToEnd: true } : null),
+          patch: continuation ? {} : { content: completion.content, ...(emptySlotSplits ? { responseSplits: emptySlotSplits } : null) },
+          ...(completion.moveToEnd && !emptySlotSplits ? { moveToEnd: true } : null),
           ...(continuation ? { append: [continuation] } : null),
           // The snapshot of a stream that is STILL OPEN carries no historySeq: it is not
           // the stream ending, so it must not clear the live stream marker (#9022).
@@ -568,21 +569,23 @@ export function handleMessage(
   const thinkingPrecedes = isReplayedThinking ? parseThinkingPrecedes(msg.thinkingPrecedes) : undefined
 
   // #9024: a replayed reply that becomes a new bubble because the client holds none of
-  // the stream's text is laid out around its tool cards. When it holds some, the
-  // whole-entry dedup and completion above already decided; nothing is split then.
+  // the stream's text is appended whole and carries its splits; the replay-end layout
+  // (`layoutReplayedReplies`) cuts it around its tool cards. When the client holds some
+  // of the text, the whole-entry dedup and completion above already decided; nothing is
+  // split then.
   const responseSplits = receivingHistoryReplay && msgType === 'response' && stableMessageId
+    && !isReplayedThinking
     && !cachedMessages.some((m) => m.type === 'response' && isResponseStreamBubbleId(m.id, stableMessageId))
     ? parseResponseSplits(msg.splits, msg.content.length)
     : undefined
 
   return {
     shouldDispatch: true,
-    chatMessage,
+    chatMessage: responseSplits ? { ...chatMessage, responseSplits } : chatMessage,
     isRateLimitError,
     errorContent,
     containerLostPatch,
     ...(thinkingPrecedes ? { thinkingPrecedes } : null),
-    ...(responseSplits ? { responseSplits } : null),
   }
 }
 

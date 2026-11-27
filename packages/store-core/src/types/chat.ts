@@ -105,6 +105,14 @@ export interface ChatMessageQuestion {
  */
 export type PermissionOutcomeKind = 'allowed' | 'denied' | 'expired' | 'stopped';
 
+/** Where a tool call interrupted a reply's text (#9024). Mirrors the protocol's `splits` item. */
+export interface ResponseSplit {
+  /** Characters of the reply that came before the call. */
+  at: number;
+  /** The tool row (`toolUseId`) the text above belongs before. */
+  toolUseId: string;
+}
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
@@ -281,6 +289,13 @@ export interface ChatMessage {
    * affordance.
    */
   thinkingTruncated?: boolean;
+  /**
+   * #9024 — on a REPLAYED response only, and only until the replay ends: where tool
+   * calls interrupted its text. The reply is appended whole while the replay runs (so the
+   * replay's ordering and dedup see the one entry they always did) and laid out around
+   * its tool cards once, when the replay ends; that pass removes this field.
+   */
+  responseSplits?: ResponseSplit[];
   /**
    * #6391 (chat-redesign footer-stat) — on a `type: 'thinking'` bubble, the
    * server-measured elapsed wall time (ms) the reasoning block took, from its

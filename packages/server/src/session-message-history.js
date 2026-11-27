@@ -1059,6 +1059,11 @@ export class SessionMessageHistory extends EventEmitter {
   /**
    * #9024 -- note where a tool call interrupted each open reply stream of the session.
    *
+   * A `tool_start` carries no stream id, so it applies to EVERY open non-thinking reply
+   * stream of the session (there is normally one). A reply that is not the tool's owner
+   * then carries a split naming a tool row that is not its own, which is harmless: the
+   * client lays a reply out only around tool rows it holds, in transcript order.
+   *
    * A split is kept only when the stream has text since the previous one, so a run of
    * tool calls in a row keeps the first (the text sits above it, and no text sits
    * between them). The list is bounded in count and in the length of the id, and a
@@ -1077,7 +1082,13 @@ export class SessionMessageHistory extends EventEmitter {
       const splits = this._streamSplits.get(key) ?? []
       if (splits.length >= MAX_REPLY_SPLITS) continue
       if (content.length <= (splits.at(-1)?.at ?? 0)) continue
-      splits.push({ at: content.length, toolUseId })
+      // Never between the two halves of a surrogate pair: the next delta carries the low
+      // half, and a piece must not start with half a character.
+      let at = content.length
+      const lastUnit = content.charCodeAt(at - 1)
+      if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) at -= 1
+      if (at <= (splits.at(-1)?.at ?? 0)) continue
+      splits.push({ at, toolUseId })
       this._streamSplits.set(key, splits)
     }
   }
@@ -1208,6 +1219,14 @@ export class SessionMessageHistory extends EventEmitter {
     delete clone._seq
     if (typeof clone.content === 'string' && clone.content.length > MAX) {
       clone.content = clone.content.slice(0, MAX) + '[truncated]'
+      // #9024: a split past the clipped text points into text that is gone (or into the
+      // marker). One out-of-range point makes a client drop the whole list, so keep only
+      // those that lie within what was kept.
+      if (Array.isArray(clone.splits)) {
+        const kept = clone.splits.filter((split) => split && typeof split.at === 'number' && split.at <= MAX)
+        if (kept.length > 0) clone.splits = kept
+        else delete clone.splits
+      }
     }
     if (typeof clone.input === 'string' && clone.input.length > MAX) {
       clone.input = clone.input.slice(0, MAX) + '[truncated]'

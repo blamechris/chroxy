@@ -139,6 +139,7 @@ import type { ConnectionState, SessionState } from '../src/store/types';
 import {
   REPLAY_PARITY_FIXTURES,
   REPLAY_PARITY_DIVERGENCES,
+  REPLAY_PARITY_REPLY_BUBBLES,
   REPLAY_PARITY_SESSION_ID as SID,
   CURSOR_REPLAY_SCENARIOS,
   replayParityModel,
@@ -280,6 +281,11 @@ describe('live vs replayed transcript -- app (#6630)', () => {
       expect(live.length).toBeGreaterThan(0);
       expect(replay.length).toBeGreaterThan(0);
 
+      const bubbles = REPLAY_PARITY_REPLY_BUBBLES[fx.name];
+      if (bubbles !== undefined) {
+        expect(live.filter((r) => r.type === 'response').length).toBe(bubbles);
+        expect(replay.filter((r) => r.type === 'response').length).toBe(bubbles);
+      }
       const divergence = REPLAY_PARITY_DIVERGENCES[fx.name];
       if (!divergence) {
         expect(replay).toEqual(live);

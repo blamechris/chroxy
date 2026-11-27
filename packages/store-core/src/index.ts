@@ -277,7 +277,7 @@ export type {
   HeldResponseCompletion,
 } from './replay-dedup'
 
-export { parseResponseSplits, placeResponsePieces } from './response-splits'
+export { parseResponseSplits, layoutReplayedReplies, layoutReplayedRepliesAtReplayEnd } from './response-splits'
 export type { ResponseSplit } from './response-splits'
 export { postToolSplit } from './sentence-boundary'
 
@@ -285,7 +285,6 @@ export {
   isReplayDuplicate,
   isResponseStreamBubbleId,
   completeHeldResponseStream,
-  responseStreamRoot,
 } from './replay-dedup'
 
 export type {
@@ -1124,6 +1123,7 @@ export { DASHBOARD_FLAT_MIRROR_KEYS } from './contract-fixtures/client-adapters'
 export {
   REPLAY_PARITY_FIXTURES,
   REPLAY_PARITY_DIVERGENCES,
+  REPLAY_PARITY_REPLY_BUBBLES,
   REPLAY_PARITY_SESSION_ID,
   // #8444 — hand-authored multi-tool-round turns for the cursor-replay tests.
   CURSOR_REPLAY_SCENARIOS,

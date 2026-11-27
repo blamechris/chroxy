@@ -101,15 +101,6 @@ export function isResponseStreamBubbleId(id: string, streamId: string): boolean 
   return /^(?:-(?:response|cont-\d+|post-\d+|seg-\d+))*$/.test(id.slice(streamId.length))
 }
 
-/**
- * #9024: the stream a bubble belongs to. A replayed reply is cut into `<id>-seg-<n>`
- * pieces above its tool cards and the bubble `<id>` below: this is the id with that
- * suffix removed (itself for anything else).
- */
-export function responseStreamRoot(id: string): string {
-  return id.replace(/-seg-\d+$/, '')
-}
-
 /** How a held response stream is completed (see {@link completeHeldResponseStream}). */
 export interface HeldResponseCompletion {
   /** The held bubble that was writing last: the stream's last one. */

@@ -137,6 +137,47 @@ describe('recording where tool calls interrupted a reply (#9024)', () => {
     assert.equal(h._streamSplits.size, 0)
   })
 
+  it('S-4: a >50 KB reply keeps only the splits that lie inside the clipped text, through a persist/restore round trip', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(10) })
+    h.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'y'.repeat(55 * 1024) })
+    h.recordHistory('s1', 'tool_start', TOOL('tu2'))
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'z' })
+    h.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.equal(reply(h).splits.length, 2)
+    const persisted = JSON.parse(JSON.stringify(h.getHistory('s1').map((e) => h.truncateEntry(e))))
+    const restored = new SessionMessageHistory()
+    restored.setHistory('s1', persisted)
+    const entry = reply(restored)
+    assert.ok(entry.content.endsWith('[truncated]'))
+    assert.deepEqual(entry.splits, [{ at: 10, toolUseId: 'tu1' }], 'the split into the clipped-away text is gone')
+    // and with none left the field is absent, not an empty list
+    const h2 = new SessionMessageHistory()
+    h2.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h2.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'y'.repeat(55 * 1024) })
+    h2.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h2.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.equal('splits' in h2.truncateEntry(reply(h2)), false)
+  })
+
+  it('B3: a split never falls between the two halves of a surrogate pair', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'ab\ud83d' }) // high half only so far
+    h.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ude00 done' })
+    h.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.deepEqual(reply(h).splits, [{ at: 2, toolUseId: 'tu1' }])
+    const h2 = new SessionMessageHistory()
+    h2.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+    h2.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: '\ud83d' })
+    h2.recordHistory('s1', 'tool_start', TOOL('tu1'))
+    h2.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+    assert.equal('splits' in reply(h2), false, 'a split at 0 is no split')
+  })
+
   it('the entry keeps its splits through a state-file round trip', () => {
     const h = new SessionMessageHistory()
     turn(h, ['AA', { tool: 'tu1' }, 'BB'])

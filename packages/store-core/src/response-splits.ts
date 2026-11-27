@@ -1,26 +1,34 @@
 /**
- * #9024 -- laying a replayed reply out around its tool cards.
+ * #9024 -- laying a replayed reply out around its tool cards, once, when the replay ends.
  *
  * A reply is recorded as ONE history entry, at `stream_end`, so a replay delivers it
  * after every tool row of the turn. The entry (and the snapshot of a reply still
- * streaming) carries `splits`: where each tool call fell in the text. A client that
- * builds the reply as a NEW bubble lays it out the way the live client did -- the text
- * before a tool above its card, the rest below -- with the same rule the live split
- * uses ({@link postToolSplit}). A client that already holds some of the stream's text
- * never gets here: the whole-entry dedup and completion paths handle it unchanged.
+ * streaming) carries `splits`: where each tool call fell in the text. While the replay
+ * runs the reply is appended whole, exactly as before, carrying its parsed splits on the
+ * message (`ChatMessage.responseSplits`); the replay's own ordering, dedup and the full
+ * swap all see the one entry they always did. When the replay ENDS (after the swap, once
+ * no other replay window is open) {@link layoutReplayedReplies} cuts it into pieces
+ * above the tool rows it preceded and removes the field. Doing it then means the stale
+ * prefix a full rebuild discards is gone, every tool row of the replay is held (the
+ * snapshot of an open stream is spliced in BEFORE its own tool rows), and nothing is
+ * inserted mid-array while the replay's append provenance is still being recorded.
+ *
+ * A client that already holds any of the stream's text never gets splits attached: the
+ * whole-entry dedup and completion paths handle it unchanged.
+ *
+ * The rule for where a split is made is {@link postToolSplit}, the one the live split
+ * uses, applied to the text before the tool. It is NOT identical to live: live re-checks
+ * the rule on every later delta while a tool sits below the bubble, and a replay only
+ * knows where the tool fell. A sentence that finishes after a tool call splits live
+ * (at the first delta that finds the text complete) and stays above the card here.
  *
  * Shared by the dashboard and the mobile app; neither carries a copy.
  */
-import type { ChatMessage } from './types'
+import type { ChatMessage, ResponseSplit } from './types/chat'
 import { postToolSplit } from './sentence-boundary'
+import { getReplayWindowDepth } from './replay-reconcile'
 
-/** Where a tool call interrupted a reply's text. Mirrors the protocol's `splits` schema. */
-export interface ResponseSplit {
-  /** Characters of the reply that came before the call. */
-  at: number
-  /** The tool row (`toolUseId`) the text above belongs before. */
-  toolUseId: string
-}
+export type { ResponseSplit }
 
 const MAX_SPLITS = 64
 const MAX_TOOL_ID = 256
@@ -46,68 +54,110 @@ export function parseResponseSplits(raw: unknown, contentLength: number): Respon
   return out
 }
 
-/**
- * Add a replayed reply to a session's messages, cut at its splits the way the live
- * client cut it. A live bubble sits where its text began, so it is above the first tool
- * card that followed it, and it grows through every tool call the sentence rule leaves
- * unsplit ({@link postToolSplit}); at a call it does split at, the next text opens a
- * new bubble below the card. So here:
- *
- *   - the text up to a split the rule accepts becomes a bubble `<id>-seg-<n>` directly
- *     above the first held tool row in its range (the card it preceded);
- *   - the rest is the bubble itself and keeps the stream id, so later live deltas for
- *     that id extend it: below the last card, or above the first card of its range
- *     when the sentence rule left those calls unsplit, exactly where live had it;
- *   - a split whose tool row is not held (evicted, not loaded) is not made and is not
- *     an anchor: the text merges forward, so nothing is misplaced or repeated.
- *
- * An empty rest means no bubble for it. With no split applied and no held tool in the
- * range this is a plain append. Never mutates `messages`.
- */
-export function placeResponsePieces(
+function toolRowIndex(messages: readonly ChatMessage[], toolUseId: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.type === 'tool_use' && m.toolUseId === toolUseId) return i
+  }
+  return -1
+}
+
+/** Cut one bubble at its splits; the pieces and the tail say where each goes. */
+function cutReply(
   messages: readonly ChatMessage[],
   bubble: ChatMessage,
-  splits: readonly ResponseSplit[] | undefined,
-): ChatMessage[] {
-  if (!splits || splits.length === 0) return [...messages, bubble]
-  const held = (toolUseId: string): boolean => messages.some((m) => m.type === 'tool_use' && m.toolUseId === toolUseId)
+  splits: readonly ResponseSplit[],
+): { pieces: Array<{ message: ChatMessage; above: string }>; tail: ChatMessage | null; tailAbove: string | null; lastApplied: string | null } {
   const content = bubble.content
-  const placed: Array<{ message: ChatMessage; aboveToolUseId: string }> = []
+  const pieces: Array<{ message: ChatMessage; above: string }> = []
   let start = 0
   let anchor: string | null = null
+  let lastApplied: string | null = null
+  let lastRow = -1
   splits.forEach((split, i) => {
     if (split.at <= start || split.at > content.length) return
-    if (!held(split.toolUseId)) return
+    const row = toolRowIndex(messages, split.toolUseId)
+    // Not held (evicted, not loaded), or out of transcript order: not an anchor. The
+    // text merges forward, so a corrupt list can reorder nothing.
+    if (row === -1 || row <= lastRow) return
+    lastRow = row
     anchor ??= split.toolUseId
     const prior = content.slice(start, split.at)
-    const decision = postToolSplit(prior, content.slice(split.at))
-    if (!decision.split) return
-    const text = prior.slice(0, prior.length - decision.carry.length)
-    if (text.length > 0) {
-      placed.push({
-        message: { id: `${bubble.id}-seg-${i}`, type: 'response', content: text, timestamp: bubble.timestamp },
-        aboveToolUseId: anchor,
-      })
-    }
-    start = split.at - decision.carry.length
+    // `carry` is always '' when `split` is true (a split needs a sentence boundary, so the
+    // text cannot end in a word character): there is no word to move across the tool.
+    if (!postToolSplit(prior, content.slice(split.at)).split) return
+    pieces.push({
+      message: { id: `${bubble.id}-seg-${i}`, type: 'response', content: prior, timestamp: bubble.timestamp },
+      above: anchor,
+    })
+    lastApplied = split.toolUseId
+    start = split.at
     anchor = null
   })
   const rest = content.slice(start)
-  if (rest.length > 0) {
-    const tail = start === 0 ? bubble : { ...bubble, content: rest }
-    if (anchor !== null) placed.push({ message: tail, aboveToolUseId: anchor })
-    else if (placed.length === 0) return [...messages, bubble]
-    else placed.push({ message: tail, aboveToolUseId: '' })
-  }
-  const out = [...messages]
-  for (const { message, aboveToolUseId } of placed) {
-    if (aboveToolUseId === '') { out.push(message); continue }
-    let at = out.length
-    for (let i = out.length - 1; i >= 0; i--) {
-      const m = out[i]!
-      if (m.type === 'tool_use' && m.toolUseId === aboveToolUseId) { at = i; break }
+  const tail = rest.length > 0 ? (start === 0 ? bubble : { ...bubble, content: rest }) : null
+  return { pieces, tail, tailAbove: anchor, lastApplied }
+}
+
+/**
+ * Lay out every replayed reply that carries splits, in `messages` (the transcript as
+ * it stands when the replay has ended). Each becomes pieces `<id>-seg-<n>` directly
+ * above the first held tool row of their range, and the bubble itself (the tail), which
+ * keeps the stream id so later live deltas extend it: below the last card, or above the
+ * first card of its range when the sentence rule left those calls unsplit. A split whose
+ * tool row is not held, or that is out of transcript order, is not made. The field is
+ * removed from every bubble it was on, so a second pass changes nothing.
+ *
+ * Returns the new messages, or `null` when no message carries splits. Never mutates
+ * `messages`.
+ */
+export function layoutReplayedReplies(messages: readonly ChatMessage[]): ChatMessage[] | null {
+  if (!messages.some((m) => m.type === 'response' && m.responseSplits)) return null
+  let out = [...messages]
+  for (const original of messages) {
+    if (original.type !== 'response' || !original.responseSplits) continue
+    const at = out.indexOf(original)
+    if (at === -1) continue
+    const { responseSplits: splits, ...plain } = original
+    const bubble: ChatMessage = plain
+    const without = [...out.slice(0, at), ...out.slice(at + 1)]
+    const cut = cutReply(without, bubble, splits)
+    if (cut.pieces.length === 0 && cut.tailAbove === null) {
+      // nothing to split: the bubble stays exactly where it was
+      out = [...out.slice(0, at), bubble, ...out.slice(at + 1)]
+      continue
     }
-    out.splice(at, 0, message)
+    let origPos = at
+    const placed = without
+    for (const piece of cut.pieces) {
+      const idx = toolRowIndex(placed, piece.above)
+      placed.splice(idx, 0, piece.message)
+      if (idx <= origPos) origPos++
+    }
+    if (cut.tail) {
+      if (cut.tailAbove !== null) {
+        placed.splice(toolRowIndex(placed, cut.tailAbove), 0, cut.tail)
+      } else {
+        // below the card it follows, and below the run of tool rows right after it
+        let after = toolRowIndex(placed, cut.lastApplied!)
+        while (placed[after + 1]?.type === 'tool_use') after++
+        placed.splice(Math.max(origPos, after + 1), 0, cut.tail)
+      }
+    }
+    out = placed
   }
   return out
+}
+
+/**
+ * The replay-end hook both clients call after `reconcileReplayEnd`: lays the replayed
+ * replies out unless another replay window of the session is still open (its tool rows
+ * may not have arrived; the last end does it). Returns the new messages or `null`.
+ */
+export function layoutReplayedRepliesAtReplayEnd(
+  sessionId: string | null | undefined,
+  messages: readonly ChatMessage[],
+): ChatMessage[] | null {
+  if (getReplayWindowDepth(sessionId) > 0) return null
+  return layoutReplayedReplies(messages)
 }

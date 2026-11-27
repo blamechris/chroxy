@@ -135,6 +135,7 @@ export const CURSOR_REPLAY_SCENARIOS: CursorReplayScenario[] = [
     replay: [
       ...replayTool('tu1', 'Read', { file_path: '/repo/a.js' }, 'export const x = 1', 1),
       ...replayTool('tu2', 'Bash', { command: 'npm test' }, '3 passing', 3),
+      // the splits below are the ones `text-between-two-tools` records for the same shape of turn
       replayReply('Reading the file. Then running tests. All green.', 5, [
         { at: 'Reading the file. '.length, toolUseId: 'tu1' },
         { at: 'Reading the file. Then running tests. '.length, toolUseId: 'tu2' },
@@ -269,6 +270,17 @@ const PERMISSION_DESIGN_REASON =
   'it was shown with (#8503) and how it ended, which it carries as a recorded `permissionOutcome`. ' +
   'The live card reached the same end by an `answered` decision alone. The rendered line is the same for an answered prompt ' +
   '(dashboard: replay-parity.test.ts renders both); the model is not.'
+
+/**
+ * #9024: how many reply bubbles the scenarios that interleave text and tool calls lay
+ * out, live AND replayed. A transcript that is equal because both sides collapsed the
+ * turn into one bubble is equal for the wrong reason, so the parity loops assert it.
+ */
+export const REPLAY_PARITY_REPLY_BUBBLES: Record<string, number> = {
+  'text-around-a-tool': 2,
+  'text-between-two-tools': 3,
+  'text-mid-sentence-tool': 1,
+}
 
 export const REPLAY_PARITY_DIVERGENCES: Record<string, ReplayParityDivergence> = {
   'tool-result-image': {
