@@ -20,6 +20,13 @@
  * is unambiguous. All input is cut to a fixed size BEFORE any regex sees it, and the
  * stack walkers use `indexOf`/`slice`, never a split of the whole input.
  *
+ * Accepted residual: an identifier-shaped slot can still carry session content, e.g.
+ * `PatientAliceHIVPositive` used as a property key. Nothing can tell that from a real
+ * identifier; the model accepts it, and the Copy flow shows the report for review before
+ * anything is copied. Credentials are the part this module does defend (prefix and opaque-
+ * token rules below), and file locations are kept only when they are the dashboard's OWN
+ * loaded scripts, supplied by the caller (`assetBasenames`), never inferred from the text.
+ *
  * Pure: no storage, no DOM, never throws. Storage and UI are layered on top elsewhere.
  */
 import { redactValue } from '@chroxy/protocol/redaction'
@@ -41,7 +48,7 @@ const MAX_DIGITS = 7
 /** Constructors whose NAME is kept; anything else (a subclass, a payload) becomes `Error`. */
 const ERROR_NAMES: ReadonlySet<string> = new Set([
   'Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'URIError', 'EvalError',
-  'AggregateError', 'DOMException', 'AbortError', 'NotFoundError', 'SecurityError', 'NetworkError',
+  'AggregateError', 'InternalError', 'DOMException', 'AbortError', 'NotFoundError', 'SecurityError', 'NetworkError',
   'QuotaExceededError', 'InvalidStateError', 'TimeoutError',
 ])
 
@@ -57,9 +64,56 @@ const REDACTED_SRC = '\\[REDACTED\\]'
 const ID_RE = new RegExp(`^${ID_SRC}$`)
 const PATH_RE = new RegExp(`^${PATH_SRC}$`)
 
-/** Run a validated slot through the shared redaction rules; a changed slot is masked whole. */
+/**
+ * Known credential prefixes. A slot, name or basename that CONTAINS one is masked whole.
+ * The shared patterns need a trailing word boundary, so `ghp_<36>_suffix` slips past them.
+ * Hyphenated prefixes (glpat-, xoxb-, xoxp-, xoxa-, xoxs-) cannot occur inside an identifier,
+ * so they are not listed; `ya29.` can (it separates path segments), so it is.
+ */
+const CREDENTIAL_PREFIXES: readonly string[] = [
+  'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'AIza', 'AKIA', 'ASIA',
+  'sk_live_', 'sk_test_', 'rk_live_', 'pk_live_', 'ya29.', 'oauth_', 'npm_',
+]
+
+const OPAQUE_MIN = 24
+
+/**
+ * Opaque-token defence in depth: any maximal alphanumeric run of at least 24 characters
+ * whose character class (lower / upper / digit) changes at least once every 3 characters.
+ * Random base62 and hex tokens change class about every 1.6-2 characters; camelCase words
+ * change about every 6-8 (`handleSessionListUpdateResponse` is 4 changes in 31 chars), and
+ * an all-lowercase or all-uppercase run never changes. A plain digit-ratio rule would miss
+ * about half of random base62 tokens (expected ratio 16%), so transition density is used.
+ */
+function hasOpaqueRun(s: string): boolean {
+  let runStart = 0
+  let changes = 0
+  let prev = -1
+  for (let i = 0; i <= s.length; i++) {
+    const c = i < s.length ? s.charCodeAt(i) : 0
+    const cls = c >= 48 && c <= 57 ? 2 : c >= 65 && c <= 90 ? 1 : c >= 97 && c <= 122 ? 0 : -1
+    if (cls < 0) {
+      if (i - runStart >= OPAQUE_MIN && changes * 3 >= i - runStart) return true
+      runStart = i + 1
+      changes = 0
+      prev = -1
+      continue
+    }
+    if (prev >= 0 && cls !== prev) changes++
+    prev = cls
+  }
+  return false
+}
+
+function hasCredentialMarker(s: string): boolean {
+  for (const p of CREDENTIAL_PREFIXES) if (s.includes(p)) return true
+  return hasOpaqueRun(s)
+}
+
+/** Run a validated slot through the shared redaction rules and the credential markers; a changed slot is masked whole. */
 function redactSlot(slot: string): string {
   try {
+    if (hasCredentialMarker(slot)) return REDACTED
     return redactValue(slot) === slot ? slot : REDACTED
   } catch {
     return REDACTED
@@ -71,11 +125,11 @@ function redactSlot(slot: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * `{id}` an identifier, `{path}` a dotted path of at most 4 identifiers, `{nullish}` the
+ * (see `ERROR_TEMPLATE_PATTERNS` below.) `{id}` an identifier, `{path}` a dotted path of at most 4 identifiers, `{nullish}` the
  * literal `undefined` or `null`. Everything else is literal text. `{id}`/`{path}` also
  * accept the literal `[REDACTED]`, so that already-classified text re-validates to itself.
  */
-const TEMPLATES: ReadonlyArray<readonly [id: string, pattern: string]> = [
+export const ERROR_TEMPLATE_PATTERNS: ReadonlyArray<readonly [id: string, pattern: string]> = [
   // V8
   ['read-props-of', "Cannot read properties of {nullish} (reading '{id}')"],
   ['cannot-set-props-of', "Cannot set properties of {nullish} (setting '{id}')"],
@@ -84,6 +138,7 @@ const TEMPLATES: ReadonlyArray<readonly [id: string, pattern: string]> = [
   ['not-iterable', '{path} is not iterable'],
   ['not-defined', '{path} is not defined'],
   ['cannot-access-before-init', "Cannot access '{id}' before initialization"],
+  ['cannot-access-before-init', "Cannot access '{id}' before initialization."],
   ['max-call-stack', 'Maximum call stack size exceeded'],
   ['invalid-array-length', 'Invalid array length'],
   ['assignment-to-constant', 'Assignment to constant variable.'],
@@ -143,10 +198,10 @@ function compile([id, pattern]: readonly [string, string]): CompiledTemplate {
   return { id, re: new RegExp(src), parts, kinds }
 }
 
-const COMPILED: readonly CompiledTemplate[] = TEMPLATES.map(compile)
+const COMPILED: readonly CompiledTemplate[] = ERROR_TEMPLATE_PATTERNS.map(compile)
 
 /** The set of stable template ids, for tests and for the Diagnostics UI. */
-export const ERROR_TEMPLATE_IDS: readonly string[] = Array.from(new Set(TEMPLATES.map(t => t[0])))
+export const ERROR_TEMPLATE_IDS: readonly string[] = Array.from(new Set(ERROR_TEMPLATE_PATTERNS.map(t => t[0])))
 
 export interface ClassifiedError {
   name: string
@@ -190,6 +245,14 @@ export function classifyErrorMessage(name: unknown, message: unknown): Classifie
 
 /** `http(s)` bundle assets only: `index-abc123.js`. */
 const BUNDLE_BASENAME_RE = /^[A-Za-z0-9_.-]{1,80}\.(?:js|mjs|cjs)$/
+/** The dashboard's own loaded script basenames, supplied by the caller. Absent or empty: every location is `<unknown>`. */
+export type AssetBasenames = ReadonlySet<string>
+
+export interface StackOptions {
+  maxFrames?: number
+  assetBasenames?: AssetBasenames
+}
+
 const NORMALIZED_LOC_RE = /^([A-Za-z0-9_.-]{1,80}\.(?:js|mjs|cjs)):(\d{1,7}):(\d{1,7})$/
 
 function isDigits(s: string): boolean {
@@ -205,7 +268,7 @@ function isDigits(s: string): boolean {
  * `basename:line:col` for an http(s) bundle asset, else `<unknown>`. Only the basename
  * survives: userinfo, host, directories, query and fragment are never copied.
  */
-function normalizeLocation(loc: string): string {
+function normalizeLocation(loc: string, assets: AssetBasenames | undefined): string {
   const colIdx = loc.lastIndexOf(':')
   if (colIdx < 0) return UNKNOWN
   const lineIdx = loc.lastIndexOf(':', colIdx - 1)
@@ -225,7 +288,22 @@ function normalizeLocation(loc: string): string {
   const slash = url.lastIndexOf('/')
   if (slash < 0) return UNKNOWN // host only, no path: nothing here is a bundle asset
   const base = url.slice(slash + 1)
-  if (!BUNDLE_BASENAME_RE.test(base)) return UNKNOWN
+  return keepLocation(base, line, col, assets)
+}
+
+/**
+ * The ONE validator for a `basename:line:col` location, used for raw URLs and for stored
+ * `name @ loc` output alike: the basename must be a member of the caller's asset set, be
+ * bundle-shaped, survive redaction unchanged and carry no credential marker.
+ */
+function keepLocation(base: string, line: string, col: string, assets: AssetBasenames | undefined): string {
+  if (!assets || typeof assets.has !== 'function' || !assets.has(base)) return UNKNOWN
+  if (!BUNDLE_BASENAME_RE.test(base) || hasCredentialMarker(base)) return UNKNOWN
+  try {
+    if (redactValue(base) !== base) return UNKNOWN
+  } catch {
+    return UNKNOWN
+  }
   return `${base}:${line}:${col}`
 }
 
@@ -260,16 +338,17 @@ function forEachLine(text: string, fn: (line: string, truncated: boolean) => boo
 }
 
 /** `name @ location` for a line, or null when the line is not a frame. */
-function parseFrame(rawLine: string, truncated: boolean): string | null {
+function parseFrame(rawLine: string, truncated: boolean, assets: AssetBasenames | undefined): string | null {
   const line = rawLine.trim()
   // 1. Our own output: `name @ basename.js:1:2`, so normalisation is idempotent.
   const sp = line.indexOf(' @ ')
   if (sp > 0 && !truncated) {
     const loc = line.slice(sp + 3)
-    const locOk = loc === UNKNOWN || NORMALIZED_LOC_RE.test(loc)
-    if (locOk) {
+    const m = loc === UNKNOWN ? null : NORMALIZED_LOC_RE.exec(loc)
+    if (loc === UNKNOWN || m) {
       const name = line.slice(0, sp)
-      return `${name === ANONYMOUS ? ANONYMOUS : normalizeName(name)} @ ${loc}`
+      const kept = m ? keepLocation(m[1] ?? '', m[2] ?? '', m[3] ?? '', assets) : UNKNOWN
+      return `${name === ANONYMOUS ? ANONYMOUS : normalizeName(name)} @ ${kept}`
     }
   }
   // 2. V8: `at fn (loc)`, `at loc`, `at async fn (loc)`.
@@ -285,7 +364,7 @@ function parseFrame(rawLine: string, truncated: boolean): string | null {
         loc = rest.slice(open + 2, -1)
       }
     }
-    return `${name} @ ${normalizeLocation(loc)}`
+    return `${name} @ ${normalizeLocation(loc, assets)}`
   }
   // 3. JSC / SpiderMonkey: `fn@loc`. No whitespace is allowed before the `@`, so a
   // message line such as `Error: a@b` is never mistaken for a frame.
@@ -300,7 +379,7 @@ function parseFrame(rawLine: string, truncated: boolean): string | null {
     if (truncated) return `${ANONYMOUS} @ ${UNKNOWN}`
     const loc = line.slice(at + 1)
     if (loc.length === 0 || /\s/.test(loc)) return null
-    return `${at === 0 ? ANONYMOUS : normalizeName(line.slice(0, at))} @ ${normalizeLocation(loc)}`
+    return `${at === 0 ? ANONYMOUS : normalizeName(line.slice(0, at))} @ ${normalizeLocation(loc, assets)}`
   }
   return null
 }
@@ -309,14 +388,14 @@ function parseFrame(rawLine: string, truncated: boolean): string | null {
  * Reduce an `Error.stack` to `name @ basename:line:col` frames. Header and message lines
  * are never included. Never throws.
  */
-export function normalizeStack(stack: unknown, opts?: { maxFrames?: number }): string[] {
+export function normalizeStack(stack: unknown, opts?: StackOptions): string[] {
   const out: string[] = []
   try {
     if (typeof stack !== 'string') return out
     const max = clampCount(opts?.maxFrames, DEFAULT_MAX_FRAMES)
     forEachLine(stack, (line, truncated) => {
       if (out.length >= max) return false
-      const frame = parseFrame(line, truncated)
+      const frame = parseFrame(line, truncated, opts?.assetBasenames)
       if (frame !== null) out.push(frame)
       return undefined
     })
@@ -356,8 +435,8 @@ export function normalizeComponentStack(stack: unknown, opts?: { maxFrames?: num
       const name = rest.slice(0, end)
       const tail = rest.slice(end)
       const tailOk = tail === '' || tail.startsWith('@') || tail.startsWith(' (')
-      if (!tailOk || !PATH_RE.test(name)) return undefined
-      out.push(redactSlot(name))
+      if (!tailOk || !(PATH_RE.test(name) || name === REDACTED)) return undefined
+      out.push(name === REDACTED ? REDACTED : redactSlot(name))
       return undefined
     })
   } catch {
@@ -384,22 +463,30 @@ export interface ErrorReportEntry {
   componentStack: string[] | string
 }
 
-const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,31}$/
-const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/
+const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/
+const PLATFORMS: ReadonlySet<string> = new Set(['tauri', 'web'])
+const CATEGORIES: ReadonlySet<string> = new Set(['render', 'window-error', 'unhandled-rejection'])
 
-function safeToken(v: unknown, re: RegExp): string {
-  if (typeof v !== 'string' || v.length > 64 || !re.test(v)) return 'unknown'
-  return redactSlot(v)
+function safeEnum(v: unknown, allowed: ReadonlySet<string>): string {
+  return typeof v === 'string' && allowed.has(v) ? v : 'unknown'
+}
+
+function safeVersion(v: unknown): string {
+  return typeof v === 'string' && VERSION_RE.test(v) ? v : 'unknown'
 }
 
 function safeTime(v: unknown): string {
-  if (typeof v === 'number' && Number.isFinite(v)) {
-    const d = new Date(v)
-    return Number.isNaN(d.getTime()) ? 'unknown' : d.toISOString()
-  }
-  if (typeof v === 'string' && v.length <= 32 && ISO_RE.test(v)) return v
-  return 'unknown'
+  let ms: number
+  if (typeof v === 'number' && Number.isFinite(v)) ms = v
+  else if (typeof v === 'string' && v.length <= 24 && ISO_RE.test(v)) {
+    ms = Date.parse(v)
+    // Round-trip through Date: a calendar-invalid date (2026-99-99T99:99:99Z, Feb 30) never reaches the report.
+    const want = v.includes('.') ? v : v.replace('Z', '.000Z')
+    if (Number.isNaN(ms) || new Date(ms).toISOString() !== want) return 'unknown'
+  } else return 'unknown'
+  const d = new Date(ms)
+  return Number.isNaN(d.getTime()) ? 'unknown' : d.toISOString()
 }
 
 function safeCount(v: unknown): number {
@@ -423,18 +510,18 @@ function toLines(v: unknown): string {
  * Render the plain-text Copy report. Every field is re-validated here, so a poisoned
  * stored entry cannot reach the clipboard raw.
  */
-export function formatErrorReport(entry: ErrorReportEntry): string {
+export function formatErrorReport(entry: ErrorReportEntry, opts?: { assetBasenames?: AssetBasenames }): string {
   try {
     const e: Partial<Record<keyof ErrorReportEntry, unknown>> = entry && typeof entry === 'object' ? entry : {}
     const cls = classifyErrorMessage(e.name, e.message)
-    const frames = normalizeStack(toLines(e.stack))
+    const frames = normalizeStack(toLines(e.stack), { assetBasenames: opts?.assetBasenames })
     const comps = normalizeComponentStack(toLines(e.componentStack))
     const lines = [
       'Chroxy dashboard error report',
       `Time: ${safeTime(e.time)}`,
-      `Version: ${safeToken(e.version, VERSION_RE)}`,
-      `Platform: ${safeToken(e.platform, TOKEN_RE)}`,
-      `Category: ${safeToken(e.category, TOKEN_RE)}`,
+      `Version: ${safeVersion(e.version)}`,
+      `Platform: ${safeEnum(e.platform, PLATFORMS)}`,
+      `Category: ${safeEnum(e.category, CATEGORIES)}`,
       `Count: ${safeCount(e.count)}`,
       `Error: ${cls.name}`,
       `Message: ${cls.text}`,

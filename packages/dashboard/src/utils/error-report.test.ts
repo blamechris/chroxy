@@ -2,8 +2,15 @@
 import { describe, it, expect } from 'vitest'
 import {
   classifyErrorMessage, normalizeStack, normalizeComponentStack, formatErrorReport,
-  MESSAGE_OMITTED, ERROR_TEMPLATE_IDS, type ErrorReportEntry,
+  MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, type ErrorReportEntry, type StackOptions,
 } from './error-report'
+
+/** The dashboard's own loaded scripts: the ONLY basenames a location may keep. */
+const ASSETS: ReadonlySet<string> = new Set([
+  'index-abc123.js', 'a.js', 'b.mjs', 'c.mjs', 'c.js', 'd.js', 'e.js', 'app-1.js',
+])
+const ns = (stack: unknown, opts?: StackOptions) => normalizeStack(stack, { assetBasenames: ASSETS, ...opts })
+const fr = (entry: ErrorReportEntry) => formatErrorReport(entry, { assetBasenames: ASSETS })
 
 const OMIT = '[message omitted]'
 const GHP = `ghp_${'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'}` // 36 alphanumerics after ghp_
@@ -20,6 +27,7 @@ const POSITIVE: Array<[string, string, string]> = [
   ['ReferenceError', 'not-defined', 'foo is not defined'],
   ['ReferenceError', 'not-defined', "Can't find variable: foo"],
   ['ReferenceError', 'cannot-access-before-init', "Cannot access 'x' before initialization"],
+  ['ReferenceError', 'cannot-access-before-init', "Cannot access 'x' before initialization."], // JSC
   ['RangeError', 'max-call-stack', 'Maximum call stack size exceeded'],
   ['RangeError', 'max-call-stack', 'Maximum call stack size exceeded.'],
   ['InternalError', 'max-call-stack', 'too much recursion'],
@@ -38,24 +46,31 @@ const POSITIVE: Array<[string, string, string]> = [
   ['TypeError', 'fetch-failed', 'Load failed'],
   ['TypeError', 'fetch-failed', 'NetworkError when attempting to fetch resource.'],
   ['Error', 'resize-observer-loop', 'ResizeObserver loop completed with undelivered notifications.'],
+  ['Error', 'resize-observer-loop', 'ResizeObserver loop limit exceeded'],
 ]
 
 describe('classifyErrorMessage: templates', () => {
   it.each(POSITIVE)('%s / %s re-renders exactly: %s', (name, template, message) => {
     const r = classifyErrorMessage(name, message)
+    expect(r.name).toBe(name)
     expect(r.template).toBe(template)
     expect(r.text).toBe(message)
     // Idempotent: classified text re-validates to itself.
     expect(classifyErrorMessage(r.name, r.text)).toEqual(r)
   })
 
-  it('every template id appears in the positive table (no untested template)', () => {
-    const covered = new Set(POSITIVE.map(p => p[1]))
-    expect(ERROR_TEMPLATE_IDS.filter(id => !covered.has(id))).toEqual([])
+  it('every template VARIANT (pattern string) has a positive row, not just every id', () => {
+    const loose = (pattern: string) => new RegExp(`^${pattern
+      .replace(/[\\^$.*+?()[\]|/]/g, '\\$&')
+      .replace(/\{(?:id|path|nullish)\}/g, '.+')}$`)
+    const uncovered = ERROR_TEMPLATE_PATTERNS.filter(([id, pattern]) =>
+      !POSITIVE.some(([, tid, msg]) => tid === id && loose(pattern).test(msg)))
+    expect(uncovered).toEqual([])
   })
 
   it('keeps only allowlisted names; anything else is Error', () => {
     expect(classifyErrorMessage('TypeError', 'Load failed').name).toBe('TypeError')
+    expect(classifyErrorMessage('InternalError', 'too much recursion').name).toBe('InternalError')
     expect(classifyErrorMessage('DOMException', 'Load failed').name).toBe('DOMException')
     expect(classifyErrorMessage('MySecretPayloadError', 'Load failed').name).toBe('Error')
     expect(classifyErrorMessage(undefined, 'Load failed').name).toBe('Error')
@@ -184,13 +199,13 @@ function everyShape(s: string): { label: string; out: string }[] {
     `at fn (${s}\n)`, `  at ${s}  @  ${s}`, `${s} @ ${s}:1:2`,
   ]
   for (const st of stacks) {
-    shapes.push({ label: `stack ${JSON.stringify(st.slice(0, 60))}`, out: normalizeStack(st).join('\n') })
+    shapes.push({ label: `stack ${JSON.stringify(st.slice(0, 60))}`, out: ns(st).join('\n') })
     shapes.push({ label: `component ${JSON.stringify(st.slice(0, 60))}`, out: normalizeComponentStack(st).join('\n') })
   }
   const poisoned = {
     time: s, version: s, platform: s, category: s, count: s, name: s, message: s, stack: [s, `at ${s}`, `${s}@${s}`], componentStack: [s, `at ${s}`],
   } as unknown as ErrorReportEntry
-  shapes.push({ label: 'report', out: formatErrorReport(poisoned) })
+  shapes.push({ label: 'report', out: fr(poisoned) })
   return shapes
 }
 
@@ -206,13 +221,13 @@ describe('Codex leak corpus', () => {
   })
 
   it('a frame named token=abcdef123456 and a sk-proj- function name become anonymous', () => {
-    expect(normalizeStack('at token=abcdef123456 (http://localhost/a.js:1:2)')).toEqual(['<anonymous> @ a.js:1:2'])
-    expect(normalizeStack(`at sk-proj-${'Z9'.repeat(40)} (http://localhost/a.js:1:2)`)).toEqual(['<anonymous> @ a.js:1:2'])
-    expect(normalizeStack('token=abcdef123456@http://localhost/a.js:1:2')).toEqual(['<anonymous> @ a.js:1:2'])
+    expect(ns('at token=abcdef123456 (http://localhost/a.js:1:2)')).toEqual(['<anonymous> @ a.js:1:2'])
+    expect(ns(`at sk-proj-${'Z9'.repeat(40)} (http://localhost/a.js:1:2)`)).toEqual(['<anonymous> @ a.js:1:2'])
+    expect(ns('token=abcdef123456@http://localhost/a.js:1:2')).toEqual(['<anonymous> @ a.js:1:2'])
   })
 
   it('a ghp_ frame name is masked', () => {
-    expect(normalizeStack(`at ${GHP} (http://localhost/a.js:1:2)`)).toEqual(['[REDACTED] @ a.js:1:2'])
+    expect(ns(`at ${GHP} (http://localhost/a.js:1:2)`)).toEqual(['[REDACTED] @ a.js:1:2'])
     expect(normalizeComponentStack(`at ${GHP} (x)`)).toEqual(['[REDACTED]'])
   })
 })
@@ -233,7 +248,7 @@ describe('normalizeStack', () => {
       `    at new Widget (${URL}:9:10)`,
       `    at ${URL}:1:2`,
     ].join('\n')
-    expect(normalizeStack(stack)).toEqual([
+    expect(ns(stack)).toEqual([
       'fn @ index-abc123.js:12:34',
       'Object.render @ index-abc123.js:5:6',
       'load @ index-abc123.js:7:8',
@@ -244,7 +259,7 @@ describe('normalizeStack', () => {
 
   it('normalises JSC/SpiderMonkey frames', () => {
     const stack = `fn@${URL}:12:34\n@${URL}:1:2\nglobal code@${URL}:3:4 (not a frame: whitespace before the @)\nrender@[native code]\nObject.render@https://x.example/a/b/c.mjs:3:4`
-    expect(normalizeStack(stack)).toEqual([
+    expect(ns(stack)).toEqual([
       'fn @ index-abc123.js:12:34',
       '<anonymous> @ index-abc123.js:1:2',
       'Object.render @ c.mjs:3:4',
@@ -258,43 +273,43 @@ describe('normalizeStack', () => {
     'http://localhost/a%2Ejs:1:2', 'http://localhost/:1:2', 'http://a.js:1:2', 'ftp://h/a.js:1:2', `http://h/${'a'.repeat(90)}.js:1:2`,
     'HTTP://h/a.js:1:2', 'webpack-internal:///./a.js:1:2',
   ])('location %s is <unknown>', (loc) => {
-    expect(normalizeStack(`at fn (${loc})`)).toEqual(['fn @ <unknown>'])
+    expect(ns(`at fn (${loc})`)).toEqual(['fn @ <unknown>'])
   })
 
   it('keeps the basename only: never userinfo, host, directories, query or fragment', () => {
-    const out = normalizeStack("at fn (https://user:p'ass@host/dir/secret/app-1.js?x=SECRET#SECRET:1:2)")
+    const out = ns("at fn (https://user:p'ass@host/dir/secret/app-1.js?x=SECRET#SECRET:1:2)")
     expect(out).toEqual(['fn @ app-1.js:1:2'])
-    expect(normalizeStack('at fn (https://host/a.js#frag:1:2)')).toEqual(['fn @ a.js:1:2'])
+    expect(ns('at fn (https://host/a.js#frag:1:2)')).toEqual(['fn @ a.js:1:2'])
   })
 
   it('caps the frame count (default 12, configurable)', () => {
     const stack = Array.from({ length: 50 }, (_, i) => `    at f${i} (http://localhost/a.js:${i + 1}:1)`).join('\n')
-    expect(normalizeStack(stack)).toHaveLength(12)
-    expect(normalizeStack(stack, { maxFrames: 3 })).toHaveLength(3)
-    expect(normalizeStack(stack, { maxFrames: 0 })).toEqual([])
-    expect(normalizeStack(stack, { maxFrames: Infinity })).toHaveLength(12)
+    expect(ns(stack)).toHaveLength(12)
+    expect(ns(stack, { maxFrames: 3 })).toHaveLength(3)
+    expect(ns(stack, { maxFrames: 0 })).toEqual([])
+    expect(ns(stack, { maxFrames: Infinity })).toHaveLength(12)
   })
 
   it('only the first 200 lines are examined', () => {
     const stack = `${'noise\n'.repeat(200)}at fn (http://localhost/a.js:1:2)`
-    expect(normalizeStack(stack)).toEqual([])
+    expect(ns(stack)).toEqual([])
   })
 
   it('a truncated line never keeps a partial name or location', () => {
     const long = `at ${'a'.repeat(300)} (http://localhost/dashboard/assets/${'b'.repeat(400)}.js:1:2)`
-    expect(normalizeStack(long)).toEqual(['<anonymous> @ <unknown>'])
+    expect(ns(long)).toEqual(['<anonymous> @ <unknown>'])
     const longJsc = `fn@http://localhost/${'b'.repeat(600)}.js:1:2`
-    expect(normalizeStack(longJsc)).toEqual(['<anonymous> @ <unknown>'])
+    expect(ns(longJsc)).toEqual(['<anonymous> @ <unknown>'])
     // a long non-frame line stays skipped
-    expect(normalizeStack(`${'x'.repeat(2000)}`)).toEqual([])
+    expect(ns(`${'x'.repeat(2000)}`)).toEqual([])
   })
 
   it('non-strings and garbage do not throw', () => {
     for (const v of [undefined, null, 1, {}, [], Symbol('s'), '', '\n\n', '\u0000', 'at ', 'at (', '@', '@@@', ' @ ', ' @ :1:2']) {
-      expect(() => normalizeStack(v)).not.toThrow()
+      expect(() => ns(v)).not.toThrow()
     }
-    expect(normalizeStack(undefined)).toEqual([])
-    expect(normalizeStack({ stack: 'x' })).toEqual([])
+    expect(ns(undefined)).toEqual([])
+    expect(ns({ stack: 'x' })).toEqual([])
   })
 
   it('is idempotent: normalising normalised output does not grow or change it', () => {
@@ -302,11 +317,11 @@ describe('normalizeStack', () => {
       "TypeError: x", `at fn (http://localhost/a.js:1:2)`, 'at async Foo.bar (http://localhost/b.mjs:3:4)', 'at file:///x.js:1:1',
       `at ${GHP} (http://localhost/c.js:5:6)`, 'at token=abc (http://localhost/d.js:1:1)', `fn@http://localhost/e.js:7:8`,
     ].join('\n')
-    const once = normalizeStack(stack)
+    const once = ns(stack)
     expect(once.length).toBeGreaterThan(3)
-    const twice = normalizeStack(once.join('\n'))
+    const twice = ns(once.join('\n'))
     expect(twice).toEqual(once)
-    expect(normalizeStack(twice.join('\n'))).toEqual(once)
+    expect(ns(twice.join('\n'))).toEqual(once)
   })
 })
 
@@ -349,10 +364,10 @@ describe('bounded time on 256 KiB adversarial input', () => {
     const t0 = performance.now()
     for (const w of wraps) {
       classifyErrorMessage('TypeError', w)
-      normalizeStack(w)
+      ns(w)
       normalizeComponentStack(w)
     }
-    formatErrorReport({
+    fr({
       time: big, version: big, platform: big, category: big, count: 1, name: big, message: big, stack: [big, big], componentStack: [big],
     } as unknown as ErrorReportEntry)
     expect(performance.now() - t0).toBeLessThan(5000)
@@ -373,7 +388,7 @@ describe('formatErrorReport', () => {
   const good: ErrorReportEntry = {
     time: Date.UTC(2026, 10, 26, 12, 0, 0),
     version: '0.11.10',
-    platform: 'macos',
+    platform: 'tauri',
     category: 'render',
     count: 3,
     name: 'TypeError',
@@ -383,11 +398,11 @@ describe('formatErrorReport', () => {
   }
 
   it('renders only the allowed fields', () => {
-    expect(formatErrorReport(good)).toBe([
+    expect(fr(good)).toBe([
       'Chroxy dashboard error report',
       'Time: 2026-11-26T12:00:00.000Z',
       'Version: 0.11.10',
-      'Platform: macos',
+      'Platform: tauri',
       'Category: render',
       'Count: 3',
       'Error: TypeError',
@@ -404,8 +419,8 @@ describe('formatErrorReport', () => {
 
   it('re-validation is stable: a report of its own stored fields is the same', () => {
     const r = classifyErrorMessage(good.name, good.message)
-    const stored = { ...good, name: r.name, message: r.text, stack: normalizeStack((good.stack as string[]).join('\n')), componentStack: normalizeComponentStack((good.componentStack as string[]).join('\n')) }
-    expect(formatErrorReport(stored)).toBe(formatErrorReport(good))
+    const stored = { ...good, name: r.name, message: r.text, stack: ns((good.stack as string[]).join('\n')), componentStack: normalizeComponentStack((good.componentStack as string[]).join('\n')) }
+    expect(fr(stored)).toBe(fr(good))
   })
 
   it('a poisoned stored entry reaches the clipboard without any secret', () => {
@@ -418,7 +433,7 @@ describe('formatErrorReport', () => {
       stack: [`TypeError: ${secret}`, `at fn (file:///Users/alice/private.js:1:2)`, `at ${secret}`],
       componentStack: `at ${secret}\nat Foo (/Users/alice/x.js:1:2)`,
     } as unknown as ErrorReportEntry
-    const out = formatErrorReport(poisoned)
+    const out = fr(poisoned)
     for (const n of ['sk-ant', 'SECRET', 'alice', 'private', 'ABCDEFGH', 'file:']) expect(out.includes(n), n).toBe(false)
     expect(out).toContain('Message: [message omitted]')
     expect(out).toContain('Error: Error')
@@ -429,14 +444,139 @@ describe('formatErrorReport', () => {
   })
 
   it('a stored header line in the stack is not kept', () => {
-    const out = formatErrorReport({ ...good, stack: "TypeError: PRIVATE header\nat fn (http://localhost/a.js:1:2)" })
+    const out = fr({ ...good, stack: "TypeError: PRIVATE header\nat fn (http://localhost/a.js:1:2)" })
     expect(out.includes('PRIVATE')).toBe(false)
     expect(out).toContain('  fn @ a.js:1:2')
   })
 
   it('never throws on non-object entries', () => {
     for (const v of [null, undefined, 5, 'x', []]) {
-      expect(() => formatErrorReport(v as unknown as ErrorReportEntry)).not.toThrow()
+      expect(() => fr(v as unknown as ErrorReportEntry)).not.toThrow()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #9235 PR 2 review fold-in (Codex BLOCK): red-before-fix cases
+// ---------------------------------------------------------------------------
+
+describe('R1: locations need the caller\'s asset set', () => {
+  const TOKEN = `ghp_${'A'.repeat(36)}`
+  it('no set, or an empty set, fails closed: every location is <unknown>', () => {
+    const stack = 'at fn (http://localhost:8765/dashboard/assets/index-abc123.js?v=1:12:34)\nfn@http://localhost/a.js:1:2'
+    expect(normalizeStack(stack)).toEqual(['fn @ <unknown>', 'fn @ <unknown>'])
+    expect(normalizeStack(stack, { assetBasenames: new Set() })).toEqual(['fn @ <unknown>', 'fn @ <unknown>'])
+    expect(ns(stack)).toEqual(['fn @ index-abc123.js:12:34', 'fn @ a.js:1:2'])
+  })
+
+  it('a token or a private name as a script basename from any host is dropped (raw URL branch)', () => {
+    expect(ns(`at fn (https://anyhost/${TOKEN}.js:1:2)`)).toEqual(['fn @ <unknown>'])
+    expect(ns('at fn (https://anyhost/patient-HIV-positive.js:1:2)')).toEqual(['fn @ <unknown>'])
+  })
+
+  it('the same names are dropped on the stored `name @ loc` branch', () => {
+    expect(ns(`fn @ ${TOKEN}.js:1:2`)).toEqual(['fn @ <unknown>'])
+    expect(ns('fn @ patient-HIV-positive.js:1:2')).toEqual(['fn @ <unknown>'])
+    expect(ns('fn @ index-abc123.js:1:2')).toEqual(['fn @ index-abc123.js:1:2'])
+  })
+
+  it('a member of the set is still dropped if redaction or a credential marker flags it', () => {
+    for (const base of [`${TOKEN}.js`, 'npm_config.js', `${'aB3'.repeat(10)}.js`]) {
+      const set = new Set([base])
+      expect(normalizeStack(`at fn (https://h/${base}:1:2)`, { assetBasenames: set }), base).toEqual(['fn @ <unknown>'])
+      expect(normalizeStack(`fn @ ${base}:1:2`, { assetBasenames: set }), base).toEqual(['fn @ <unknown>'])
+    }
+  })
+
+  it('still requires http(s) for a raw URL even when the basename is a member', () => {
+    expect(ns('at fn (file:///x/a.js:1:2)')).toEqual(['fn @ <unknown>'])
+    expect(ns('at fn (data:,/a.js:1:2)')).toEqual(['fn @ <unknown>'])
+  })
+
+  it('formatErrorReport applies the same set (and fails closed without it)', () => {
+    const entry = { time: 0, version: '1.2.3', platform: 'web', category: 'render', count: 1, name: 'Error', message: 'x', stack: ['fn @ a.js:1:2'], componentStack: [] } as ErrorReportEntry
+    expect(formatErrorReport(entry)).toContain('  fn @ <unknown>')
+    expect(formatErrorReport(entry, { assetBasenames: ASSETS })).toContain('  fn @ a.js:1:2')
+    expect(formatErrorReport({ ...entry, stack: [`fn @ ghp_${'A'.repeat(36)}.js:1:2`] }, { assetBasenames: ASSETS })).not.toContain('ghp_')
+  })
+})
+
+describe('R2: closed header fields', () => {
+  const entry = (over: Record<string, unknown>) => ({
+    time: 0, version: '1.2.3', platform: 'web', category: 'render', count: 1, name: 'Error', message: 'x', stack: [], componentStack: [], ...over,
+  }) as ErrorReportEntry
+
+  it('a poisoned version/platform/category never reaches the report', () => {
+    const out = fr(entry({ version: 'private-session-prompt', platform: 'private-session-prompt', category: 'private-session-prompt' }))
+    expect(out.includes('private')).toBe(false)
+    expect(out).toContain('Version: unknown')
+    expect(out).toContain('Platform: unknown')
+    expect(out).toContain('Category: unknown')
+  })
+
+  it.each(['tauri', 'web'])('platform %s is kept', (p) => expect(fr(entry({ platform: p }))).toContain(`Platform: ${p}`))
+  it.each(['render', 'window-error', 'unhandled-rejection'])('category %s is kept', (c) => expect(fr(entry({ category: c }))).toContain(`Category: ${c}`))
+  it.each(['macos', 'Tauri', 'web ', 'render2', 'error'])('anything outside the enums (%s) is unknown', (v) => {
+    expect(fr(entry({ platform: v }))).toContain('Platform: unknown')
+    expect(fr(entry({ category: v }))).toContain('Category: unknown')
+  })
+
+  it.each(['0.11.10', '1.2.3', '9999.9999.9999'])('release semver %s is kept', (v) => expect(fr(entry({ version: v }))).toContain(`Version: ${v}`))
+  it.each(['1.2.3-beta', '1.2.3+build', '1.2', '12345.1.1', 'v1.2.3', '1.2.3 ', '1.2.3\nX'])('non-release version %j is unknown', (v) => {
+    expect(fr(entry({ version: v }))).toContain('Version: unknown')
+  })
+
+  it.each(['2026-99-99T99:99:99Z', '2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-01-01T24:00:00Z', 'not a date', '2026-01-01T00:00:00.5Z'])(
+    'calendar-invalid or loose time %s is unknown', (t) => { expect(fr(entry({ time: t }))).toContain('Time: unknown') })
+  it('a valid ISO time round-trips', () => {
+    expect(fr(entry({ time: '2026-02-28T10:11:12Z' }))).toContain('Time: 2026-02-28T10:11:12.000Z')
+    expect(fr(entry({ time: '2026-02-28T10:11:12.345Z' }))).toContain('Time: 2026-02-28T10:11:12.345Z')
+  })
+})
+
+describe('R3: credential markers inside identifiers', () => {
+  const T36 = 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
+  const PREFIXED = [
+    `ghp_${T36}_suffix`, `x_ghp_${T36}`, `gho_${T36}`, `ghu_${T36}`, `ghs_${T36}`, `ghr_${T36}`, 'github_pat_11ABCDEFG0abcdefghij_xyz',
+    'AIzaSyAbcdefghij', 'AKIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE', 'sk_live_abc', 'sk_test_abc', 'rk_live_abc', 'pk_live_abc',
+    'oauth_token_value', 'npm_abc',
+  ]
+  it.each(PREFIXED)('a slot containing %s is [REDACTED]', (id) => {
+    const r = classifyErrorMessage('TypeError', `Cannot read properties of undefined (reading '${id}')`)
+    expect(r.text).toBe("Cannot read properties of undefined (reading '[REDACTED]')")
+    expect(classifyErrorMessage('TypeError', `${id} is not a function`).text).toBe('[REDACTED] is not a function')
+    expect(ns(`at ${id} (http://localhost/a.js:1:2)`)).toEqual(['[REDACTED] @ a.js:1:2'])
+    expect(normalizeComponentStack(`at ${id}`)).toEqual(['[REDACTED]'])
+  })
+  it('ya29. inside a dotted path is masked', () => {
+    expect(classifyErrorMessage('TypeError', 'a.ya29.b is not a function').text).toBe('[REDACTED] is not a function')
+  })
+
+  it('an opaque token (>= 24 chars, class changes at least every 3 chars) is masked', () => {
+    for (const tok of [T36, 'f3a9c1d27b8e4056a1b2c3d4e5f60718', 'Zx9Qw3Er7Ty1Ui5Op2As6Df0Gh4Jk8', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4']) {
+      expect(classifyErrorMessage('TypeError', `${tok} is not a function`).text, tok).toBe('[REDACTED] is not a function')
+    }
+  })
+  it('normal long names are kept: camelCase, snake, lowercase, uppercase', () => {
+    for (const id of ['handleSessionListUpdateResponse', 'handleSessionListUpdateResponseV2Handler', 'a_very_long_snake_case_identifier_name', 'ALL_UPPERCASE_CONSTANT_NAME_HERE', 'abcdefghijklmnopqrstuvwxyzabcdefghij', 'useChatViewScrollRestoration']) {
+      expect(classifyErrorMessage('TypeError', `${id} is not a function`).text, id).toBe(`${id} is not a function`)
+    }
+  })
+  it('a 23-char run is below the opaque threshold', () => {
+    const id = 'a1B2c3D4e5F6g7H8i9J0k1L'
+    expect(id).toHaveLength(23)
+    expect(classifyErrorMessage('TypeError', `${id} is not a function`).text).toBe(`${id} is not a function`)
+  })
+})
+
+describe('R4: the [REDACTED] sentinel survives re-validation', () => {
+  it('normalizeComponentStack accepts its own sentinel and is idempotent', () => {
+    const once = normalizeComponentStack(`at ghp_${'A'.repeat(36)}\nat Foo`)
+    expect(once).toEqual(['[REDACTED]', 'Foo'])
+    expect(normalizeComponentStack(once.join('\n'))).toEqual(once)
+  })
+  it('formatErrorReport keeps the sentinel entry', () => {
+    const out = fr({ time: 0, version: '1.2.3', platform: 'web', category: 'render', count: 1, name: 'Error', message: 'x', stack: [], componentStack: ['[REDACTED]', 'Foo'] })
+    expect(out).toContain('  [REDACTED]\n  Foo')
   })
 })
