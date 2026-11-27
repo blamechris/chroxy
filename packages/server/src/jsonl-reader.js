@@ -211,6 +211,44 @@ export function getJsonlMtime(filePath) {
 }
 
 /**
+ * Harness-written `user` string entries that no person typed (#8951): background
+ * task results, CI monitor events, injected reminders, local-command wrappers and
+ * their output. Mirrors the runner's MACHINE_PROSE
+ * (docs/reports/harness-evals/runner/trialkit/extract.py). The scanner and search
+ * modules take any string as a preview and are deliberately left as they are.
+ */
+const MACHINE_PROSE_PREFIXES = [
+  '<task-notification>',
+  '<ci-monitor-event',
+  '<system-reminder>',
+  '<command-name>',
+  '<command-message>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+  '<local-command-caveat>',
+  // Bash mode (`!cmd`): the command and its output are recorded as wrapped strings.
+  '<bash-input>',
+  '<bash-stdout>',
+  '<bash-stderr>',
+  '<command-args>',
+]
+
+/**
+ * True when a string-content `user` entry is a prompt a person typed.
+ * `isMeta`, `isCompactSummary` and `isSidechain` entries are excluded by flag
+ * (a sidechain's string "prompt" is a subagent's Task prompt, written into the same
+ * file by older Claude Code versions, not something the person typed; the runner's
+ * extractor skips them too); the rest by the wrapper the harness puts at the start.
+ */
+export function isTypedPromptString(entry, content) {
+  if (typeof content !== 'string') return false
+  if (entry.isMeta === true || entry.isCompactSummary === true || entry.isSidechain === true) return false
+  const text = content.trim()
+  if (!text) return false
+  return !MACHINE_PROSE_PREFIXES.some((p) => text.startsWith(p))
+}
+
+/**
  * Parse raw JSONL text into Chroxy message format.
  * Shared parse core for the reader.
  *
@@ -268,16 +306,24 @@ function parseJsonlContent(raw, { byteTruncated = false, strict = false } = {}) 
     if (entry.type === 'user') {
       // Extract text from user message content blocks
       const content = entry.message?.content
-      if (!Array.isArray(content)) continue
+      let textParts
+      if (typeof content === 'string') {
+        // claude-tui writes the prompt as a plain string (#8951). The harness
+        // writes string entries nobody typed too; those stay hidden.
+        if (!isTypedPromptString(entry, content)) continue
+        textParts = content
+      } else if (Array.isArray(content)) {
+        // Skip tool_result entries (they're part of tool flow, not user text)
+        const hasToolResult = content.some(b => b.type === 'tool_result')
+        if (hasToolResult) continue
 
-      // Skip tool_result entries (they're part of tool flow, not user text)
-      const hasToolResult = content.some(b => b.type === 'tool_result')
-      if (hasToolResult) continue
-
-      const textParts = content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('\n')
+        textParts = content
+          .filter(b => b.type === 'text')
+          .map(b => b.text)
+          .join('\n')
+      } else {
+        continue
+      }
 
       if (textParts) {
         messages.push({
