@@ -4,14 +4,15 @@ import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // #9235: packages/server/src/redaction.js is the one authored source; the protocol copy
 // is generated from it. This is the drift gate. It runs in the Protocol Tests job, which
 // has no path filter (CI runs every job on every pull_request and push), so a change to
 // EITHER file reaches it. packages/protocol/dist is covered by check-dist-drift.sh.
-const SCRIPT = new URL('../scripts/sync-redaction.mjs', import.meta.url).pathname
-const SERVER = new URL('../../server/src/redaction.js', import.meta.url).pathname
-const COPY = new URL('../src/redaction.js', import.meta.url).pathname
+const SCRIPT = fileURLToPath(new URL('../scripts/sync-redaction.mjs', import.meta.url))
+const SERVER = fileURLToPath(new URL('../../server/src/redaction.js', import.meta.url))
+const COPY = fileURLToPath(new URL('../src/redaction.js', import.meta.url))
 const FIX = 'Edit packages/server/src/redaction.js only, then run: npm run sync-redaction -w @chroxy/protocol && npm run build -w @chroxy/protocol'
 
 const run = (...a) => spawnSync(process.execPath, [SCRIPT, ...a], { encoding: 'utf8' })
