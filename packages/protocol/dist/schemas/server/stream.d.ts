@@ -231,10 +231,10 @@ export declare const ServerResultSchema: z.ZodObject<{
         }>>;
     }, z.core.$strip>>>;
     turnOutcome: z.ZodOptional<z.ZodEnum<{
+        stopped: "stopped";
         completed: "completed";
         truncated: "truncated";
         refused: "refused";
-        stopped: "stopped";
         interrupted: "interrupted";
         stopped_before_output: "stopped_before_output";
     }>>;
@@ -473,8 +473,8 @@ export declare const ServerPermissionResolvedSchema: z.ZodObject<{
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
 export declare const PermissionOutcomeSchema: z.ZodEnum<{
-    expired: "expired";
     stopped: "stopped";
+    expired: "expired";
     allowed: "allowed";
     denied: "denied";
 }>;
@@ -484,8 +484,8 @@ export declare const ServerPermissionOutcomeSchema: z.ZodObject<{
     tool: z.ZodString;
     description: z.ZodString;
     outcome: z.ZodEnum<{
-        expired: "expired";
         stopped: "stopped";
+        expired: "expired";
         allowed: "allowed";
         denied: "denied";
     }>;

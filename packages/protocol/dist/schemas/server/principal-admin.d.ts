@@ -23,9 +23,9 @@ export declare const ServerPrincipalAdminEntrySchema: z.ZodObject<{
     expiresAt: z.ZodNumber;
     revokedAt: z.ZodNullable<z.ZodNumber>;
     state: z.ZodEnum<{
+        expired: "expired";
         disabled: "disabled";
         revoked: "revoked";
-        expired: "expired";
         invalid: "invalid";
         live: "live";
     }>;
@@ -63,9 +63,9 @@ export declare const ServerPrincipalAdminResultSchema: z.ZodObject<{
         expiresAt: z.ZodNumber;
         revokedAt: z.ZodNullable<z.ZodNumber>;
         state: z.ZodEnum<{
+            expired: "expired";
             disabled: "disabled";
             revoked: "revoked";
-            expired: "expired";
             invalid: "invalid";
             live: "live";
         }>;

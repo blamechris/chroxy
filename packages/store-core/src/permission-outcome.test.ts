@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createDispatchTable, runDispatch, type ClientStoreAdapter } from './dispatch-table'
 import type { ChatMessage } from './types'
+import { PERMISSION_NO_DECISION_REASON_OUTCOMES } from '@chroxy/protocol'
 import { getExpiredPermissionTurnSummaries } from './permission-turn-summary'
 import {
   resetReplayReconcile,
@@ -644,5 +645,55 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     expect(records).toHaveLength(1)
     expect(records[0]).toMatchObject({ requestId: 'perm-1', permissionOutcome: 'stopped' })
     expect(records[0]!.answered).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8952 -- live vs replay parity for EVERY no-decision reason the journal maps
+// ---------------------------------------------------------------------------
+
+describe('a no-decision permission_resolved reads the same live as after a replay (#8952)', () => {
+  const resolvedFor = (reason: string) =>
+    handlePermissionResolved({ type: 'permission_resolved', requestId: 'perm-1', decision: 'deny', reason })!
+
+  it('the shared table is not empty (the loop below is not vacuous)', () => {
+    expect(Object.keys(PERMISSION_NO_DECISION_REASON_OUTCOMES).length).toBeGreaterThanOrEqual(4)
+  })
+
+  for (const [reason, journalled] of Object.entries(PERMISSION_NO_DECISION_REASON_OUTCOMES)) {
+    it(`reason "${reason}": the live card is the "${journalled}" record the replay builds`, () => {
+      const live = applyPermissionResolved(livePending({ expiresAt: NOW + 1000 }), resolvedFor(reason), NOW)
+      const replayed = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({ outcome: journalled }))!)
+
+      expect(live.permissionOutcome).toBe(journalled)
+      expect(live.permissionOutcome).toBe(replayed.permissionOutcome)
+      expect(live.answered).toBeUndefined()
+      expect(live.answered).toBe(replayed.answered)
+      expect(live.options).toBeUndefined()
+      expect(isLivePermissionPrompt(live, NOW + 1)).toBe(false)
+      expect(isExpiredUnansweredPermissionPrompt(live, NOW + 1)).toBe(
+        isExpiredUnansweredPermissionPrompt(replayed, NOW + 1),
+      )
+      const liveSummary = getExpiredPermissionTurnSummaries([live], NOW + 1, true, 'marker')
+      const replaySummary = getExpiredPermissionTurnSummaries([replayed], NOW + 1, true, 'marker')
+      expect(liveSummary.map((s) => s.requestIds)).toEqual(replaySummary.map((s) => s.requestIds))
+      expect(liveSummary.length).toBe(journalled === 'expired' ? 1 : 0)
+    })
+
+    it(`reason "${reason}": the replayed outcome collapses onto the live card with no duplicate`, () => {
+      const live = applyPermissionResolved(livePending({ expiresAt: NOW + 1000 }), resolvedFor(reason), NOW)
+      const env = makeEnv([live])
+      dispatch(env, outcome({ outcome: journalled }))
+      expect(env.sessions.s1!.messages).toHaveLength(1)
+      expect(env.sessions.s1!.messages[0]).toBe(live)
+    })
+  }
+
+  it('CONTROL: a reason outside the table keeps the deny a user made', () => {
+    for (const reason of ['user', 'auto_mode_mcp_trust_bypass']) {
+      const next = applyPermissionResolved(livePending(), resolvedFor(reason), NOW)
+      expect(next.answered).toBe('deny')
+      expect(next.permissionOutcome).toBeUndefined()
+    }
   })
 })
