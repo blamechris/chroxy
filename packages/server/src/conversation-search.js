@@ -2,7 +2,7 @@ import { readdir, stat, realpath } from 'fs/promises'
 import { readContainedBytes } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
-import { decodeProjectPath } from './jsonl-reader.js'
+import { decodeProjectPath, isTypedPromptString, promptPreview } from './jsonl-reader.js'
 import { runWithConcurrency } from './utils/concurrency.js'
 
 const MIN_FILE_SIZE = 100
@@ -26,7 +26,8 @@ export function extractSearchableText(entry) {
   if (entry.message?.content) {
     const content = entry.message.content
     if (typeof content === 'string') {
-      parts.push(content)
+      // A user string no person typed (wrapper, meta, sidechain) is not searchable (#9363)
+      if (entry.type !== 'user' || isTypedPromptString(entry, content)) parts.push(content)
     } else if (Array.isArray(content)) {
       for (const block of content) {
         if (block.type === 'text' && block.text) {
@@ -79,21 +80,7 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
     }
 
     // Extract preview from first user message
-    if (!preview && entry.type === 'user') {
-      const content = entry.message?.content
-      if (typeof content === 'string') {
-        preview = content.slice(0, 200)
-      } else if (Array.isArray(content)) {
-        const hasToolResult = content.some((b) => b.type === 'tool_result')
-        if (!hasToolResult) {
-          const textParts = content
-            .filter((b) => b.type === 'text')
-            .map((b) => b.text)
-            .join('\n')
-          if (textParts) preview = textParts.slice(0, 200)
-        }
-      }
-    }
+    if (!preview) preview = promptPreview(entry)
 
     const searchable = extractSearchableText(entry)
     if (!searchable) continue

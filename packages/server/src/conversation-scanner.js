@@ -2,7 +2,7 @@ import { readdir, stat, realpath } from 'fs/promises'
 import { readContainedBytes } from './utils/regular-file.js'
 import { join, basename } from 'path'
 import { claudeProjectsDir } from './utils/claude-config-dir.js'
-import { decodeProjectPath } from './jsonl-reader.js'
+import { decodeProjectPath, promptPreview } from './jsonl-reader.js'
 import { runWithConcurrency } from './utils/concurrency.js'
 
 const PREVIEW_BYTES = 32 * 1024 // read first 32KB for preview extraction
@@ -68,26 +68,7 @@ async function extractMetadata(filePath, root) {
       }
 
       // Extract preview from first real user message
-      if (!preview && entry.type === 'user') {
-        const content = entry.message?.content
-
-        // Handle string content (older format)
-        if (typeof content === 'string') {
-          preview = content.slice(0, 200)
-        } else if (Array.isArray(content)) {
-          const hasToolResult = content.some((b) => b.type === 'tool_result')
-          if (!hasToolResult) {
-            const textParts = content
-              .filter((b) => b.type === 'text')
-              .map((b) => b.text)
-              .join('\n')
-
-            if (textParts) {
-              preview = textParts.slice(0, 200)
-            }
-          }
-        }
-      }
+      if (!preview) preview = promptPreview(entry)
 
       if (preview && cwd) break
     }

@@ -15,6 +15,7 @@ import {
   readConversationHistoryWithMetaAsync,
   MAX_TRANSCRIPT_BYTES,
   MAX_MESSAGES,
+  promptPreview,
 } from '../src/jsonl-reader.js'
 import { transcriptPathForSessionFile } from '../src/transcript-tasks.js'
 
@@ -901,5 +902,31 @@ describe('#7484 — the meta reader reports the slice\'s own truncation', () => 
     }
   })
 
+  describe('promptPreview (#9363)', () => {
+    const user = (content, extra = {}) => ({ type: 'user', message: { content }, ...extra })
 
+    it('returns a typed string prompt cut to 200 characters', () => {
+      assert.equal(promptPreview(user('x'.repeat(250))), 'x'.repeat(200))
+    })
+
+    it('returns null for wrapper, flagged and empty strings', () => {
+      assert.equal(promptPreview(user('<system-reminder>x</system-reminder>')), null)
+      assert.equal(promptPreview(user('hi', { isMeta: true })), null)
+      assert.equal(promptPreview(user('')), null)
+    })
+
+    it('joins array text blocks with a newline and skips non-text blocks', () => {
+      assert.equal(promptPreview(user([{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }])), 'a\nb')
+    })
+
+    it('returns null for an array carrying a tool_result', () => {
+      assert.equal(promptPreview(user([{ type: 'tool_result' }, { type: 'text', text: 'a' }])), null)
+    })
+
+    it('returns null for non-user entries and missing content', () => {
+      assert.equal(promptPreview({ type: 'assistant', message: { content: 'hi' } }), null)
+      assert.equal(promptPreview({ type: 'user' }), null)
+      assert.equal(promptPreview(null), null)
+    })
+  })
 })
