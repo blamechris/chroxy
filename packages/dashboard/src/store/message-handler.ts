@@ -47,6 +47,7 @@ import {
   // #8518 — the ordering hint: a late thinking block goes above the tool row /
   // answer it was thought before, not at the end.
   placeThinkingBubble,
+  placeResponsePieces,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -6313,10 +6314,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         }
         // #8518: a replayed reasoning bubble that was recorded as belonging above a
         // tool row / the answer is rebuilt there, as the live one was.
+        // #9024: a replayed reply that records where tool calls interrupted its text is
+        // cut around those tool cards, as the live client laid it out.
         updateSession(targetId, (ss) => ({
           messages: result.thinkingPrecedes
             ? placeThinkingBubble(ss.messages, newMsg, result.thinkingPrecedes)
-            : [...ss.messages, newMsg],
+            : result.responseSplits
+              ? placeResponsePieces(ss.messages, newMsg, result.responseSplits)
+              : [...ss.messages, newMsg],
         }));
       } else if (result.thinkingPrecedes) {
         // #8532 N3: the flat fallback places a hinted reasoning bubble the same way

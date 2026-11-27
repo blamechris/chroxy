@@ -54,6 +54,7 @@ import {
   // #8518 — the ordering hint: a late thinking block goes above the tool row /
   // answer it was thought before, not at the end.
   placeThinkingBubble,
+  placeResponsePieces,
   // #7326 — the chip for a truncated / refused / stopped turn (turn-outcome-marker.ts).
   appendTurnOutcomeMarker,
   handleAuthOk as sharedAuthOk,
@@ -3074,10 +3075,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         }
         // #8518: a replayed reasoning bubble that was recorded as belonging above a
         // tool row / the answer is rebuilt there, as the live one was.
+        // #9024: a replayed reply that records where tool calls interrupted its text is
+        // cut around those tool cards, as the live client laid it out.
         updateSession(effectiveId, (ss) => ({
           messages: result.thinkingPrecedes
             ? placeThinkingBubble(ss.messages, newMsg, result.thinkingPrecedes)
-            : [...ss.messages, newMsg],
+            : result.responseSplits
+              ? placeResponsePieces(ss.messages, newMsg, result.responseSplits)
+              : [...ss.messages, newMsg],
         }));
       }
       // #7603 — the container-health state rides in on this same `error`

@@ -42,7 +42,11 @@ export function isReplayDuplicate(
     return cached.some(
       (m) =>
         (m.id === messageId && m.type === 'response') ||
-        m.id === `${messageId}-response`,
+        m.id === `${messageId}-response` ||
+        // #9024: a reply replayed around its tool cards holds its text above them as
+        // `<id>-seg-<n>`; with nothing left to put in the bubble itself (the text ended
+        // at a tool) those are all the client holds of it.
+        (m.type === 'response' && m.id.startsWith(`${messageId}-seg-`) && isResponseStreamBubbleId(m.id, messageId)),
     )
   }
 
@@ -85,7 +89,8 @@ export function isReplayDuplicate(
  *   - `<id>`            the first text block;
  *   - `<id>-response`   the same slot when a tool_use bubble took the raw id;
  *   - `<id>-cont-<ts>`  text after a tool (the post-tool continuation split);
- *   - `<id>-post-<ts>`  text after a permission prompt.
+ *   - `<id>-post-<ts>`  text after a permission prompt;
+ *   - `<id>-seg-<n>`    text above a tool card in a replayed reply (#9024).
  *
  * A split is made from the id of the slot it continues, so the suffixes chain
  * (`<id>-cont-1-cont-2`). The match is on the whole family, never a bare prefix:
@@ -93,7 +98,16 @@ export function isReplayDuplicate(
  */
 export function isResponseStreamBubbleId(id: string, streamId: string): boolean {
   if (!id.startsWith(streamId)) return false
-  return /^(?:-(?:response|cont-\d+|post-\d+))*$/.test(id.slice(streamId.length))
+  return /^(?:-(?:response|cont-\d+|post-\d+|seg-\d+))*$/.test(id.slice(streamId.length))
+}
+
+/**
+ * #9024: the stream a bubble belongs to. A replayed reply is cut into `<id>-seg-<n>`
+ * pieces above its tool cards and the bubble `<id>` below: this is the id with that
+ * suffix removed (itself for anything else).
+ */
+export function responseStreamRoot(id: string): string {
+  return id.replace(/-seg-\d+$/, '')
 }
 
 /** How a held response stream is completed (see {@link completeHeldResponseStream}). */

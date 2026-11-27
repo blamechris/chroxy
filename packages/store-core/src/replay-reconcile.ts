@@ -75,7 +75,7 @@
 
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 import { clearPendingCreateFailures } from './handlers/session-lifecycle'
-import { isResponseStreamBubbleId } from './replay-dedup'
+import { isResponseStreamBubbleId, responseStreamRoot } from './replay-dedup'
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
@@ -1404,22 +1404,41 @@ function freshenInFlightReplies(
     if (id !== null && type === 'response' && typeof content === 'string') prefixResponses.push({ id, content })
   }
   if (prefixResponses.length === 0) return kept as unknown[]
-  return kept.map((m) => {
+  // #9024: a reply replayed around its tool cards is several rows (`m1-seg-0`, ..., `m1`).
+  // The stream's text is those rows joined, so the live copy is compared with THAT, and
+  // what it adds goes on the LAST row (the tail the stream is still writing), never on
+  // an earlier piece, where it would show above the tool.
+  const keptStreams = new Map<string, { last: number; content: string }>()
+  kept.forEach((m, i) => {
+    const keptId = idOf(m)
+    const row = m as { type?: unknown; content?: unknown }
+    if (keptId === null || row.type !== 'response' || typeof row.content !== 'string') return
+    const root = responseStreamRoot(keptId)
+    const stream = keptStreams.get(root) ?? { last: i, content: '' }
+    stream.last = i
+    stream.content += row.content
+    keptStreams.set(root, stream)
+  })
+  return kept.map((m, i) => {
     const keptId = idOf(m)
     const row = m as { type?: unknown; content?: unknown }
     if (keptId === null || row.type !== 'response' || typeof row.content !== 'string') return m
+    const root = responseStreamRoot(keptId)
+    const stream = keptStreams.get(root)
+    if (!stream || stream.last !== i) return m
     // The client's layout of this stream: the bubble itself and every bubble split
     // off it, in transcript order, joined back into the stream's text.
-    const family = prefixResponses.filter((r) => isResponseStreamBubbleId(r.id, keptId))
+    const family = prefixResponses.filter((r) => isResponseStreamBubbleId(r.id, root))
     // Only a stream this client still has LIVE: a finished one is the recorded
     // entry's to say.
-    const isLive = inFlightResponseIds.has(keptId)
+    const isLive = inFlightResponseIds.has(root)
+      || inFlightResponseIds.has(keptId)
       || (typeof streamingId === 'string' && family.some((r) => r.id === streamingId))
     if (!isLive) return m
     const liveContent = family.map((r) => r.content).join('')
     // Append-only: the live copy is fresher only if it EXTENDS the replayed one.
-    return liveContent.length > row.content.length && liveContent.startsWith(row.content)
-      ? { ...row, content: liveContent }
+    return liveContent.length > stream.content.length && liveContent.startsWith(stream.content)
+      ? { ...row, content: row.content + liveContent.slice(stream.content.length) }
       : m
   })
 }
@@ -1474,7 +1493,8 @@ export interface ReplayEndLiveState {
  */
 function isSplitOffKeptResponse(id: string, keptResponseIds: ReadonlySet<string>): boolean {
   for (const keptId of keptResponseIds) {
-    if (id !== keptId && isResponseStreamBubbleId(id, keptId)) return true
+    // The root: a kept `m1-seg-0` (#9024) holds the stream's text just as `m1` does.
+    if (id !== keptId && isResponseStreamBubbleId(id, responseStreamRoot(keptId))) return true
   }
   return false
 }

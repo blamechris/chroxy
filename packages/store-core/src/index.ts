@@ -277,10 +277,15 @@ export type {
   HeldResponseCompletion,
 } from './replay-dedup'
 
+export { parseResponseSplits, placeResponsePieces } from './response-splits'
+export type { ResponseSplit } from './response-splits'
+export { postToolSplit } from './sentence-boundary'
+
 export {
   isReplayDuplicate,
   isResponseStreamBubbleId,
   completeHeldResponseStream,
+  responseStreamRoot,
 } from './replay-dedup'
 
 export type {

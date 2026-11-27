@@ -72,8 +72,8 @@ export const REPLAY_PARITY_SESSION_ID = 's1'
  * one `response` entry under it, and a live client splits it into `m1`,
  * `m1-cont-<ts>`, ... bubbles). Hand-authored, in the wire shape the generated
  * scenarios use (compare `text-around-a-tool`), and only for the cursor-replay
- * tests: a full-rebuild replay of such a turn differs from the live one by design
- * until #8438, so these are not run through the live-vs-replay comparison.
+ * tests. The entry says where each tool fell in the text (`splits`, #9024), so a
+ * full-rebuild replay lays the turn out as the live client did.
  */
 export interface CursorReplayScenario {
   name: string
@@ -95,8 +95,8 @@ const replayTool = (id: string, tool: string, input: Record<string, unknown>, re
   { type: 'tool_start', messageId: id, toolUseId: id, tool, input, timestamp: TS, sessionId: SID, historySeq: seq },
   { type: 'tool_result', toolUseId: id, result, truncated: false, timestamp: TS, sessionId: SID, historySeq: seq + 1 },
 ]
-const replayReply = (content: string, seq: number): ReplayParityFrame => ({
-  type: 'message', messageType: 'response', content, messageId: 'm1', timestamp: TS, sessionId: SID, historySeq: seq,
+const replayReply = (content: string, seq: number, splits?: Array<{ at: number; toolUseId: string }>): ReplayParityFrame => ({
+  type: 'message', messageType: 'response', content, messageId: 'm1', ...(splits ? { splits } : null), timestamp: TS, sessionId: SID, historySeq: seq,
 })
 const turnEnd = (seq: number): ReplayParityFrame[] => [
   { type: 'result', cost: 0.01, duration: 1000, usage: { input_tokens: 1, output_tokens: 1 }, timestamp: TS, sessionId: SID, historySeq: seq },
@@ -135,7 +135,10 @@ export const CURSOR_REPLAY_SCENARIOS: CursorReplayScenario[] = [
     replay: [
       ...replayTool('tu1', 'Read', { file_path: '/repo/a.js' }, 'export const x = 1', 1),
       ...replayTool('tu2', 'Bash', { command: 'npm test' }, '3 passing', 3),
-      replayReply('Reading the file. Then running tests. All green.', 5),
+      replayReply('Reading the file. Then running tests. All green.', 5, [
+        { at: 'Reading the file. '.length, toolUseId: 'tu1' },
+        { at: 'Reading the file. Then running tests. '.length, toolUseId: 'tu2' },
+      ]),
       ...turnEnd(6),
     ],
   },
@@ -198,8 +201,19 @@ function stableId(id: unknown): unknown {
  * is a different transcript.
  */
 export function replayParityModel(messages: readonly ChatMessage[]): ReplayParityRow[] {
+  const seenReply = new Set<string>()
   return messages.map((m) => {
-    const row: ReplayParityRow = { id: stableId(m.id) }
+    let id = stableId(m.id)
+    if (m.type === 'response' && typeof id === 'string') {
+      // #9024: a reply laid out around its tool cards is several bubbles. Live names
+      // them `m1`, `m1-cont-<ts>`, ...; a replay builds the pieces above the cards as
+      // `m1-seg-<n>` and keeps `m1` for the last, below them. The ids are bookkeeping,
+      // the layout is not, so the Nth bubble of a stream is named by its position in it.
+      const root = id.replace(/(?:-cont-#|-seg-\d+)+$/, '')
+      id = seenReply.has(root) ? `${root}-cont-#` : root
+      seenReply.add(root)
+    }
+    const row: ReplayParityRow = { id }
     const source = m as unknown as Record<string, unknown>
     for (const field of MODEL_FIELDS) {
       if (source[field] !== undefined) row[field] = source[field]
@@ -223,19 +237,6 @@ export interface ReplayParityDivergence {
   reason: string
   live: ReplayParityRow[]
   replay: ReplayParityRow[]
-}
-
-/** The tool card the `text-around-a-tool` scenario builds, identical on both sides. */
-const READ_TOOL_ROW: ReplayParityRow = {
-  id: 'tu1',
-  type: 'tool_use',
-  content: '{"file_path":"/repo/a.js"}',
-  tool: 'Read',
-  toolUseId: 'tu1',
-  toolInput: { file_path: '/repo/a.js' },
-  toolResult: 'export const x = 1',
-  toolResultTruncated: false,
-  toolResultIsError: false,
 }
 
 /** The prompt a live client holds for the permission scenarios, once it has been resolved. */
@@ -270,21 +271,6 @@ const PERMISSION_DESIGN_REASON =
   '(dashboard: replay-parity.test.ts renders both); the model is not.'
 
 export const REPLAY_PARITY_DIVERGENCES: Record<string, ReplayParityDivergence> = {
-  'text-around-a-tool': {
-    kind: 'open',
-    issue: 8438,
-    reason:
-      'Live splits a turn into a bubble before and a bubble after the tool; the history records ONE response entry per stream, pushed at stream_end, so a replay shows the tool first and all the text after it.',
-    live: [
-      { id: 'm1', type: 'response', content: 'Let me read the file. ' },
-      READ_TOOL_ROW,
-      { id: 'm1-cont-#', type: 'response', content: 'It exports one constant.' },
-    ],
-    replay: [
-      READ_TOOL_ROW,
-      { id: 'm1', type: 'response', content: 'Let me read the file. It exports one constant.' },
-    ],
-  },
   'tool-result-image': {
     kind: 'open',
     issue: 8439,

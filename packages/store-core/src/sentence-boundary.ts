@@ -33,3 +33,26 @@ export function endsAtSentenceBoundary(text: string): boolean {
   const endsHardBreak = /\n\s*$/.test(text)
   return endsSentence || endsHardBreak
 }
+
+/**
+ * What a tool call between two stretches of a reply's text does to the bubble layout:
+ * the ONE rule for the live post-tool continuation split (#4889 / #4999 / #4975, in
+ * `sharedStreamDelta`) and for laying a replayed reply out the same way (#9024,
+ * `placeResponsePieces`), so a reload cannot disagree with what the live client drew.
+ *
+ * `prior` is the text of the bubble the call interrupted, `incoming` the text that
+ * follows the call (only its first character is read).
+ *
+ *   - `split: false` when `prior` stops mid-sentence (#4999): the tool interrupted a
+ *     sentence, the text after it is the same sentence continuing, and it joins the
+ *     bubble above the tool card.
+ *   - otherwise `split: true`, and `carry` is the trailing partial word that moves to
+ *     the new bubble when the call cut a word in two (#4975): the last character of
+ *     `prior` AND the first of `incoming` are both word characters.
+ */
+export function postToolSplit(prior: string, incoming: string): { split: boolean; carry: string } {
+  if (!endsAtSentenceBoundary(prior)) return { split: false, carry: '' }
+  const startsMidWord = /^[A-Za-z0-9_]/.test(incoming)
+  const tail = startsMidWord ? prior.match(/[A-Za-z0-9_]+$/) : null
+  return { split: true, carry: tail ? tail[0] : '' }
+}

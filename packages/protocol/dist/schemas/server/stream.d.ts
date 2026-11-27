@@ -123,6 +123,10 @@ export declare const ServerMessageSchema: z.ZodObject<{
         toolUseId: z.ZodOptional<z.ZodString>;
         messageId: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
+    splits: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        at: z.ZodNumber;
+        toolUseId: z.ZodString;
+    }, z.core.$strip>>>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
