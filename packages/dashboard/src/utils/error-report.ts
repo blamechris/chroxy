@@ -25,6 +25,8 @@
  *     `PatientAliceHIVPositive` used as a property key: nothing can tell that from a real
  *     identifier. The model accepts it, and PR 3's Copy flow shows the report for review
  *     before anything is copied.
+ *     Numeric property keys (`reading '0'`, 1 to 10 digits; an array index is at most
+ *     4294967295) belong to the same residual: a key can be an OTP or a user id.
  *   - File locations are kept only when their basename is in the caller-supplied
  *     `assetBasenames` set, which is a TRUSTED input (see `StackOptions`).
  *
@@ -115,11 +117,27 @@ const isDigitCode = (c: number) => c >= 48 && c <= 57
 const isHexCode = (c: number) => isDigitCode(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
 const VOWELS = 'aeiouyAEIOUY'
 /**
- * Vowelless web abbreviations, exempt from the vowel and consonant-run clauses. Compared
- * case-insensitively and only as a WHOLE chunk (`Http`, `https`, `Html`), so `Httpx` or
- * `Htmlzq` are not exempt. Shorter ones (btn, src, svg, xml, url) are never vowel-checked.
+ * Vowelless code abbreviations, exempt from the vowel and consonant-run clauses. Compared
+ * case-insensitively and only as a WHOLE chunk (`Http`, `https`, `Tmp`), so `Httpx` or
+ * `Tmpz` are not exempt. Without the vowel clause applying to 3-letter chunks, grouped
+ * random tokens (`tkt_xqy_aym_hjs`) would pass; this list keeps the common real names.
  */
-const VOWELLESS_ABBREVIATIONS: ReadonlySet<string> = new Set(['html', 'http', 'https', 'xhtml', 'ctrl', 'rgba'])
+export const VOWELLESS_ABBREVIATIONS: ReadonlySet<string> = new Set([
+  'tmp', 'src', 'btn', 'msg', 'cmd', 'ctx', 'cfg', 'pkg', 'str', 'fmt', 'dst', 'nth', 'pwd', 'sql',
+  'rgb', 'svg', 'xml', 'xhr', 'dns', 'tcp', 'ssl', 'tls', 'ssh', 'pdf', 'csv', 'jwt', 'cdn', 'npm',
+  'png', 'jpg', 'jsx', 'jsxs', 'css', 'dom', 'rtc', 'sse', 'idb', 'wss', 'html', 'http', 'https', 'xhtml', 'ctrl',
+  // common in this codebase's own names (measured against the dashboard source)
+  'mcp', 'cwd', 'srv', 'tsx', 'txt', 'htm', 'mjs', 'cjs', 'npx', 'sdk',
+])
+
+/**
+ * Real acronyms that are not vowelless but should not count toward the cap of 2 uppercase-only
+ * chunks of 3 to 5 letters per segment (the cap is what rejects `IQWGY_RJYDB_RMRWP`).
+ */
+const KNOWN_ACRONYMS: ReadonlySet<string> = new Set([
+  'xml', 'svg', 'css', 'dom', 'url', 'uri', 'api', 'rtc', 'sse', 'idb', 'xhr', 'rgb', 'json', 'utf',
+  'html', 'http', 'https', 'xhtml',
+])
 
 /**
  * The word-shape admission rule for ONE identifier segment (no `.`). Conservative and
@@ -131,19 +149,21 @@ const VOWELLESS_ABBREVIATIONS: ReadonlySet<string> = new Set(['html', 'http', 'h
  *     (`Session`), a run of 2+ uppercase letters (an acronym; when a lowercase letter
  *     follows, its last uppercase goes to the next chunk: `HTTPStream` = `HTTP` + `Stream`),
  *     digit runs and `_`/`$` separators; then
- *       - every chunk with a lowercase letter and 4+ characters contains a vowel [aeiouy],
- *         except the whole-chunk abbreviations html, http, https, xhtml, ctrl, rgba (any case);
+ *       - every chunk with a lowercase letter and 3+ characters contains a vowel [aeiouy],
+ *         except the whole-chunk abbreviations in `VOWELLESS_ABBREVIATIONS` (any case);
  *       - no chunk with a lowercase letter is longer than 14 or holds a run of 5 or more
  *         consecutive consonants (a vowel is [aeiouy]);
- *       - no uppercase-only chunk is longer than 5;
- *       - at most 2 one-letter alphabetic chunks (`i`, `x`), and at most 2 chunks of 1-2
- *         letters in all (the "short fragments" rule: random mixed-case strings are mostly
- *         1-2 letter fragments, real camelCase has few; added to the base rule after
- *         measuring that without it about 18% of random base62 24-mers were admitted).
+ *       - no uppercase-only chunk is longer than 5, and at most 2 uppercase-only chunks of 3-5
+ *         letters per segment, not counting `VOWELLESS_ABBREVIATIONS` or `KNOWN_ACRONYMS`;
+ *       - at most 2 chunks of 1-2 letters in all (the "short fragments" rule, which also
+ *         bounds one-letter chunks: random mixed-case strings are mostly 1-2 letter
+ *         fragments, real camelCase has few; added after measuring that without it about
+ *         18% of random base62 24-mers were admitted).
  * Random hex, base62, base36 and base64url tokens fail one of these with overwhelming
  * probability (see the corpus tests); real camelCase, snake_case and PascalCase names pass.
  */
 export function isWordShaped(seg: string): boolean {
+  if (typeof seg !== 'string') return false
   const n = seg.length
   if (n === 0 || n > 40) return false
   let digits = 0
@@ -164,8 +184,8 @@ export function isWordShaped(seg: string): boolean {
   if (digits > 4) return false
   if (n >= 8 && hexOnly) return false
 
-  let singles = 0
   let shorts = 0
+  let upperChunks = 0
   // Judge one alphabetic chunk [s, e); `upperOnly` when it has no lowercase letter.
   const chunk = (s0: number, e: number): boolean => {
     const len = e - s0
@@ -183,12 +203,15 @@ export function isWordShaped(seg: string): boolean {
     }
     if (hasLower) {
       if (len > 14) return false
-      if (!exempt && len >= 4 && !hasVowel) return false
+      if (!exempt && len >= 3 && !hasVowel) return false
       if (!exempt && maxConsonants > 4) return false
-    } else if (len > 5) return false
-    if (len === 1) singles++
+    } else {
+      if (len > 5) return false
+      if (len >= 3 && !exempt && !KNOWN_ACRONYMS.has(seg.slice(s0, e).toLowerCase()) && ++upperChunks > 2) return false
+    }
+    // One clause: at most 2 chunks of 1-2 letters (this also bounds one-letter chunks).
     if (len <= 2) shorts++
-    return singles <= 2 && shorts <= 2
+    return shorts <= 2
   }
   // An uppercase-only run. One longer than 5 is allowed only if it starts with an exempt
   // abbreviation (`HTMLLI` in `HTMLLIElement` = HTML + LI) followed by at most 2 more letters, which are judged
@@ -436,6 +459,8 @@ interface SplitLocation { base: string; line: string; col: string }
  * `keepLocation`'s job.
  */
 function splitLocation(loc: string): SplitLocation | null {
+  // Any whitespace (`https://invalid host/a.js:1:2`, `a.js?free text:1:2`) is not a location.
+  if (/\s/.test(loc)) return null
   const colIdx = loc.lastIndexOf(':')
   if (colIdx < 0) return null
   const lineIdx = loc.lastIndexOf(':', colIdx - 1)

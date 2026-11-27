@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   classifyErrorMessage, normalizeStack, normalizeComponentStack, formatErrorReport,
-  MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, MAX_MESSAGE_CHARS, isWordShaped, type ErrorReportEntry, type StackOptions,
+  MESSAGE_OMITTED, ERROR_TEMPLATE_PATTERNS, MAX_MESSAGE_CHARS, isWordShaped, VOWELLESS_ABBREVIATIONS, type ErrorReportEntry, type StackOptions,
 } from './error-report'
 
 /** The dashboard's own loaded scripts: the ONLY basenames a location may keep. */
@@ -559,6 +559,9 @@ const MUST_REDACT: string[] = [
   ...sample(103, LOWER + DIGIT, 24, 8), // random base36 lowercase, 24
   ...sample(104, LOWER + UPPER, 24, 8), // random mixed letters, 24
   ...['whsec_', 'shpat_', 'hf_', 'dckr_pat_', 'glsa_', 'rk_test_'].map(p => `${p}${RANDOM_BODY}`),
+  // separator-grouped tokens (fresh review finding 1)
+  'IQWGY_RJYDB_RMRWP_VPMDO', 'IQWGY$RJYDB$RMRWP$VPMDO', 'VMRY_TGTL_EKFO_LIKR_KXRZ', 'tkt_xqy_aym_hjs_wgo_hrr', 'WjhGfqTyzWxyRisTut',
+  'bcdf_ghjk_lmnp_qrst', 'bcd$fgh$jkl$mnp$qrs$tvw',
 ]
 
 const MUST_KEEP: string[] = [
@@ -568,6 +571,8 @@ const MUST_KEEP: string[] = [
   '_private', '$el', 'i', 'x', '__proto__', 'onClick', 'setState', 'React', 'useEffect', 'ChatView', 'MessageBubble', 'ASIANMarketData',
   'npm_config_cache', 'handleSessionListUpdateResponseV2Handler', 'a_very_long_snake_case_identifier_name', 'useChatViewScrollRestoration',
   'XMLHttpRequest', 'escapeHtml', 'isHttpUrl', 'httpsAgent', 'HTMLLIElement', 'CtrlKey', 'rgbaToHex',
+  '_jsxs', 'get_id_by_key', 'tmpDir', 'srcPath', 'btnLabel', 'msgList', 'ctxValue', 'cfgFile', 'pkgName', 'jsonToXml', 'SVGPathElement',
+  'CSSStyleSheet', 'RTCPeerConnection', 'IDBDatabase', 'performConcurrentWorkOnRoot', 'useSyncExternalStore', 'webpackChunk_N_E',
   'this', 'undefined', 'getElementById', 'webpackJsonpCallback'
 ]
 
@@ -591,16 +596,42 @@ describe('word-shape rule: MUST-REDACT corpus', () => {
     }
   })
 
-  it('statistically: random tokens almost never get in (fixed seeds, 2000 samples per class)', () => {
-    // Only a token that starts like an identifier can reach the rule, so samples start with a letter.
-    const slip = (alphabet: string, n: number, seed: number): number =>
-      sample(seed, alphabet, n, 2000).map(t => `k${t.slice(1)}`).filter(isWordShaped).length / 2000
-    expect(slip(LOWER + UPPER + DIGIT, 24, 201)).toBeLessThan(0.02)
-    expect(slip(LOWER + UPPER + DIGIT, 32, 202)).toBeLessThan(0.01)
-    expect(slip(LOWER + DIGIT, 24, 203)).toBeLessThan(0.06)
-    expect(slip(LOWER + UPPER, 24, 204)).toBeLessThan(0.04)
-    expect(slip(DIGIT + 'abcdef', 32, 205)).toBe(0)
-    expect(slip(LOWER + UPPER + DIGIT + '_', 43, 206)).toBe(0)
+  // Bounds are about 2x the rate measured on these fixed seeds. The two lowercase 4x5 / 5x4
+  // classes are the known weak spot (every group is a real-looking 4-5 letter chunk with a
+  // vowel), so their bounds are looser and say so: a separator-grouped lowercase token whose
+  // every group holds a vowel is admitted at roughly these rates.
+  const group = (rnd: () => number, alphabet: string, k: number, n: number, sep: string, title = false): string =>
+    Array.from({ length: k }, () => {
+      const g = randomString(rnd, alphabet, n)
+      return title ? g.charAt(0).toUpperCase() + g.slice(1).toLowerCase() : g
+    }).join(sep)
+  const flat = (alphabet: string, n: number) => (rnd: () => number): string => `k${randomString(rnd, alphabet, n - 1)}`
+  const CLASSES: Array<[string, (rnd: () => number) => string, number]> = [
+    ['base62 16', flat(LOWER + UPPER + DIGIT, 16), 0.03],
+    ['base62 20', flat(LOWER + UPPER + DIGIT, 20), 0.016],
+    ['base62 24', flat(LOWER + UPPER + DIGIT, 24), 0.004],
+    ['base62 32', flat(LOWER + UPPER + DIGIT, 32), 0.001],
+    ['base36 20', flat(LOWER + DIGIT, 20), 0.15],
+    ['base36 24', flat(LOWER + DIGIT, 24), 0.05],
+    ['mixed letters 24', flat(LOWER + UPPER, 24), 0.015],
+    ['base64url 24', flat(LOWER + UPPER + DIGIT + '_', 24), 0.004],
+    ['hex 32', flat(DIGIT + 'abcdef', 32), 0],
+    ['UPPER 4x5 _', (r) => group(r, UPPER, 5, 4, '_'), 0],
+    ['UPPER 5x4 _', (r) => group(r, UPPER, 4, 5, '_'), 0],
+    ['UPPER 5x4 $', (r) => group(r, UPPER, 4, 5, '$'), 0],
+    ['lower 6x3 _', (r) => group(r, LOWER, 6, 3, '_'), 0.055],
+    ['lower 6x3 $', (r) => group(r, LOWER, 6, 3, '$'), 0.05],
+    ['Title 6x3 joined', (r) => group(r, LOWER, 6, 3, '', true), 0.05],
+    ['lower 4x5 _ (weak spot)', (r) => group(r, LOWER, 5, 4, '_'), 0.25],
+    ['lower 5x4 _ (weak spot)', (r) => group(r, LOWER, 4, 5, '_'), 0.35],
+  ]
+  it.each(CLASSES.map(([name, , bound], i) => [name, i, bound] as const))('statistically: %s slips through at most %d of the time', (_name, i, bound) => {
+    // Only a token that starts like an identifier can reach the rule, so flat samples start with a letter.
+    const rnd = lcg(300 + i)
+    const gen = CLASSES[i]![1]
+    let slipped = 0
+    for (let k = 0; k < 2000; k++) if (isWordShaped(gen(rnd))) slipped++
+    expect(slipped / 2000).toBeLessThanOrEqual(bound)
   })
 })
 
@@ -637,12 +668,16 @@ describe('word-shape rule: each clause', () => {
   it('the vowel rule: a 4+ letter lowercase chunk needs a vowel [aeiouy]', () => {
     expect(isWordShaped('zkzx')).toBe(false)
     expect(isWordShaped('myth')).toBe(true) // y counts
-    expect(isWordShaped('fnc')).toBe(true) // 3 letters: exempt
+    expect(isWordShaped('fnc')).toBe(false) // 3 letters are vowel-checked too
+    expect(isWordShaped('tmp')).toBe(true) // ...unless a listed abbreviation
+    expect(isWordShaped('tmpDir')).toBe(true)
     expect(isWordShaped('doBlkz')).toBe(false) // Blkz
   })
   it('vowelless web abbreviations are exempt only as a whole chunk', () => {
-    for (const ok of ['Http', 'Https', 'Html', 'Xhtml', 'Ctrl', 'rgba', 'HTTP', 'getHttp', 'HTMLLIElement']) expect(isWordShaped(ok), ok).toBe(true)
-    for (const bad of ['Httpx', 'Htmlzq', 'Ctrlz', 'Httpsxy', 'Qwrt', 'HTMLQWZ', 'Xhtmlx']) expect(isWordShaped(bad), bad).toBe(false)
+    for (const ok of ['Http', 'Https', 'Html', 'Xhtml', 'Ctrl', 'HTTP', 'getHttp', 'HTMLLIElement', '_jsxs', 'Jsxs', 'Tmp']) expect(isWordShaped(ok), ok).toBe(true)
+    for (const bad of ['Httpx', 'Htmlzq', 'Ctrlz', 'Httpsxy', 'Qwrt', 'HTMLQWZ', 'Xhtmlx', 'Tmpz', 'Srcx', 'rgba_qwrt']) expect(isWordShaped(bad), bad).toBe(false)
+    for (const abbr of VOWELLESS_ABBREVIATIONS) expect(isWordShaped(`get_${abbr}_value`), abbr).toBe(true)
+    expect(VOWELLESS_ABBREVIATIONS.has('rgba')).toBe(false) // has a vowel: dead entry removed
   })
   it('a lowercase chunk is at most 14 and an uppercase-only chunk at most 5', () => {
     expect(isWordShaped('abcdefghijklmno'.replace(/[a-z]/g, 'a'))).toBe(false) // 15 letters
@@ -660,6 +695,16 @@ describe('word-shape rule: each clause', () => {
   it('a run of 5 consonants in a chunk is refused', () => {
     expect(isWordShaped('strengths')).toBe(false)
     expect(isWordShaped('length')).toBe(true)
+  })
+  it('at most 2 uppercase-only chunks of 3-5 letters, not counting known acronyms', () => {
+    expect(isWordShaped('ABC_DEF')).toBe(true)
+    expect(isWordShaped('ABC_DEF_GHI')).toBe(false)
+    expect(isWordShaped('XML_SVG_CSS_DOM_URL_API_JSON')).toBe(true) // acronym list: not counted
+    expect(isWordShaped('HTTP_XML_DEF_GHI')).toBe(true) // 2 counted
+    expect(isWordShaped('IQWGY_RJYDB_RMRWP')).toBe(false)
+  })
+  it('a non-string is refused, never thrown on', () => {
+    for (const v of [null, undefined, 5, {}, [], Symbol('s')]) expect(isWordShaped(v as unknown as string)).toBe(false)
   })
   it('non-identifier characters are refused', () => {
     for (const bad of ['', 'a-b', 'a b', 'a.b', "a'b", 'é']) expect(isWordShaped(bad), bad).toBe(false)
@@ -731,6 +776,12 @@ describe('F3: layers that only a specific input can exercise', () => {
   })
 })
 
+describe('F4-WS: whitespace anywhere in a location is not a location', () => {
+  const BAD = ['https://invalid host/a.js:1:2', 'https://h/a.js?free text:1:2', 'https://h/a.js\t:1:2', 'https://h/a.js :1:2']
+  it.each(BAD)('JSC fn@%s gives no frame', (loc) => { expect(ns(`fn@${loc}`)).toEqual([]) })
+  it.each(BAD)('V8 at fn (%s) never keeps the location', (loc) => { expect(ns(`at fn (${loc})`)).toEqual(['fn @ <unknown>']) })
+})
+
 describe('F4: JSC fn@loc needs a valid http(s) location with line:col', () => {
   it('rejects non-locations entirely (no frame at all)', () => {
     for (const line of ['alice@example.com', 'fn@[native code]', 'fn@http://h/a.js', 'fn@http://h/a.js:1', 'fn@file:///x/a.js:1:2', 'fn@ftp://h/a.js:1:2', 'fn@http://host:1:2', 'fn@', '@']) {
@@ -763,6 +814,30 @@ describe('F5: digit-only property keys', () => {
   it('digit keys are only for key slots, not for function or variable names', () => {
     expect(classifyErrorMessage('TypeError', '0 is not a function').text).toBe(OMIT)
     expect(classifyErrorMessage('TypeError', "Cannot access '0' before initialization").text).toBe(OMIT)
+  })
+})
+
+describe('shape-gate boundaries', () => {
+  // Word-shaped bodies of an exact length, so only the shape gate (not the word rule) decides.
+  const BODY = (n: number) => ({ 15: 'handleSessionId', 16: 'handleSessionIds', 19: 'handleSessionUpdate', 20: 'handleSessionUpdates' } as Record<number, string>)[n]!
+  it.each([
+    ['npm_', 19, true], ['npm_', 20, false], ['hf_', 19, true], ['hf_', 20, false], ['oauth_', 15, true], ['oauth_', 16, false],
+  ] as const)('slot %s + %i alphanumerics: kept=%s', (prefix, n, kept) => {
+    const id = `${prefix}${BODY(n)}`
+    expect(isWordShaped(id)).toBe(true) // the word rule would admit it: only the shape gate decides
+    const text = classifyErrorMessage('TypeError', `${id} is not a function`).text
+    expect(text).toBe(kept ? `${id} is not a function` : '[REDACTED] is not a function')
+  })
+  it.each([
+    ['npm_', 19, true], ['npm_', 20, false], ['hf_', 19, true], ['hf_', 20, false], ['oauth_', 15, true], ['oauth_', 16, false],
+    ['AKIA', 15, true], ['AKIA', 16, false], ['ASIA', 15, true], ['ASIA', 16, false],
+  ] as const)('member basename %s + %i chars: kept=%s', (prefix, n, kept) => {
+    const body = prefix === 'AKIA' || prefix === 'ASIA' ? 'A1'.repeat(n).slice(0, n) : 'a'.repeat(n)
+    const base = `${prefix}${body}.js`
+    const set = new Set([base])
+    const want = kept ? [`fn @ ${base}:1:2`] : ['fn @ <unknown>']
+    expect(normalizeStack(`at fn (https://h/${base}:1:2)`, { assetBasenames: set })).toEqual(want)
+    expect(normalizeStack(`fn @ ${base}:1:2`, { assetBasenames: set })).toEqual(want)
   })
 })
 
