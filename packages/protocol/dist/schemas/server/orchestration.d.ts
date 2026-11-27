@@ -83,8 +83,8 @@ export declare const RunGateSchema: z.ZodObject<{
         budget_overrun: "budget_overrun";
     }>;
     status: z.ZodEnum<{
-        pending: "pending";
         expired: "expired";
+        pending: "pending";
         approved: "approved";
         rejected: "rejected";
         skipped: "skipped";
@@ -327,8 +327,8 @@ export declare const RunDetailSchema: z.ZodObject<{
             budget_overrun: "budget_overrun";
         }>;
         status: z.ZodEnum<{
-            pending: "pending";
             expired: "expired";
+            pending: "pending";
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";
@@ -577,8 +577,8 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
                 budget_overrun: "budget_overrun";
             }>;
             status: z.ZodEnum<{
-                pending: "pending";
                 expired: "expired";
+                pending: "pending";
                 approved: "approved";
                 rejected: "rejected";
                 skipped: "skipped";
@@ -769,8 +769,8 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
             budget_overrun: "budget_overrun";
         }>;
         status: z.ZodEnum<{
-            pending: "pending";
             expired: "expired";
+            pending: "pending";
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";

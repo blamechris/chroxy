@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
+import { PERMISSION_NO_DECISION_REASON_OUTCOMES } from '@chroxy/protocol'
 import {
   SessionMessageHistory,
   PERMISSION_OUTCOME_DESCRIPTION_MAX,
@@ -590,6 +591,31 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     await decided
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)
     assert.equal(outcomes(mgr, 's1')[0].outcome, 'stopped')
+  })
+
+  it('#8952: every no-decision reason in the shared table journals the outcome the table names (the clients read the same table)', () => {
+    const reasons = Object.keys(PERMISSION_NO_DECISION_REASON_OUTCOMES)
+    assert.ok(reasons.length >= 4, 'the table must not be empty')
+    for (const reason of reasons) {
+      const sid = `s-${reason}`
+      const { session } = makeInProcessSession(mgr, sid)
+      const requestId = `perm-${reason}`
+      session.emit('permission_request', { requestId, tool: 'Bash', description: 'x', input: { command: 'ls' } })
+      session.emit('permission_resolved', { requestId, decision: 'deny', reason })
+      const all = outcomes(mgr, sid)
+      assert.equal(all.length, 1, reason)
+      assert.equal(all[0].outcome, PERMISSION_NO_DECISION_REASON_OUTCOMES[reason], reason)
+    }
+  })
+
+  it('#8952: a plain user deny journals denied and an allow journals allowed', () => {
+    for (const [decision, expected] of [['deny', 'denied'], ['allow', 'allowed']]) {
+      const sid = `s-${decision}`
+      const { session } = makeInProcessSession(mgr, sid)
+      session.emit('permission_request', { requestId: 'p1', tool: 'Bash', description: 'x', input: { command: 'ls' } })
+      session.emit('permission_resolved', { requestId: 'p1', decision, reason: 'user' })
+      assert.equal(outcomes(mgr, sid)[0].outcome, expected)
+    }
   })
 
   it('records "expired" for a session-level permission_expired event', () => {

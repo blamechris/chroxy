@@ -18,6 +18,7 @@
  * unchanged.
  */
 
+import { permissionOutcomeForReason } from '@chroxy/protocol'
 import type { ChatMessage, PermissionOutcomeKind } from '../types'
 import { nextMessageId } from '../utils'
 import { parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
@@ -136,8 +137,8 @@ export interface PermissionResolvedPayload {
   /**
    * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'stopped'`, `'aborted'`,
    * ...), or null when the frame carried none (the hook route and other-client
-   * broadcasts). Only {@link PERMISSION_STOPPED_REASON} and
-   * {@link PERMISSION_ABORTED_REASON} are acted on.
+   * broadcasts). Only the reasons in `PERMISSION_NO_DECISION_REASON_OUTCOMES`
+   * (stopped, timeout, aborted, cleared) are acted on.
    */
   reason: string | null
   /**
@@ -234,6 +235,10 @@ export const QUESTION_SUPERSEDED_REASON = 'superseded'
  *     so the live card and its replay agree. Before this it was stamped as an
  *     answered deny and read "Denied" live but "expired" after a switch.
  *   - A timer that ran out (`reason: 'timeout'`, #8937): the same `expired` record.
+ *   - A prompt the turn ended with still open (`reason: 'cleared'`, #8952): the same
+ *     `expired` record. Every reason above lives in ONE table,
+ *     `PERMISSION_NO_DECISION_REASON_OUTCOMES` in `@chroxy/protocol`, which the
+ *     server journal reads too.
  *   - anything else: the decision is the answer, exactly as before -- except that an
  *     `allow` never overwrites the `allowSession` / `allowAlways` this client already
  *     recorded, and one carrying `scope: 'session'` is `allowSession` (#8517).
@@ -245,10 +250,8 @@ export function applyPermissionResolved(
   resolved: PermissionResolvedPayload,
   now: number,
 ): ChatMessage {
-  const noDecision =
-    resolved.reason === PERMISSION_STOPPED_REASON ? 'stopped'
-      : resolved.reason === PERMISSION_ABORTED_REASON || resolved.reason === PERMISSION_TIMEOUT_REASON ? 'expired'
-        : null
+  // #8952: the SAME table the server journals from, so a live card and its replay agree.
+  const noDecision = permissionOutcomeForReason(resolved.reason)
   if (noDecision) {
     return {
       ...m,

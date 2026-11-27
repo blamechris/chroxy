@@ -130,8 +130,8 @@ export declare const ServerAuthFailSchema: z.ZodObject<{
 export declare const ServerCredentialInvalidatedSchema: z.ZodObject<{
     type: z.ZodLiteral<"credential_invalidated">;
     reason: z.ZodEnum<{
-        revoked: "revoked";
         expired: "expired";
+        revoked: "revoked";
         evicted: "evicted";
         invalid: "invalid";
     }>;

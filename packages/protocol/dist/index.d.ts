@@ -96,6 +96,7 @@ export * from './codex.ts';
 export * from './notification-categories.ts';
 export * from './thinking-levels.ts';
 export * from './auth-causes.ts';
+export * from './permission-outcomes.ts';
 export { computeHunks, splitContentLines, DEFAULT_CONTEXT_LINES, MAX_DIFF_LINES } from './hunk-diff.ts';
 export type { DiffHunk, DiffHunkLine } from './hunk-diff.ts';
 export { buildInputMessage } from './input.ts';

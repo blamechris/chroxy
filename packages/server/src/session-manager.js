@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync, realpathSync } from 'fs'
 import { join, resolve, dirname, basename, isAbsolute } from 'path'
 import { execFileSync } from 'child_process'
-import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { USER_SHELL_PROVIDER, permissionOutcomeForReason } from '@chroxy/protocol'
 import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
 import { isClaudeProvider, CLAUDE_NEW_SESSION_DEFAULT_MODEL } from './models.js'
 import { classifyClaudeModelRequest } from './claude-model-request.js'
@@ -378,8 +378,9 @@ function providerStartDeadlineMs(session) {
 function permissionOutcomeForEvent(event, data) {
   if (!data || typeof data.requestId !== 'string' || !data.requestId) return null
   if (event === 'permission_expired') return 'expired'
-  if (data.reason === 'stopped') return 'stopped'
-  if (data.reason === 'timeout' || data.reason === 'aborted' || data.reason === 'cleared') return 'expired'
+  // #8952: one table (`PERMISSION_NO_DECISION_REASON_OUTCOMES`) shared with the clients.
+  const noDecision = permissionOutcomeForReason(data.reason)
+  if (noDecision) return noDecision
   return data.decision === 'deny' ? 'denied' : 'allowed'
 }
 

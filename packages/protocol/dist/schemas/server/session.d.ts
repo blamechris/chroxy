@@ -1610,8 +1610,8 @@ export declare const ServerInputAckSchema: z.ZodObject<{
     sessionId: z.ZodString;
     clientMessageId: z.ZodString;
     status: z.ZodEnum<{
-        queued: "queued";
         expired: "expired";
+        queued: "queued";
         rejected: "rejected";
         accepted: "accepted";
         duplicate: "duplicate";
