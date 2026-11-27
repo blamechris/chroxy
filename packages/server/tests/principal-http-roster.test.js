@@ -115,10 +115,10 @@ function inventory(routesFile, srcRoot = SRC) {
 
 // What the tree holds today, an independent oracle. Each bearer READ is a guard family
 // above, an HTTP-only credential (ingest secret, hook secret), the dashboard reader, or a
-// redaction or validation pattern (anthropic-compatible-config.js, redaction.js: a `Bearer` regex, not an inbound read); none reads the principal store (next test).
+// redaction or validation pattern (anthropic-compatible-config.js: a `Bearer` regex, not an inbound read; the redaction rules moved to @chroxy/protocol, #9235); none reads the principal store (next test).
 const EXPECTED_READS = {
   'anthropic-compatible-config.js': 1, 'bearer-recheck.js': 2, 'event-ingest.js': 2, 'http-routes.js': 1, 'mailbox-route.js': 2,
-  'redaction.js': 2, 'ws-permissions.js': 6, 'ws-server.js': 9,
+  'ws-permissions.js': 6, 'ws-server.js': 9,
 }
 // The request's header bag handed on whole: proxy-header classifiers and the preview proxy.
 const EXPECTED_ESCAPES = { 'connection-locality.js': 2, 'preview-target.js': 1 }
@@ -200,7 +200,7 @@ describe('the HTTP route roster, checked in both directions against the source (
       assert.ok(typeof text === 'string' && text.length > 50, `${name} not found`)
       assert.equal(/principal/i.test(text), false, `${name} must not accept a principal`)
     }
-    for (const rel of Object.keys(EXPECTED_READS).filter((r) => !['ws-server.js', 'redaction.js', 'anthropic-compatible-config.js'].includes(r))) {
+    for (const rel of Object.keys(EXPECTED_READS).filter((r) => !['ws-server.js', 'anthropic-compatible-config.js'].includes(r))) {
       assert.equal(/principal/i.test(read(rel)), false, rel)
     }
   })
