@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { realpath as realRealpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -216,6 +217,79 @@ describe('check_git_repo spawn budget (#8972)', () => {
     const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
     assert.equal(byId.again, true)
     assert.equal(byId.other, true)
+  })
+})
+
+describe('check_git_repo bounds the whole probe (#8998)', () => {
+  const BOUND_MS = 40
+  const DEADLINE_MS = 2000
+  let base
+
+  beforeEach(() => {
+    base = mkdtempSync(join(homedir(), '.chroxy-test-8998-'))
+    mkdirSync(join(base, 'repo'), { recursive: true })
+    execFileSync(GIT, ['init', '-q', join(base, 'repo')])
+  })
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  // `faulty` decides how a path whose name contains "bad" behaves; every other
+  // path (including home) goes to the real realpath.
+  function ops(sent, faulty) {
+    return createBrowserOps(
+      (_ws, msg) => sent.push(msg),
+      (cwd) => resolveSessionCwd(cwd, new Map(), 60_000),
+      (absPath, cwd) => validatePathWithinCwd(absPath, cwd, new Map(), 60_000),
+      {
+        gitProbeTimeoutMs: BOUND_MS,
+        gitProbeRealpath: (p) => (String(p).includes('bad') ? faulty(p) : realRealpath(p)),
+      },
+    )
+  }
+
+  // Race a call against a test-side deadline so a missing bound fails red, not hung.
+  async function withinDeadline(promise, label) {
+    let t
+    const deadline = new Promise((resolve) => { t = setTimeout(() => resolve('DEADLINE'), DEADLINE_MS) })
+    try {
+      const r = await Promise.race([promise, deadline])
+      assert.notEqual(r, 'DEADLINE', `${label} did not settle within ${DEADLINE_MS}ms (probe unbounded)`)
+    } finally {
+      clearTimeout(t)
+    }
+  }
+
+  const badPaths = (n) => Array.from({ length: n }, (_, i) => `${base}/bad${i}`)
+
+  it('a never-settling realpath answers null after the bound and frees the slot', async () => {
+    const sent = []
+    const o = ops(sent, () => new Promise(() => {}))
+    const ws = {}
+    await withinDeadline(
+      Promise.all(badPaths(4).map((p, i) => o.checkGitRepo(ws, p, `h${i}`))),
+      'four hung probes',
+    )
+    const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
+    assert.deepEqual(['h0', 'h1', 'h2', 'h3'].map((id) => byId[id]), [null, null, null, null])
+    // All four slots were held by hung probes; a fifth distinct path must be probed for real.
+    await withinDeadline(o.checkGitRepo(ws, `${base}/repo`, 'fifth'), 'fifth probe')
+    assert.equal(sent.find((m) => m.requestId === 'fifth').isGitRepo, true)
+  })
+
+  it('a rejecting realpath answers null and frees its slot', async () => {
+    const sent = []
+    const o = ops(sent, () => Promise.reject(Object.assign(new Error('boom'), { code: 'EIO' })))
+    const ws = {}
+    await withinDeadline(
+      Promise.all(badPaths(4).map((p, i) => o.checkGitRepo(ws, p, `f${i}`))),
+      'four failing probes',
+    )
+    const byId = Object.fromEntries(sent.map((m) => [m.requestId, m.isGitRepo]))
+    assert.deepEqual(['f0', 'f1', 'f2', 'f3'].map((id) => byId[id]), [null, null, null, null])
+    await o.checkGitRepo(ws, `${base}/repo`, 'fifth')
+    assert.equal(sent.find((m) => m.requestId === 'fifth').isGitRepo, true)
   })
 })
 
