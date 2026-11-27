@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ERROR_HISTORY_KEY,
   __resetErrorHistoryForTests,
+  __setModuleUrlForTests,
+  pruneErrorHistory,
   clearErrorHistory,
   currentAssetBasenames,
   formatHistoryEntry,
@@ -11,7 +13,12 @@ import {
 } from './error-history'
 import { formatErrorReport } from './error-report'
 
-const BUNDLE = 'index-abc123.js'
+const BUNDLE = 'index-Dvf46w8T.js'
+const ASSETS = '/dashboard/assets'
+
+// Two distinct messages whose 6-char local ids collide at the fixed time below (found by search).
+const collidingError = (prop: string): Error => Object.assign(
+  new TypeError(`Cannot read properties of undefined (reading '${prop}')`), { stack: '' })
 
 function jsonParseError(): Error {
   try {
@@ -24,7 +31,7 @@ function jsonParseError(): Error {
 
 function propError(): Error {
   const e = new TypeError("Cannot read properties of undefined (reading 'dimensions')")
-  e.stack = `TypeError: x\n    at renderChart (${location.origin}/assets/${BUNDLE}:10:20)`
+  e.stack = `TypeError: x\n    at renderChart (${location.origin}${ASSETS}/${BUNDLE}:10:20)`
   return e
 }
 
@@ -38,7 +45,8 @@ function addScript(src: string): HTMLScriptElement {
 beforeEach(() => {
   localStorage.clear()
   __resetErrorHistoryForTests()
-  addScript(`${location.origin}/assets/${BUNDLE}`)
+  __setModuleUrlForTests(`${location.origin}${ASSETS}/${BUNDLE}`)
+  addScript(`${location.origin}${ASSETS}/${BUNDLE}`)
 })
 
 afterEach(() => {
@@ -54,7 +62,7 @@ describe('stored data is classifier output only', () => {
       `${err.name}: ${err.message}`,
       '    at parse (file:///Users/alice/secret/app.js:1:2)',
       '    at leak (data:text/plain,PRIVATE%20DATA:1:1)',
-      `    at renderChart (${location.origin}/assets/${BUNDLE}:3:4)`,
+      `    at renderChart (${location.origin}${ASSETS}/${BUNDLE}:3:4)`,
     ].join('\n')
     recordDashboardError({ category: 'window-error', error: err })
     const raw = localStorage.getItem(ERROR_HISTORY_KEY)!
@@ -96,7 +104,8 @@ describe('stored data is classifier output only', () => {
     const raw = localStorage.getItem(ERROR_HISTORY_KEY)!
     // The bundle name appears only inside a validated frame, and no key holds a list of assets.
     expect(raw.toLowerCase().includes('asset')).toBe(false)
-    expect(Object.keys(localStorage)).toEqual([ERROR_HISTORY_KEY])
+    expect(localStorage.length).toBe(1)
+    expect(localStorage.key(0)).toBe(ERROR_HISTORY_KEY)
     for (const s of ['assetBasenames', 'assets', 'scripts']) expect(raw.includes(s)).toBe(false)
   })
 
@@ -276,25 +285,64 @@ describe('storage failure', () => {
 })
 
 describe('currentAssetBasenames', () => {
-  it('keeps only same-origin http(s) scripts', () => {
-    addScript(`${location.origin}/assets/chunk-xyz.js`)
-    addScript('https://evil.example.com/assets/evil.js')
-    addScript('file:///Users/alice/local.js')
-    addScript('data:text/javascript,alert(1)')
-    addScript('//evil.example.com/protocol-relative.js')
+  const entry = (name: string, initiatorType: string) => ({ name: `${location.origin}${name}`, initiatorType })
+
+  it('keeps real hashed assets in the own assets directory, from scripts and script/link resources', () => {
+    addScript(`${location.origin}${ASSETS}/chunk-2Q5K7J3B-yng0oyO0.js`)
     vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
-      { name: `${location.origin}/assets/dynamic-123.js?v=2` },
-      { name: `${location.origin}/assets/style.css` },
-      { name: 'https://evil.example.com/other.js' },
-      { name: `${location.origin}/assets/mod-9.mjs` },
+      entry(`${ASSETS}/cose-bilkent-JH36ORCC-ywTmjP-W.js?v=2`, 'script'),
+      entry(`${ASSETS}/mod-AbCd1234.mjs`, 'link'),
     ] as unknown as PerformanceEntryList)
-    const set = currentAssetBasenames()
-    expect([...set].sort()).toEqual([BUNDLE, 'chunk-xyz.js', 'dynamic-123.js', 'mod-9.mjs'].sort())
+    expect([...currentAssetBasenames()].sort()).toEqual(
+      [BUNDLE, 'chunk-2Q5K7J3B-yng0oyO0.js', 'cose-bilkent-JH36ORCC-ywTmjP-W.js', 'mod-AbCd1234.mjs'].sort())
   })
 
-  it('is empty (fail closed) when nothing qualifies, and frame locations become <unknown>', () => {
-    document.head.querySelectorAll('script').forEach(s => s.remove())
-    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([])
+  it('rejects an IMAGE resource named like a script (the provenance repro)', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      entry(`${ASSETS}/PatientAlice-HIVPosit.js`, 'img'),
+      entry(`${ASSETS}/PatientAlice-HIVPosit.js`, 'fetch'),
+      entry(`${ASSETS}/PatientAlice-HIVPosit.js`, 'xmlhttprequest'),
+    ] as unknown as PerformanceEntryList)
+    expect(currentAssetBasenames().has('PatientAlice-HIVPosit.js')).toBe(false)
+    const e = Object.assign(new TypeError("Cannot read properties of undefined (reading 'x')"), {
+      stack: `TypeError: x\n    at fn (${location.origin}${ASSETS}/PatientAlice-HIVPosit.js:1:2)`,
+    })
+    recordDashboardError({ category: 'window-error', error: e })
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)!.includes('PatientAlice')).toBe(false)
+  })
+
+  it('also rejects the unhashed image repro name', () => {
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      entry(`${ASSETS}/PatientAliceHIVPositive.js`, 'img'),
+    ] as unknown as PerformanceEntryList)
+    expect(currentAssetBasenames().has('PatientAliceHIVPositive.js')).toBe(false)
+  })
+
+  it('rejects scripts and resources outside the own assets directory, unhashed names, other origins', () => {
+    addScript(`${location.origin}/other/dir/index-AbCd1234.js`)
+    addScript(`${location.origin}${ASSETS}/sub/index-AbCd1234.js`)
+    addScript(`${location.origin}${ASSETS}/PatientAliceHIVPositive.js`)
+    addScript(`${location.origin}${ASSETS}/short-AbCd12.js`)
+    addScript('https://evil.example.com/dashboard/assets/index-AbCd1234.js')
+    addScript('file:///Users/alice/dashboard/assets/index-AbCd1234.js')
+    addScript('data:text/javascript,alert(1)')
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue([
+      entry('/other/dir/chunk-AbCd1234.js', 'script'),
+      entry(`${ASSETS}/style-AbCd1234.css`, 'link'),
+    ] as unknown as PerformanceEntryList)
+    expect([...currentAssetBasenames()]).toEqual([BUNDLE])
+  })
+
+  it('inspects at most 200 resource entries', () => {
+    const many = Array.from({ length: 300 }, (_, i) => entry(`${ASSETS}/c${i}-AbCd${String(1000 + i)}.js`, 'script'))
+    vi.spyOn(performance, 'getEntriesByType').mockReturnValue(many as unknown as PerformanceEntryList)
+    const set = currentAssetBasenames()
+    expect(set.has('c199-AbCd1199.js')).toBe(true)
+    expect(set.has('c200-AbCd1200.js')).toBe(false)
+  })
+
+  it('is empty (fail closed) outside a built bundle, and frame locations become <unknown>', () => {
+    __setModuleUrlForTests('file:///Users/alice/src/utils/error-history.ts')
     expect(currentAssetBasenames().size).toBe(0)
     recordDashboardError({ category: 'window-error', error: propError() })
     expect(readErrorHistory()[0]!.stack).toEqual(['renderChart @ <unknown>'])
@@ -308,5 +356,138 @@ describe('currentAssetBasenames', () => {
       stack: ['renderChart @ not-a-loaded-script.js:1:1'], componentStack: [],
     }]))
     expect(readErrorHistory()[0]!.stack).toEqual(['renderChart @ <unknown>'])
+  })
+})
+
+describe('in-memory ring semantics', () => {
+  const err = (p: string) => new TypeError(`Cannot read properties of undefined (reading '${p}')`)
+
+  it('does not resurrect entries after another tab clears the key', () => {
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    expect(readErrorHistory()).toHaveLength(1)
+    localStorage.removeItem(ERROR_HISTORY_KEY) // the other tab
+    window.dispatchEvent(new StorageEvent('storage', { key: ERROR_HISTORY_KEY }))
+    expect(readErrorHistory()).toEqual([])
+    recordDashboardError({ category: 'window-error', error: err('second') })
+    const list = readErrorHistory()
+    expect(list).toHaveLength(1)
+    expect(list[0]!.text).toContain('second')
+  })
+
+  it('returns [] and drops the ring when the key is absent even without a storage event', () => {
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    localStorage.removeItem(ERROR_HISTORY_KEY)
+    expect(readErrorHistory()).toEqual([])
+  })
+
+  it('notifies subscribers on a storage event for the key only', () => {
+    const listener = vi.fn()
+    subscribeErrorHistory(listener)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'something_else' }))
+    expect(listener).not.toHaveBeenCalled()
+    window.dispatchEvent(new StorageEvent('storage', { key: ERROR_HISTORY_KEY }))
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('after a quota failure on an existing key, the newest error is visible (dirty ring wins)', () => {
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    recordDashboardError({ category: 'window-error', error: err('second') })
+    const list = readErrorHistory()
+    expect(list).toHaveLength(2)
+    expect(list[0]!.text).toContain('second')
+    vi.restoreAllMocks()
+    // a later successful write ends the dirty state and persists everything
+    recordDashboardError({ category: 'window-error', error: err('third') })
+    const stored = JSON.parse(localStorage.getItem(ERROR_HISTORY_KEY)!) as unknown[]
+    expect(stored).toHaveLength(3)
+    expect(readErrorHistory()[0]!.text).toContain('third')
+  })
+})
+
+describe('expiry deletes, bounded work', () => {
+  const err = (p: string) => new TypeError(`Cannot read properties of undefined (reading '${p}')`)
+
+  it('a read at +31 days removes the stored value', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-01T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: err('first') })
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).not.toBeNull()
+    vi.setSystemTime(new Date('2026-11-01T00:00:01.000Z'))
+    expect(readErrorHistory()).toEqual([])
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBeNull()
+  })
+
+  it('pruneErrorHistory rewrites a partly expired list', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-01T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: err('old') })
+    vi.setSystemTime(new Date('2026-10-30T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: err('newer') })
+    vi.setSystemTime(new Date('2026-11-05T00:00:00.000Z'))
+    pruneErrorHistory()
+    const stored = JSON.parse(localStorage.getItem(ERROR_HISTORY_KEY)!) as { text: string }[]
+    expect(stored).toHaveLength(1)
+    expect(stored[0]!.text).toContain('newer')
+  })
+
+  it('clamps a future-dated entry to now so it ages out', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-01T00:00:00.000Z'))
+    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([{
+      id: 'abc123', time: '2099-01-01T00:00:00.000Z', firstTime: '2099-01-01T00:00:00.000Z', count: 1,
+      category: 'render', platform: 'web', version: '1.0.0', name: 'Error', template: null,
+      text: '[message omitted]', stack: [], componentStack: [],
+    }]))
+    expect(readErrorHistory()[0]!.time).toBe('2026-10-01T00:00:00.000Z')
+    vi.setSystemTime(new Date('2026-11-05T00:00:00.000Z'))
+    expect(readErrorHistory()).toEqual([])
+  })
+
+  it('resets a stored value over 64 KB', () => {
+    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([{ pad: 'x'.repeat(70 * 1024) }]))
+    expect(readErrorHistory()).toEqual([])
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBeNull()
+  })
+
+  it('cuts each stored stack line before it is parsed', () => {
+    const now = new Date().toISOString()
+    const huge = `ok @ ${'a'.repeat(5000)}.js:1:1`
+    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([{
+      id: 'abc123', time: now, firstTime: now, count: 1, category: 'render', platform: 'web', version: '1.0.0',
+      name: 'Error', template: null, text: '[message omitted]', stack: [huge], componentStack: [],
+    }]))
+    expect(readErrorHistory()[0]!.stack.join('').length).toBeLessThan(400)
+  })
+
+  it('drops events beyond 10 per second, then resumes', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    for (let i = 0; i < 15; i++) recordDashboardError({ category: 'window-error', error: err(`prop${'abcdefghijklmno'[i]}x`) })
+    expect(readErrorHistory()).toHaveLength(10)
+    vi.advanceTimersByTime(1001)
+    recordDashboardError({ category: 'window-error', error: err('later') })
+    expect(readErrorHistory()).toHaveLength(11)
+  })
+
+  it('gives colliding hashes distinct ids', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: collidingError('ludibaba') })
+    recordDashboardError({ category: 'window-error', error: collidingError('sadobaba') })
+    const list = readErrorHistory()
+    expect(list).toHaveLength(2)
+    expect(list.map(e => e.text).join(' ')).toMatch(/ludibaba[\s\S]*sadobaba|sadobaba[\s\S]*ludibaba/)
+    expect(new Set(list.map(e => e.id)).size).toBe(2)
+  })
+
+  it('drops a stored duplicate id on read', () => {
+    const now = new Date().toISOString()
+    const e = (text: string) => ({
+      id: 'dup123', time: now, firstTime: now, count: 1, category: 'render', platform: 'web', version: '1.0.0',
+      name: 'Error', template: null, text, stack: [], componentStack: [],
+    })
+    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([e('[message omitted]'), e('[message omitted]')]))
+    expect(readErrorHistory()).toHaveLength(1)
   })
 })

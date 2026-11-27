@@ -6,10 +6,17 @@
  * recorded by the ErrorBoundary instead (they carry a component stack). Standalone: no store.
  */
 import { classifyErrorMessage } from './error-report'
-import { recordDashboardError } from './error-history'
+import { pruneErrorHistory, recordDashboardError } from './error-history'
 
-/** Register the listeners. Returns a function that removes them. */
+const installed = new WeakMap<object, () => void>()
+
+/**
+ * Register the listeners. Idempotent per target: a second call returns the existing uninstall
+ * (two sets of listeners would record every event twice). Also drops expired stored entries.
+ */
 export function installErrorCapture(target: Window = window): () => void {
+  const existing = installed.get(target)
+  if (existing) return existing
   const onError = (event: ErrorEvent): void => {
     try {
       // A ResizeObserver loop notification arrives with no Error object, only a message.
@@ -29,8 +36,12 @@ export function installErrorCapture(target: Window = window): () => void {
   }
   target.addEventListener('error', onError)
   target.addEventListener('unhandledrejection', onRejection)
-  return () => {
+  const uninstall = (): void => {
     target.removeEventListener('error', onError)
     target.removeEventListener('unhandledrejection', onRejection)
+    installed.delete(target)
   }
+  installed.set(target, uninstall)
+  try { pruneErrorHistory() } catch { /* never block startup */ }
+  return uninstall
 }

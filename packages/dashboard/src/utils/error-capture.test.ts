@@ -65,6 +65,39 @@ describe('installErrorCapture', () => {
     expect(seen).toHaveBeenCalledTimes(1)
   })
 
+  it('is idempotent: a double install records each event once', () => {
+    const again = installErrorCapture()
+    expect(again).toBe(uninstall)
+    window.dispatchEvent(new ErrorEvent('error', { error: propError() }))
+    expect(readErrorHistory()[0]!.count).toBe(1)
+    expect(readErrorHistory()).toHaveLength(1)
+  })
+
+  it('drops a nested capture raised while recording (re-entry latch)', () => {
+    const e = propError()
+    Object.defineProperty(e, 'message', {
+      get() {
+        window.dispatchEvent(new ErrorEvent('error', { error: new TypeError("Cannot read properties of undefined (reading 'inner')") }))
+        return "Cannot read properties of undefined (reading 'dimensions')"
+      },
+    })
+    window.dispatchEvent(new ErrorEvent('error', { error: e }))
+    const list = readErrorHistory()
+    expect(list).toHaveLength(1)
+    expect(list[0]!.text).toContain('dimensions')
+  })
+
+  it('prunes expired stored entries at install', () => {
+    uninstall()
+    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify([{
+      id: 'old123', time: '2020-01-01T00:00:00.000Z', firstTime: '2020-01-01T00:00:00.000Z', count: 1,
+      category: 'render', platform: 'web', version: '1.0.0', name: 'Error', template: null,
+      text: '[message omitted]', stack: [], componentStack: [],
+    }]))
+    uninstall = installErrorCapture()
+    expect(localStorage.getItem(ERROR_HISTORY_KEY)).toBeNull()
+  })
+
   it('stops recording after uninstall', () => {
     uninstall()
     // vitest reports an error event nobody listens to as an unhandled error; give it a listener.

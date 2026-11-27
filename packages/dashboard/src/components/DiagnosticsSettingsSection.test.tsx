@@ -9,6 +9,10 @@ import { __resetErrorHistoryForTests, readErrorHistory, recordDashboardError } f
 
 const propError = (prop: string) => new TypeError(`Cannot read properties of undefined (reading '${prop}')`)
 
+// Two distinct messages whose 6-char local ids collide at the fixed time below (found by search).
+const collidingError = (prop: string): Error => Object.assign(
+  new TypeError(`Cannot read properties of undefined (reading '${prop}')`), { stack: '' })
+
 beforeEach(() => {
   localStorage.clear()
   __resetErrorHistoryForTests()
@@ -56,6 +60,33 @@ describe('DiagnosticsSettingsSection', () => {
     expect(preview).toContain('Category: window-error')
     fireEvent.click(screen.getByTestId(`diagnostics-select-${id}`))
     expect(screen.queryByTestId('diagnostics-report')).not.toBeInTheDocument()
+  })
+
+  it('labels the expandable rows and blocks for assistive tech', () => {
+    recordDashboardError({ category: 'window-error', error: propError('dimensions') })
+    render(<DiagnosticsSettingsSection />)
+    const id = readErrorHistory()[0]!.id
+    const btn = screen.getByTestId(`diagnostics-select-${id}`)
+    expect(btn.getAttribute('aria-controls')).toBe(`diagnostics-detail-${id}`)
+    fireEvent.click(btn)
+    expect(document.getElementById(`diagnostics-detail-${id}`)).not.toBeNull()
+    expect(screen.getByRole('heading', { name: 'Stack' })).toBeInTheDocument()
+    expect(screen.getByTestId('diagnostics-stack').getAttribute('aria-label')).toBeTruthy()
+    expect(screen.getByTestId('diagnostics-report').getAttribute('aria-label')).toBeTruthy()
+  })
+
+  it('expands only one row when two errors collide on the same hash', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'))
+    recordDashboardError({ category: 'window-error', error: collidingError('ludibaba') })
+    recordDashboardError({ category: 'window-error', error: collidingError('sadobaba') })
+    vi.useRealTimers()
+    render(<DiagnosticsSettingsSection />)
+    const rows = screen.getByTestId('diagnostics-list').querySelectorAll('li')
+    expect(rows).toHaveLength(2)
+    const id = readErrorHistory()[0]!.id
+    fireEvent.click(screen.getByTestId(`diagnostics-select-${id}`))
+    expect(screen.getAllByTestId('diagnostics-report')).toHaveLength(1)
   })
 
   it('Copy report copies exactly the preview text', async () => {

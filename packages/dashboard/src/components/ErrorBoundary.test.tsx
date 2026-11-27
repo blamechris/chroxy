@@ -92,6 +92,43 @@ describe('ErrorBoundary', () => {
     spy.mockRestore()
   })
 
+  it('copies exactly the preview captured before the click, even if the Error changes afterwards', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    writeTextMock.mockResolvedValue(true)
+    const thrown = new TypeError("Cannot read properties of undefined (reading 'dimensions')")
+    function Thrower(): never {
+      throw thrown
+    }
+    render(
+      <ErrorBoundary>
+        <Thrower />
+      </ErrorBoundary>,
+    )
+    const before = screen.getByTestId('error-boundary-report').textContent!
+    expect(before).toContain("Message: Cannot read properties of undefined (reading 'dimensions')")
+    // The error mutates between render and click: the copy must not follow it.
+    thrown.message = 'PRIVATE changed after render'
+    thrown.name = 'RangeError'
+    fireEvent.click(screen.getByTestId('error-boundary-copy'))
+    await waitFor(() => expect(writeTextMock).toHaveBeenCalled())
+    expect(writeTextMock.mock.calls[0]![0]).toBe(before)
+    expect(screen.getByTestId('error-boundary-report').textContent).toBe(before)
+    spy.mockRestore()
+  })
+
+  it('shows the preview open by default, with a 44px summary', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    )
+    const details = screen.getByTestId('error-boundary-report').closest('details')!
+    expect(details.open).toBe(true)
+    expect(details.querySelector('summary')!.style.minHeight).toBe('44px')
+    spy.mockRestore()
+  })
+
   it('shows no raw secret from a thrown message in the detail or the copy', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     writeTextMock.mockResolvedValue(true)

@@ -79,6 +79,7 @@ export function DiagnosticsSettingsSection() {
                     type="button"
                     className="diagnostics-entry-button"
                     aria-expanded={open}
+                    aria-controls={`diagnostics-detail-${e.id}`}
                     onClick={() => select(e.id)}
                     data-testid={`diagnostics-select-${e.id}`}
                   >
@@ -98,15 +99,15 @@ export function DiagnosticsSettingsSection() {
                     </span>
                   </button>
                   {open && (
-                    <div className="diagnostics-detail">
-                      <p className="settings-hint">Stack</p>
-                      <pre className="diagnostics-pre" data-testid="diagnostics-stack">
+                    <div className="diagnostics-detail" id={`diagnostics-detail-${e.id}`}>
+                      <h5 className="diagnostics-subheading">Stack</h5>
+                      <pre className="diagnostics-pre" data-testid="diagnostics-stack" aria-label="Stack frames">
                         {e.stack.length > 0 ? e.stack.join('\n') : '(none)'}
                       </pre>
                       <p className="settings-hint">
                         This is exactly what Copy report copies. Review it first.
                       </p>
-                      <pre className="diagnostics-pre" data-testid="diagnostics-report">{report}</pre>
+                      <pre className="diagnostics-pre" data-testid="diagnostics-report" aria-label="Report preview, exactly what Copy report copies">{report}</pre>
                       <div className="settings-field">
                         <button
                           type="button"

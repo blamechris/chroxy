@@ -15,6 +15,12 @@
  * the classifier and normalisers again, so a poisoned localStorage value cannot reach the UI
  * or the clipboard raw.
  *
+ * Asset provenance: a script URL joins the trusted set only if it is same-origin http(s), a
+ * direct child of the directory this very module was served from (the dashboard's own
+ * `assets/` directory), AND has Vite's hashed-asset name `<stem>-<8 hash chars>.js|.mjs`.
+ * Resource-timing entries must also have been initiated by a script or a (module)preload link,
+ * so an image or fetch that merely ends in `.js` is never trusted.
+ *
  * Failure policy: nothing here throws to the caller and nothing logs (a `console.error` from
  * the recorder would be a feedback loop with the error listeners). When storage throws or
  * holds corrupt data, an in-memory ring with the same bounds serves for the page lifetime.
@@ -61,28 +67,72 @@ const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const ID_RE = /^[a-z0-9]{1,12}$/
 const MAX_STORED_LINES = 60
+const MAX_STORED_LINE_CHARS = 256
+/** A stored value larger than this is not ours (20 entries of normalised frames are a few KB). */
+const MAX_STORED_BYTES = 64 * 1024
+/** Storm control: at most this many recorded events per rolling second. */
+const MAX_EVENTS_PER_SECOND = 10
 
 // ---------------------------------------------------------------------------
 // Trusted asset set (never persisted)
 // ---------------------------------------------------------------------------
 
-function basenameIfSameOriginScript(raw: unknown, origin: string): string | null {
+/**
+ * Vite 7's default `build.rollupOptions.output.chunkFileNames/entryFileNames` is
+ * `assets/[name]-[hash].js`, with an 8-character base64url hash (verified against
+ * `vite build` output of this package: `index-Dvf46w8T.js`, `cose-bilkent-JH36ORCC-ywTmjP-W.js`;
+ * `packages/dashboard/vite.config.ts` does not override the file names). A stem may itself
+ * contain `-` and `.`.
+ */
+const HASHED_ASSET_RE = /^[A-Za-z0-9_.-]{1,72}-[A-Za-z0-9_-]{8}\.m?js$/
+const MAX_RESOURCE_ENTRIES = 200
+
+let moduleUrl: string | null = null
+try {
+  moduleUrl = import.meta.url
+} catch {
+  moduleUrl = null
+}
+
+/** Test seam: pretend this module was served from `url` (jsdom serves it from file://). */
+export function __setModuleUrlForTests(url: string | null): void {
+  moduleUrl = url
+}
+
+/** The directory (with trailing slash) this module was served from, if it is same-origin http(s). */
+function ownAssetDir(origin: string): string | null {
+  if (!moduleUrl) return null
+  try {
+    const u = new URL(moduleUrl)
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.origin !== origin) return null
+    const dir = u.pathname.slice(0, u.pathname.lastIndexOf('/') + 1)
+    return dir.endsWith('/assets/') ? dir : null
+  } catch {
+    return null
+  }
+}
+
+function admittedBasename(raw: unknown, origin: string, dir: string): string | null {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > 2048) return null
   try {
     const u = new URL(raw, origin)
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
     if (u.origin !== origin) return null
-    const seg = u.pathname.split('/').pop() ?? ''
-    return seg.length > 0 ? seg : null
+    if (!u.pathname.startsWith(dir)) return null
+    const seg = u.pathname.slice(dir.length)
+    if (seg.includes('/') || !HASHED_ASSET_RE.test(seg)) return null
+    return seg
   } catch {
     return null
   }
 }
 
 /**
- * The dashboard's own loaded script basenames: `document.scripts`, same-origin `.js`/`.mjs`
- * resource-timing entries (dynamic-import chunks are not in `document.scripts`), and this
- * module's own bundle. Same-origin http(s) only. Computed on demand, never stored.
+ * The dashboard's own loaded script basenames. Admission needs ALL of: same-origin http(s);
+ * a direct child of this module's own `assets/` directory; Vite's hashed-asset name; and, for
+ * resource-timing entries, a script or link (modulepreload) initiator. Computed on demand,
+ * never stored. Outside a built bundle (dev server, tests) the set is empty, which makes
+ * every frame location `<unknown>`.
  */
 export function currentAssetBasenames(): Set<string> {
   const out = new Set<string>()
@@ -90,8 +140,10 @@ export function currentAssetBasenames(): Set<string> {
     if (typeof location === 'undefined' || typeof document === 'undefined') return out
     const origin = location.origin
     if (!origin || origin === 'null') return out
+    const dir = ownAssetDir(origin)
+    if (dir === null) return out
     const add = (raw: unknown): void => {
-      const b = basenameIfSameOriginScript(raw, origin)
+      const b = admittedBasename(raw, origin, dir)
       if (b) out.add(b)
     }
     try {
@@ -99,15 +151,16 @@ export function currentAssetBasenames(): Set<string> {
     } catch { /* keep what we have */ }
     try {
       if (typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function') {
-        for (const e of performance.getEntriesByType('resource')) {
-          const name = (e as { name?: unknown }).name
-          if (typeof name === 'string' && /\.m?js(?:[?#].*)?$/.test(name)) add(name)
+        const entries = performance.getEntriesByType('resource')
+        const n = Math.min(entries.length, MAX_RESOURCE_ENTRIES)
+        for (let i = 0; i < n; i++) {
+          const e = entries[i] as { name?: unknown; initiatorType?: unknown }
+          if (e.initiatorType !== 'script' && e.initiatorType !== 'link') continue
+          add(e.name)
         }
       }
     } catch { /* keep what we have */ }
-    try {
-      add(import.meta.url)
-    } catch { /* not an ES module context */ }
+    add(moduleUrl)
   } catch {
     // an empty set is fail-closed: every frame location becomes <unknown>
   }
@@ -156,22 +209,33 @@ function isoOrNull(v: unknown): string | null {
   return v
 }
 
+/** Set by revalidate when it clamps a future time; readAll then writes the clamped list back. */
+let clampedOnRead = false
+
 /**
  * Rebuild an entry from untrusted input. Returns null when it is not an object or has no
  * valid time. Message, stack and component stack go back through the classifier.
  */
-function revalidate(raw: unknown, assets: AssetBasenames): ErrorHistoryEntry | null {
+function revalidate(raw: unknown, assets: AssetBasenames, nowMs: number): ErrorHistoryEntry | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const r = raw as Record<string, unknown>
-  const time = isoOrNull(r.time)
-  if (time === null) return null
-  const firstTime = isoOrNull(r.firstTime) ?? time
+  const parsedTime = isoOrNull(r.time)
+  if (parsedTime === null) return null
+  // A future-dated time (clock change, poisoned value) is clamped to now so it ages out.
+  const clamp = (t: string): string => {
+    if (Date.parse(t) <= nowMs) return t
+    clampedOnRead = true // the clamped value must be written back, or it would stay in the future
+    return new Date(nowMs).toISOString()
+  }
+  const time = clamp(parsedTime)
+  const firstTime = clamp(isoOrNull(r.firstTime) ?? time)
   const category = typeof r.category === 'string' && CATEGORIES.includes(r.category) ? (r.category as ErrorCategory) : null
   if (category === null) return null
   const platform: ErrorPlatform = r.platform === 'tauri' ? 'tauri' : 'web'
   const cls = classifyErrorMessage(r.name, r.text)
   const lines = (v: unknown): string => (Array.isArray(v)
-    ? v.slice(0, MAX_STORED_LINES).filter((x): x is string => typeof x === 'string').join('\n')
+    ? v.slice(0, MAX_STORED_LINES).filter((x): x is string => typeof x === 'string')
+      .map(x => (x.length > MAX_STORED_LINE_CHARS ? x.slice(0, MAX_STORED_LINE_CHARS) : x)).join('\n')
     : '')
   const stack = normalizeStack(lines(r.stack), { assetBasenames: assets })
   const componentStack = normalizeComponentStack(lines(r.componentStack))
@@ -211,8 +275,17 @@ function buildEntry(src: ErrorSource, assets: AssetBasenames, nowMs: number): Er
 // ---------------------------------------------------------------------------
 // Storage (with an in-memory fallback ring)
 // ---------------------------------------------------------------------------
+//
+// Ring semantics. `memory` mirrors the last list this page wrote or read. It is AUTHORITATIVE
+// only when storage is unavailable (getItem throws), or while `dirty`: a write failed, so the
+// persisted value is older than the ring. A later successful write, or a clear, ends dirty.
+// When storage works and the key is absent (another tab cleared it), the history is empty and
+// the ring is dropped; it is never resurrected.
 
 let memory: ErrorHistoryEntry[] = []
+let dirty = false
+let recording = false
+let recent: number[] = []
 const listeners = new Set<() => void>()
 
 function notify(): void {
@@ -222,10 +295,30 @@ function notify(): void {
 }
 
 function prune(list: ErrorHistoryEntry[], nowMs: number): ErrorHistoryEntry[] {
-  return list
+  const seen = new Set<string>()
+  const out: ErrorHistoryEntry[] = []
+  for (const e of list
     .filter(e => nowMs - Date.parse(e.time) <= HISTORY_MAX_AGE_MS)
-    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time))
-    .slice(0, MAX_HISTORY_ENTRIES)
+    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time))) {
+    if (seen.has(e.id)) continue // a duplicate id would expand two rows at once
+    seen.add(e.id)
+    out.push(e)
+  }
+  return out.slice(0, MAX_HISTORY_ENTRIES)
+}
+
+function revalidateAll(list: unknown[], assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
+  return list.map(e => revalidate(e, assets, nowMs)).filter((e): e is ErrorHistoryEntry => e !== null)
+}
+
+function persist(list: ErrorHistoryEntry[]): boolean {
+  try {
+    if (list.length === 0) localStorage.removeItem(ERROR_HISTORY_KEY)
+    else localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify(list))
+    return true
+  } catch {
+    return false
+  }
 }
 
 function readAll(assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
@@ -233,36 +326,35 @@ function readAll(assets: AssetBasenames, nowMs: number): ErrorHistoryEntry[] {
   try {
     text = localStorage.getItem(ERROR_HISTORY_KEY)
   } catch {
-    return prune(memory.map(e => revalidate(e, assets)).filter((e): e is ErrorHistoryEntry => e !== null), nowMs)
+    // storage unavailable: the ring is all there is
+    return prune(revalidateAll(memory, assets, nowMs), nowMs)
   }
+  if (dirty) return prune(revalidateAll(memory, assets, nowMs), nowMs)
   if (text === null) {
-    // Storage works and is empty. Anything in memory came from a failed write; keep serving it.
-    return prune(memory.map(e => revalidate(e, assets)).filter((e): e is ErrorHistoryEntry => e !== null), nowMs)
+    memory = []
+    return []
   }
   let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    parsed = undefined
+  if (text.length <= MAX_STORED_BYTES) {
+    try { parsed = JSON.parse(text) } catch { parsed = undefined }
   }
   if (!Array.isArray(parsed)) {
-    // Corrupt or an unexpected shape: reset to empty.
+    // oversized, corrupt or an unexpected shape: reset to empty
     memory = []
     try { localStorage.removeItem(ERROR_HISTORY_KEY) } catch { /* ignore */ }
     return []
   }
-  const clean = parsed.slice(0, MAX_HISTORY_ENTRIES * 3)
-    .map(e => revalidate(e, assets)).filter((e): e is ErrorHistoryEntry => e !== null)
-  return prune(clean, nowMs)
+  clampedOnRead = false
+  const clean = prune(revalidateAll(parsed.slice(0, MAX_HISTORY_ENTRIES * 3), assets, nowMs), nowMs)
+  memory = clean
+  // Expiry deletes, it does not just hide: write back whenever anything was dropped.
+  if (clean.length !== parsed.length || clampedOnRead) persist(clean)
+  return clean
 }
 
 function writeAll(list: ErrorHistoryEntry[]): void {
   memory = list
-  try {
-    localStorage.setItem(ERROR_HISTORY_KEY, JSON.stringify(list))
-  } catch {
-    // quota, private mode, storage disabled: the in-memory ring already holds it
-  }
+  dirty = !persist(list)
 }
 
 /** Recent errors, newest first, every field re-validated. Never throws. */
@@ -274,10 +366,25 @@ export function readErrorHistory(assets?: AssetBasenames, nowMs: number = Date.n
   }
 }
 
-/** Record one error. Never throws and never logs. */
+/** Drop expired entries from storage now (called once at install). */
+export function pruneErrorHistory(): void {
+  readErrorHistory()
+}
+
+function overStormBudget(nowMs: number): boolean {
+  recent = recent.filter(t => nowMs - t < 1000 && t <= nowMs)
+  if (recent.length >= MAX_EVENTS_PER_SECOND) return true
+  recent.push(nowMs)
+  return false
+}
+
+/** Record one error. Never throws, never logs, and drops nested or storm-rate calls. */
 export function recordDashboardError(src: ErrorSource): void {
+  if (recording) return
+  recording = true
   try {
     const nowMs = Date.now()
+    if (overStormBudget(nowMs)) return
     const assets = currentAssetBasenames()
     const entry = buildEntry(src, assets, nowMs)
     if (entry.template === 'resize-observer-loop') return // browser noise, not a defect
@@ -294,19 +401,27 @@ export function recordDashboardError(src: ErrorSource): void {
       }
       next = [bumped, ...list.slice(0, i), ...list.slice(i + 1)]
     } else {
+      // A 32-bit hash can collide: re-hash until the id is unique among retained entries.
+      let n = 0
+      while (list.some(e => e.id === entry.id) && n < 50) entry.id = shortId(`${entry.id}#${++n}`)
       next = [entry, ...list]
     }
     writeAll(prune(next, nowMs))
     notify()
   } catch {
     // the recorder must never be the second failure
+  } finally {
+    recording = false
   }
 }
 
 /** Remove the stored history and the in-memory ring. */
 export function clearErrorHistory(): void {
   memory = []
-  try { localStorage.removeItem(ERROR_HISTORY_KEY) } catch { /* ignore */ }
+  let removed = true
+  try { localStorage.removeItem(ERROR_HISTORY_KEY) } catch { removed = false }
+  // If storage could not be cleared, the (empty) ring stays authoritative.
+  dirty = !removed
   notify()
 }
 
@@ -314,6 +429,17 @@ export function clearErrorHistory(): void {
 export function subscribeErrorHistory(listener: () => void): () => void {
   listeners.add(listener)
   return () => { listeners.delete(listener) }
+}
+
+// Another tab wrote or cleared the key: a mirror ring is stale, and open views must refresh.
+if (typeof window !== 'undefined') {
+  try {
+    window.addEventListener('storage', (ev: StorageEvent) => {
+      if (ev.key !== null && ev.key !== ERROR_HISTORY_KEY) return
+      if (!dirty) memory = []
+      notify()
+    })
+  } catch { /* no window events: the view just refreshes on its own renders */ }
 }
 
 /** The exact Copy-report text for a stored entry (re-validated again by the formatter). */
@@ -338,5 +464,8 @@ export function formatLiveErrorReport(src: ErrorSource, timeMs: number = Date.no
 /** Test seam: drop the in-memory ring and listeners. */
 export function __resetErrorHistoryForTests(): void {
   memory = []
+  dirty = false
+  recording = false
+  recent = []
   listeners.clear()
 }
