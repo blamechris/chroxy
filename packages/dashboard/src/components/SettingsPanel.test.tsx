@@ -1152,6 +1152,13 @@ describe('SettingsPanel', () => {
     })
   })
 
+  describe('Diagnostics section (#9235)', () => {
+    it('is part of Settings (the section itself is covered in DiagnosticsSettingsSection.test.tsx)', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('diagnostics-section')).toBeInTheDocument()
+    })
+  })
+
   describe('BYOK credentials (#4052)', () => {
     it('renders Missing status when no key configured', () => {
       setMockState({ byokCredentialsStatus: { status: 'missing', source: 'none', reason: 'not configured' } })
