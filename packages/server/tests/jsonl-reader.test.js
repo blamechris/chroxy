@@ -287,18 +287,97 @@ describe('readConversationHistoryWithMetaAsync — parsed message shapes (#7520:
       }
     })
 
-    it('skips user entries without array content', async () => {
+    it('skips user entries with no content', async () => {
       setup()
       try {
         const filePath = writeJsonl('test.jsonl', [
-          { type: 'user', uuid: 'u4', message: { content: 'just a string' } },
           { type: 'user', uuid: 'u5', message: {} },
+          { type: 'user', uuid: 'u6', message: { content: '   ' } },
+          { type: 'user', uuid: 'u7', message: { content: 42 } },
         ])
         const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
         assert.equal(result.length, 0)
       } finally {
         teardown()
       }
+    })
+
+    // #8951: claude-tui writes the prompt as a plain string, not a block array.
+    describe('string-content user entries (claude-tui, #8951)', () => {
+      const tui = (uuid, ts, content, extra = {}) => ({
+        type: 'user', uuid, timestamp: ts, message: { role: 'user', content }, ...extra,
+      })
+      const reply = (uuid, ts, text) => ({
+        type: 'assistant', uuid, timestamp: ts,
+        message: { role: 'assistant', content: [{ type: 'text', text }] },
+      })
+
+      it('replays a claude-tui prompt and its reply, in order', async () => {
+        setup()
+        try {
+          const filePath = writeJsonl('tui.jsonl', [
+            tui('u1', '2026-01-01T00:00:00Z', 'ping'),
+            reply('a1', '2026-01-01T00:00:01Z', 'pong'),
+            tui('u2', '2026-01-01T00:00:02Z', 'ping again'),
+            reply('a2', '2026-01-01T00:00:03Z', 'pong again'),
+          ])
+          const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
+          assert.deepEqual(result.map((m) => [m.type, m.content, m.messageId]), [
+            ['user_input', 'ping', 'u1'],
+            ['response', 'pong', 'a1'],
+            ['user_input', 'ping again', 'u2'],
+            ['response', 'pong again', 'a2'],
+          ])
+        } finally {
+          teardown()
+        }
+      })
+
+      it('still replays array-content prompts and hides tool_result-only entries', async () => {
+        setup()
+        try {
+          const filePath = writeJsonl('sdk.jsonl', [
+            tui('u1', '2026-01-01T00:00:00Z', [{ type: 'text', text: 'sdk prompt' }]),
+            tui('u2', '2026-01-01T00:00:01Z', [{ type: 'tool_result', tool_use_id: 't1', content: 'out' }]),
+            tui('u3', '2026-01-01T00:00:02Z', 'tui prompt'),
+            // a tool_result entry that also carries text is still tool flow
+            tui('u4', '2026-01-01T00:00:03Z', [
+              { type: 'tool_result', tool_use_id: 't2', content: 'out' },
+              { type: 'text', text: 'text beside a tool_result' },
+            ]),
+          ])
+          const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
+          assert.deepEqual(result.map((m) => m.content), ['sdk prompt', 'tui prompt'])
+        } finally {
+          teardown()
+        }
+      })
+
+      it('hides string entries the harness wrote rather than a person', async () => {
+        setup()
+        try {
+          const noise = [
+            tui('n1', '2026-01-01T00:00:00Z', 'Caveat: generated while running local commands', { isMeta: true }),
+            tui('n2', '2026-01-01T00:00:01Z', 'This session is being continued from a previous conversation', { isCompactSummary: true }),
+            tui('n3', '2026-01-01T00:00:02Z', '<command-name>/login</command-name>\n<command-message>login</command-message>'),
+            tui('n4', '2026-01-01T00:00:03Z', '<local-command-stdout>Login successful</local-command-stdout>'),
+            tui('n5', '2026-01-01T00:00:04Z', '<local-command-stderr>oops</local-command-stderr>'),
+            tui('n6', '2026-01-01T00:00:05Z', '<local-command-caveat>Caveat: DO NOT respond</local-command-caveat>'),
+            tui('n7', '2026-01-01T00:00:06Z', '<system-reminder>be brief</system-reminder>'),
+            tui('n8', '2026-01-01T00:00:07Z', '<task-notification>\n<task-id>x</task-id>\n</task-notification>'),
+            tui('n9', '2026-01-01T00:00:08Z', '<ci-monitor-event kind="x">done</ci-monitor-event>'),
+            tui('n10', '2026-01-01T00:00:09Z', '\n  <system-reminder>leading whitespace</system-reminder>'),
+          ]
+          const filePath = writeJsonl('noise.jsonl', [
+            ...noise,
+            tui('u1', '2026-01-01T00:00:10Z', 'a real prompt that mentions <system-reminder> mid-text'),
+          ])
+          const result = (await readConversationHistoryWithMetaAsync(filePath)).messages
+          assert.deepEqual(result.map((m) => m.messageId), ['u1'])
+        } finally {
+          teardown()
+        }
+      })
     })
   })
 
