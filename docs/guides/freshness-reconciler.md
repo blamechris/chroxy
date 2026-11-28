@@ -144,9 +144,10 @@ places).
 - Bounded: at most `maxTailBytes` (4 MiB by default) are read, from the end. A
   line the window starts inside is dropped; an unterminated last line (a write
   in flight) is ignored; a bad line before it is `error` (`corrupt`). A block
-  further back than the window is not seen, so a long session whose last block
-  is older than the window reads as no status; raise the limit if that
-  matters. A window with no complete line is `error` (`tail_too_small`).
+  further back than the window is not seen. A window that starts mid-file and
+  holds no block is `error` (`window_exhausted`), never no status: a large tool
+  result can push a recent block out of it, so raise the limit if that
+  recurs. `no_report` means the whole file was read and holds no block. A window with no complete line is `error` (`tail_too_small`).
 - Authored means a top-level assistant entry. User entries, tool results and
   subagent (`isSidechain`) entries are skipped, so a quoted block is not
   read as the session's own. The block is parsed by the daemon's

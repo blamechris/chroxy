@@ -141,9 +141,9 @@ proves(
   (M) => {
     const cap = 2048
     const st = store()
-    // a block only at the top is outside the window
+    // a block only at the top is outside the window: that is not "never reported"
     st.write('old', jsonl([assistant(block({ next: '🟢 RUNNING — OLD-BLOCK-AT-TOP (agent)' }), T0 - 3 * 60 * MIN), ...Array.from({ length: 80 }, (_, i) => filler(i))]))
-    assert.deepEqual(readOf(M, st, 'old', { maxTailBytes: cap }), { outcome: 'no_report' })
+    assert.deepEqual(readOf(M, st, 'old', { maxTailBytes: cap }), { outcome: 'error', error_code: 'window_exhausted' })
     // a block inside the window is found, wherever the window starts. Pad until it starts inside a line.
     for (let pad = 0; ; pad++) {
       const text = jsonl([...Array.from({ length: 60 }, (_, i) => filler(i)), assistant(block({ next: '🟢 RUNNING — NEW-BLOCK-AT-END (agent)' }), T0 - 5 * MIN)]) + ' '.repeat(pad)
@@ -166,6 +166,51 @@ proves(
     'the whole file is read': [edit(A, 'const start = size > maxTailBytes ? size - maxTailBytes - 1 : 0', 'const start = 0')],
     'a line cut by the window is parsed': [edit(A, 'from = buf[0] === NEWLINE ? 1 : buf.indexOf(NEWLINE) + 1', 'from = 0')],
     'a window inside one line is read as empty': [edit(A, "if (from === 0 || from >= off) return fail('tail_too_small')", '')],
+  },
+)
+
+proves(
+  'window exhausted: a window that starts mid-file and holds no block is an error, a window over the whole file is no report',
+  (M) => {
+    const cap = 2048
+    const st = store()
+    const old = assistant(block({ next: '🟢 RUNNING — BLOCK-BEFORE-HUGE-RESULT (agent)' }), T0 - 3 * 60 * MIN)
+    // the only block sits before a tool result larger than the window
+    st.write('pushed', jsonl([old, toolResult('z'.repeat(cap - 450), T0 - 2 * MIN)]))
+    assert.deepEqual(readOf(M, st, 'pushed', { maxTailBytes: cap }), { outcome: 'error', error_code: 'window_exhausted' })
+    // the same transcript read whole: the block is there
+    assert.equal(readOf(M, st, 'pushed', { maxTailBytes: 1024 * 1024 }).outcome, 'ok')
+    // no block anywhere, window covers the whole file: no report
+    st.write('small', jsonl([user('hi', T0 - MIN), assistant('hello', T0 - MIN)]))
+    assert.deepEqual(readOf(M, st, 'small', { maxTailBytes: cap }), { outcome: 'no_report' })
+    // size == cap + 1 is still read from byte 0 (no earlier content exists)
+    const first = jsonl([user('q', T0 - MIN)])
+    const second0 = jsonl([user('', T0 - MIN)])
+    const second = jsonl([user('r'.repeat(cap + 1 - Buffer.byteLength(first) - Buffer.byteLength(second0)), T0 - MIN)])
+    assert.equal(Buffer.byteLength(first + second), cap + 1)
+    st.write('edge_whole', first + second)
+    assert.deepEqual(readOf(M, st, 'edge_whole', { maxTailBytes: cap }), { outcome: 'no_report' })
+    // one byte more and the window starts at byte 1, inside the first line: mid-file
+    st.write('edge_part', ' ' + first + second)
+    assert.deepEqual(readOf(M, st, 'edge_part', { maxTailBytes: cap }), { outcome: 'error', error_code: 'window_exhausted' })
+    // a block inside a window that starts mid-file is returned
+    st.write('found', jsonl([old, toolResult('z'.repeat(cap * 3), T0 - 2 * MIN), assistant(block({ next: '🟢 RUNNING — BLOCK-IN-WINDOW (agent)' }), T0 - MIN)]))
+    const got = readOf(M, st, 'found', { maxTailBytes: cap })
+    assert.equal(got.outcome, 'ok')
+    assert.match(got.report.next, /BLOCK-IN-WINDOW/)
+    // the window starts exactly on a line boundary (the byte before it is a newline): earlier lines are still unread
+    const base = Buffer.byteLength(jsonl([user('', T0 - MIN)]))
+    const tailLine = jsonl([user('t'.repeat(cap - base), T0 - MIN)])
+    assert.equal(Buffer.byteLength(tailLine), cap)
+    const boundary = jsonl([old]) + tailLine
+    const bb = Buffer.from(boundary)
+    assert.equal(bb[bb.length - cap - 1], 10, 'byte before the window is a newline')
+    st.write('boundary', boundary)
+    assert.deepEqual(readOf(M, st, 'boundary', { maxTailBytes: cap }), { outcome: 'error', error_code: 'window_exhausted' })
+  },
+  {
+    'a mid-file window with no block is no report': [edit(A, "if (!last) return start > 0 ? fail('window_exhausted') : { outcome: 'no_report' }", "if (!last) return { outcome: 'no_report' }")],
+    'a whole-file read is an error': [edit(A, "if (!last) return start > 0 ? fail('window_exhausted') : { outcome: 'no_report' }", "if (!last) return fail('window_exhausted')")],
   },
 )
 
