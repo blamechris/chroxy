@@ -73,6 +73,7 @@
  * prefix shrinks underneath it.
  */
 
+import { isCodexQuestionToolUseId } from '@chroxy/protocol'
 import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 import { clearPendingCreateFailures } from './handlers/session-lifecycle'
 import { isResponseStreamBubbleId } from './replay-dedup'
@@ -1371,9 +1372,35 @@ export function reconcileReplayEnd(
   // #8960 — an in-flight response is not in server history, so the replay never
   // re-delivers it and the cut above would discard it with the prefix.
   const discardedPrefix = messages.slice(0, cut)
-  const freshened = freshenInFlightReplies(discardedPrefix, ordered, live, inFlightResponseIds)
+  const freshened = freshenInFlightReplies(discardedPrefix, carryNativeQuestionAnswers(discardedPrefix, ordered), live, inFlightResponseIds)
   const carried = carriedLiveMessages(discardedPrefix, freshened, live, inFlightResponseIds)
   return { swappedMessages: carried.length === 0 ? freshened : [...freshened, ...carried] }
+}
+
+/** Carry human replies made on still-visible native cards into the kept replay tail. */
+function carryNativeQuestionAnswers(prefix: readonly unknown[], kept: readonly unknown[]): unknown[] {
+  type Question = {
+    type?: string; requestId?: string; toolUseId?: string;
+    answered?: string; answeredAt?: number; answeredAnswers?: unknown
+  }
+  const answers = new Map<string, Question>()
+  for (const raw of prefix) {
+    const question = raw as Question | null
+    if (question?.type === 'prompt' && !question.requestId && isCodexQuestionToolUseId(question.toolUseId) &&
+        typeof question.answered === 'string' && typeof question.answeredAt === 'number') {
+      const previous = answers.get(question.toolUseId!)
+      if (!previous || previous.answeredAt! <= question.answeredAt) answers.set(question.toolUseId!, question)
+    }
+  }
+  if (answers.size === 0) return kept as unknown[]
+  return kept.map((raw) => {
+    const question = raw as Question | null
+    const answer = question?.type === 'prompt' && !question.requestId && question.toolUseId
+      ? answers.get(question.toolUseId) : undefined
+    // A reply already present in the kept tail is the newer local record.
+    if (!answer || question?.answeredAt !== undefined) return raw
+    return { ...question, answered: answer.answered, answeredAt: answer.answeredAt, answeredAnswers: answer.answeredAnswers }
+  })
 }
 
 /**
@@ -1590,17 +1617,21 @@ export const QUESTION_SUPERSEDED_PLACEHOLDER = '(superseded)'
  */
 export const QUESTION_NOT_DELIVERED_PLACEHOLDER = '(not delivered)'
 
+/** The native provider is no longer waiting for input on this question. */
+export const QUESTION_RESOLVED_PLACEHOLDER = '(no longer pending)'
+
 /**
  * Is `answered` one of the non-decision tokens a QUESTION can end in without
  * anyone having answered it (as opposed to the replay sweep's '(resolved)', which
- * means "answered or expired, unknown which")? A live `user_question` re-delivery
- * clears these, because it proves the question is pending again.
+ * means "answered or expired, unknown which")? A timestamped answer may contain
+ * the same text verbatim.
  */
-export function isQuestionNoAnswerToken(answered: unknown): boolean {
-  return (
+export function isQuestionNoAnswerToken(answered: unknown, answeredAt?: number): boolean {
+  return answeredAt === undefined && (
     answered === QUESTION_INTERRUPTED_PLACEHOLDER ||
     answered === QUESTION_SUPERSEDED_PLACEHOLDER ||
-    answered === QUESTION_NOT_DELIVERED_PLACEHOLDER
+    answered === QUESTION_NOT_DELIVERED_PLACEHOLDER ||
+    answered === QUESTION_RESOLVED_PLACEHOLDER
   )
 }
 
@@ -1610,6 +1641,7 @@ interface SweepablePrompt {
   type: string
   answered?: unknown
   requestId?: unknown
+  toolUseId?: unknown
 }
 
 /**
@@ -1762,7 +1794,7 @@ export function wasPromptLiveDuringReplay(
  * when there is nothing to stamp, so the caller can return a no-op patch and
  * avoid a re-render.
  *
- * Three exclusions, each for its own reason:
+ * Exclusions:
  *
  *   - `m.answered` already set — a real decision, or an earlier sweep.
  *   - `m.requestId` present (#7410/#7419) — only `permission_request` sets it,
@@ -1779,6 +1811,8 @@ export function wasPromptLiveDuringReplay(
  *     buffer and its ChatMessage sets neither `requestId` nor `expiresAt`, so
  *     shape alone cannot tell a live one from a replayed one; only the arriving
  *     frame could, and this is where that observation is kept.
+ *   - native Codex question ids: the replay-end pending snapshot determines
+ *     their status when available. An unavailable snapshot leaves them alone.
  *
  * Everything else — replayed prompts, and prompts that pre-date the window — is
  * stamped, which is the sweep's original premise.
@@ -1800,7 +1834,8 @@ export function sweepUnansweredPromptsAtReplayEnd<T extends SweepablePrompt>(
   if (!sessionId) return null
   const live = ledgerFor(sessionId)
   const isStampable = (m: T): boolean =>
-    m.type === 'prompt' && !m.answered && !m.requestId && !(live?.has(m.id) === true)
+    m.type === 'prompt' && !m.answered && !m.requestId &&
+    !isCodexQuestionToolUseId(m.toolUseId) && !(live?.has(m.id) === true)
   if (!messages.some(isStampable)) return null
   return messages.map((m) =>
     isStampable(m) ? ({ ...m, answered: REPLAY_RESOLVED_PLACEHOLDER } as T) : m,

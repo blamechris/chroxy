@@ -674,6 +674,12 @@ export declare function buildPermissionRequestMessage(fields: {
     sessionId?: string;
     toolUseId?: string;
 }): ServerPermissionRequestMessage;
+export declare const ServerHistoryReplayEndSchema: z.ZodObject<{
+    type: z.ZodLiteral<"history_replay_end">;
+    sessionId: z.ZodString;
+    latestSeq: z.ZodOptional<z.ZodNumber>;
+    pendingQuestionToolUseIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>;
 export declare const ServerUserQuestionSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question">;
     toolUseId: z.ZodString;
@@ -682,6 +688,7 @@ export declare const ServerUserQuestionSchema: z.ZodObject<{
     historySeq: z.ZodOptional<z.ZodNumber>;
     interrupted: z.ZodOptional<z.ZodBoolean>;
     superseded: z.ZodOptional<z.ZodBoolean>;
+    resolved: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerAgentBusySchema: z.ZodObject<{
     type: z.ZodLiteral<"agent_busy">;

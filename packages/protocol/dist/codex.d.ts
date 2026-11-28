@@ -31,6 +31,11 @@ export declare const CODEX_DEFAULT_SANDBOX: CodexSandboxMode;
 /** The codex provider id — single-sourced so the clients gate the sandbox
  * control on exactly this string. */
 export declare const CODEX_PROVIDER = "codex";
+/** Namespace for Chroxy question IDs minted from native Codex input requests. */
+export declare const CODEX_QUESTION_ID_PREFIX = "ask-codex-";
+export declare function isCodexQuestionToolUseId(value: unknown): boolean;
+/** Text shown by a client for a native choice. Its wire value is still the label. */
+export declare function formatCodexQuestionOptionLabel(label: string, description?: string): string;
 /**
  * UI-facing metadata for the sandbox selector: a short label and a one-line
  * description per mode. Kept next to the canonical list so a new mode can't be

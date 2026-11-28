@@ -15,7 +15,7 @@ import { sendRawTransport, isPrincipalClient } from './principal-policy.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
-import { MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
+import { isCodexQuestionToolUseId, MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -340,6 +340,10 @@ export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
  */
 export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_superseded_v1'
 
+// Like superseded questions, closed native questions must not appear live on
+// older clients that do not recognize the replay verdict.
+export const CAPABILITY_HISTORY_QUESTION_RESOLVED = 'history_question_resolved_v1'
+
 /**
  * #9022: the client capability that says "the text an open stream has produced so far
  * may be replayed to me as an unnumbered `response` entry". A client build from before
@@ -439,6 +443,12 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client, isSessionBu
   if (
     entry && entry.type === 'user_question' && entry.superseded === true
     && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_SUPERSEDED) ?? false)
+  ) {
+    return
+  }
+  if (
+    entry && entry.type === 'user_question' && entry.resolved === true
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_RESOLVED) ?? false)
   ) {
     return
   }
@@ -1703,7 +1713,7 @@ export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, l
 
 /**
  * #7509 F7 -- read a list off a provider session for a replay follow-up, and turn
- * a provider that cannot answer into a LOGGED, empty result instead of a throw.
+ * a provider that cannot answer into a logged, unknown result instead of a throw.
  *
  * `getActiveAgents()` and `getPendingQuestions()` are defined on BaseSession, but
  * `validateProviderClass` (providers.js) only requires six prototype methods, so
@@ -1719,7 +1729,7 @@ export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, l
  * @param {object} session
  * @param {string} sessionId
  * @param {'getActiveAgents' | 'getPendingQuestions'} method
- * @returns {Array}
+ * @returns {Array|null}
  */
 function readProviderList(session, sessionId, method) {
   try {
@@ -1730,7 +1740,7 @@ function readProviderList(session, sessionId, method) {
     return list
   } catch (err) {
     log.error(`Replay follow-up ${method}() failed on session ${sessionId}: ${err?.message || err} -- skipping it, the replay still finishes`)
-    return []
+    return null
   }
 }
 
@@ -1774,7 +1784,7 @@ export function reseedActiveAgents(ctx, ws, sessionId) {
   // continuation as an uncaught exception that skips the follow-ups after it.
   const session = sessionManager?.getSession(sessionId)?.session
   if (!session) return
-  for (const agent of readProviderList(session, sessionId, 'getActiveAgents')) {
+  for (const agent of readProviderList(session, sessionId, 'getActiveAgents') ?? []) {
     send(ws, { type: 'agent_spawned', sessionId, ...agent })
   }
 }
@@ -1834,11 +1844,35 @@ export function reseedActiveAgents(ctx, ws, sessionId) {
  * @param {WebSocket} ws
  * @param {string} sessionId
  */
-export function resendPendingQuestions(ctx, ws, sessionId) {
-  const { sessionManager, send } = ctx
-  const session = sessionManager?.getSession(sessionId)?.session
-  if (!session) return
-  for (const { toolUseId, questions } of readProviderList(session, sessionId, 'getPendingQuestions')) {
+function readPendingQuestions(sessionManager, sessionId) {
+  const session = sessionManager?.getSession?.(sessionId)?.session
+  return session ? readProviderList(session, sessionId, 'getPendingQuestions') : null
+}
+
+// Undefined means the client did not opt in. Null means we tried and the
+// provider could not answer. Keep those cases distinct from a known empty list.
+export function captureReplayPendingQuestions(sessionManager, sessionId, client) {
+  if (client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_RESOLVED)) {
+    return readPendingQuestions(sessionManager, sessionId)
+  }
+}
+
+export function pendingQuestionReplayEndFields(pending) {
+  if (!pending) return {}
+  const ids = new Set()
+  for (const row of pending) {
+    const { toolUseId, questions } = row ?? {}
+    if (typeof toolUseId !== 'string' || toolUseId.trim().length === 0 || toolUseId.length > 256
+        || !Array.isArray(questions) || questions.length === 0
+        || questions.some(question => typeof question?.question !== 'string')) return {}
+    if (isCodexQuestionToolUseId(toolUseId)) ids.add(toolUseId)
+  }
+  return { pendingQuestionToolUseIds: [...ids] }
+}
+
+export function resendPendingQuestions(ctx, ws, sessionId, pending = readPendingQuestions(ctx.sessionManager, sessionId)) {
+  for (const row of pending ?? []) {
+    const { toolUseId, questions } = row ?? {}
     // An entry with no id is unanswerable: `handleUserQuestionResponse` routes
     // strictly by `toolUseId` and fails closed on one it cannot find. Skip it
     // rather than send a prompt whose answer can only be dropped -- and skip
@@ -1848,7 +1882,7 @@ export function resendPendingQuestions(ctx, ws, sessionId) {
       log.warn(`Skipping pending question with no toolUseId on session ${sessionId}`)
       continue
     }
-    send(ws, { type: 'user_question', sessionId, toolUseId, questions })
+    ctx.send(ws, { type: 'user_question', sessionId, toolUseId, questions })
   }
 }
 
@@ -1919,7 +1953,9 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const { sessionManager, send, clients } = ctx
   if (!sessionManager) return
   const history = sessionManager.getHistory(sessionId)
-  if (history.length === 0) {
+  const client = (clients && typeof clients.get === 'function' ? clients.get(ws) : null) ?? null
+  if (history.length === 0 && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_RESOLVED)
+      && sessionManager.getSession?.(sessionId)?.session)) {
     // #8328: no replay frames means the client does not rebuild this session's
     // messages, so nothing it holds is dropped here — but a client that never
     // received the live broadcast (it was not subscribed when the request was
@@ -1943,7 +1979,6 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // replay would re-send (and, with mismatched ids, duplicate) them. Forcing a
   // full rebuild on switch keeps the long-standing authoritative-replace
   // semantics and the atomic swap (#5555.4) hides the rebuild with no flash.
-  const client = (clients && typeof clients.get === 'function' ? clients.get(ws) : null) ?? null
   const lastSeq = opts.forceFull ? undefined : client?.historyCursors?.[sessionId]
 
   // `latestSeq` rides the start frame so the client can advance its cursor even
@@ -1954,7 +1989,12 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
     ? sessionManager.getLatestHistorySeq(sessionId)
     : 0
-  const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
+  // With no retained transcript this exchange only synchronizes live state.
+  // Replacing the transcript with an empty slice would discard held questions
+  // even when the provider cannot tell us whether they are still pending.
+  const { fullHistory, startOffset } = history.length === 0
+    ? { fullHistory: false, startOffset: 0 }
+    : resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
 
   send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory, latestSeq })
 
@@ -1975,8 +2015,9 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     // reconnecting client holds the re-sent question with no permission to gate
     // it, and can show and answer it before the permission lands: not a
     // millisecond race, a whole resend apart.
+    const pendingQuestions = captureReplayPendingQuestions(sessionManager, sessionId, client)
     try {
-      send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+      send(ws, { type: 'history_replay_end', sessionId, latestSeq, ...pendingQuestionReplayEndFields(pendingQuestions) })
       reseedActiveAgents(ctx, ws, sessionId)
     } finally {
       try {
@@ -1991,7 +2032,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
         // sweep has already run by the time this lands, which is the entire
         // reason a still-pending question survives the reconnect. In its own
         // `finally` so a failed permission re-send cannot lose the question.
-        resendPendingQuestions(ctx, ws, sessionId)
+        resendPendingQuestions(ctx, ws, sessionId, pendingQuestions)
       }
     }
   }

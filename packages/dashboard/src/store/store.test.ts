@@ -3173,6 +3173,35 @@ describe('sendUserQuestionResponse Other / freeform shape (#4901 shared-guard mi
 // stream/tool event. The fix mirrors sendInput by flipping isIdle:false and
 // stamping lastClientActivityAt on the active session before the wire send.
 describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
+  it.each([true, false])('leaves Codex turn state unchanged when a native answer is sent (was idle: %s)', async (isIdle) => {
+    const { useConnectionStore } = await import('./connection');
+    const initialState = useConnectionStore.getState();
+    const send = vi.fn();
+    const toolUseId = 'ask-codex-3aca052a-543c-40a4-942e-fdac6d788182';
+    useConnectionStore.setState({
+      socket: { readyState: 1, send } as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessions: [{
+        sessionId: 's1', name: 'Codex', provider: 'codex', cwd: '/tmp',
+        type: 'cli', hasTerminal: false, isBusy: !isIdle, model: null,
+        permissionMode: null, createdAt: 1, conversationId: null,
+      }],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), isIdle, lastClientActivityAt: null },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    try {
+      expect(useConnectionStore.getState().sendUserQuestionResponse('Option A', toolUseId)).toBe('sent');
+      expect(send).toHaveBeenCalledWith(JSON.stringify({ type: 'user_question_response', answer: 'Option A', toolUseId }));
+      expect(useConnectionStore.getState().sessionStates.s1).toMatchObject({ isIdle, lastClientActivityAt: null });
+    } finally {
+      useConnectionStore.setState(initialState);
+    }
+  });
+
   it('flips active session to running (isIdle:false) and bumps lastClientActivityAt', async () => {
     const { useConnectionStore } = await import('./connection');
 
@@ -3186,6 +3215,11 @@ describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
     useConnectionStore.setState({
       socket: mockSocket as unknown as WebSocket,
       activeSessionId: 's1',
+      sessions: [{
+        sessionId: 's1', name: 'SDK', provider: 'claude-sdk', cwd: '/tmp',
+        type: 'cli', hasTerminal: false, isBusy: false, model: null,
+        permissionMode: null, createdAt: 1, conversationId: null,
+      }],
       sessionStates: {
         s1: {
           ...createEmptySessionState(),
@@ -3207,6 +3241,7 @@ describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
     // Clean up so unrelated tests don't see stale active session state.
     useConnectionStore.setState({
       activeSessionId: null,
+      sessions: [],
       sessionStates: {},
     });
   });

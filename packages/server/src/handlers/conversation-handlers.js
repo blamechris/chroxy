@@ -15,7 +15,7 @@ import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscrib
 import { scopeConversationsToClient, boundConversationId } from '../conversation-scope.js'
 import { isBoundClient, markConversationFrame } from '../environments/authority.js'
 import { ReadLimitError, ReadCancelledError, admissionFor } from '../utils/read-limiter.js'
-import { sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
+import { captureReplayPendingQuestions, pendingQuestionReplayEndFields, sendChunkedWithBackpressure, sendHistoryEntry } from '../ws-history.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
@@ -643,7 +643,8 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       if (source === 'jsonl' && !busy) {
         send(ws, { type: 'agent_idle', sessionId: targetId })
       }
-      send(ws, { type: 'history_replay_end', sessionId: targetId, ...seqFrame })
+      const pendingQuestions = captureReplayPendingQuestions(sessionManager, targetId, client)
+      send(ws, { type: 'history_replay_end', sessionId: targetId, ...seqFrame, ...pendingQuestionReplayEndFields(pendingQuestions) })
       // #7340: same wipe, same repair — `request_full_history` targets a LIVE
       // session, so its confirmed-backgrounded subagents must be re-asserted
       // after the replay that cleared them.
@@ -668,7 +669,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       try {
         ctx.transport.resendPendingPermissions(ws, targetId)
       } finally {
-        ctx.transport.resendPendingQuestions(ws, targetId)
+        ctx.transport.resendPendingQuestions(ws, targetId, pendingQuestions)
       }
     },
   })

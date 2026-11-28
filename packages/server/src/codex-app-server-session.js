@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
 import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
+import { isCodexQuestionToolUseId } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS, reportInputAdmission } from './base-session.js'
 import { CODEX_APPSERVER_CUSTOMIZATION } from './provider-customization.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
@@ -10,6 +11,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
+import { buildCodexUserQuestionResponse, createCodexQuestionToolUseId, isCodexRequestId, parseCodexUserQuestion } from './codex-user-questions.js'
 import { parseCodexUserAgent, capabilitiesForVersion, parseSemver, compareSemver } from './codex-protocol-capabilities.js'
 import { findNewestBundledCodexClient } from './codex-bundled-client.js'
 import {
@@ -43,6 +45,9 @@ const MAX_MCP_RESULT_CHARS = 10_000
 // #8710: cap on the ids of codex turns codex itself has ended (see
 // `_noteNativeTurnEnded`). Stragglers only trail the last turn or two.
 const MAX_ENDED_NATIVE_TURN_IDS = 32
+
+const MAX_PENDING_NATIVE_QUESTIONS = 32
+const MAX_RECENT_NATIVE_QUESTION_IDS = 128
 
 // #7729/#8710: notifications about the SESSION rather than a turn, and their
 // handlers. One table, so the three places that must agree on the set — with a
@@ -378,6 +383,8 @@ export class CodexAppServerSession extends BaseSession {
     this._turnBaselineTotals = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
+    this._nativeQuestions = new Map() // typed JSON-RPC id → question on this client
+    this._closedNativeQuestionIds = new Set()
     this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
     this._reconnectDeadline = null // #6856 — one-shot hard cap on total reconnect-suppression time
     // #6856/#6967 — configurable reconnect-suppression deadline (opt / env /
@@ -418,6 +425,11 @@ export class CodexAppServerSession extends BaseSession {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),
     })
+    const permissionQuestions = this.getPendingQuestions
+    this.getPendingQuestions = () => [
+      ...permissionQuestions(),
+      ...Array.from(this._nativeQuestions.values(), ({ toolUseId, questions }) => ({ toolUseId, questions })),
+    ]
   }
 
   /**
@@ -1332,6 +1344,13 @@ export class CodexAppServerSession extends BaseSession {
     // already read can still be dispatched, and with destroy()'s listeners gone
     // an `error` emitted here would throw out of the stream handler.
     if (this._destroying) return
+    // A question can belong to a worker relayed on this client. Resolve it
+    // before the thread filter, without treating the notice as turn progress.
+    if (method === 'serverRequest/resolved') {
+      const pending = this._nativeQuestions.get(params?.requestId)
+      if (pending && pending.threadId === params?.threadId) this._closeNativeQuestion(pending)
+      return
+    }
     // #7724 — `deprecationNotice` is handled HERE, ahead of the between-turns
     // handling, NOT as a case in the switch below. It is a lifecycle notice
     // the binary can emit at any point — most plausibly right after the
@@ -1362,6 +1381,8 @@ export class CodexAppServerSession extends BaseSession {
     if (this._notificationTurnId(params) || (typeof params?.threadId === 'string' && params.threadId !== '')) {
       this.noteProviderActivity()
     }
+    const turnId = this._notificationTurnId(params)
+    if (method === 'turn/completed' && turnId) this._clearNativeQuestions(params?.threadId ?? this._threadId, turnId)
     if (this._isOtherThread(params)) {
       // #8710 — a sub-agent's thread. Its activity is evidence this turn's work
       // is still running (the parent is often blocked waiting on it), so it holds
@@ -1371,7 +1392,6 @@ export class CodexAppServerSession extends BaseSession {
       if (this._activeTurn && this._resultTimeout) this._armResultTimeout()
       return
     }
-    const turnId = this._notificationTurnId(params)
     const sessionHandler = SESSION_SCOPED_HANDLERS.get(method)
     if (turnId && !sessionHandler && this._endedNativeTurnIds.has(turnId)) {
       // #8710 — codex already ended this turn: a straggler (a background exec
@@ -2139,6 +2159,9 @@ export class CodexAppServerSession extends BaseSession {
   // every notification (progress), cleared on turn end.
   _armResultTimeout() {
     this._clearResultTimeout()
+    for (const { isBlocking } of this._nativeQuestions.values()) {
+      if (isBlocking) return
+    }
     this._resultTimeout = setTimeout(() => {
       ;(this._log || log).warn(`codex app-server turn result timeout (msg=${this._currentMessageId})`)
       this._failTurn('Codex turn timed out with no result')
@@ -2221,6 +2244,10 @@ export class CodexAppServerSession extends BaseSession {
   // command/file as decision enums, and the scope-escalation variant as a
   // permission-grant prompt (#6610). See docs/design/codex-permission-model.md.
   _onServerRequest({ id, method, params }) {
+    if (method === 'item/tool/requestUserInput') {
+      this._routeNativeQuestion(id, params)
+      return
+    }
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
       this._routeApproval(id, method, params)
       return
@@ -2243,6 +2270,54 @@ export class CodexAppServerSession extends BaseSession {
     }
     ;(this._log || log).warn(`codex app-server: unsupported serverRequest ${method} — declining`)
     this._client?.respondError(id, -32601, 'unsupported request')
+  }
+
+  _routeNativeQuestion(rpcId, params) {
+    if (!isCodexRequestId(rpcId) || this._destroying || !this._client) return
+    if (this._nativeQuestions.has(rpcId) || this._closedNativeQuestionIds.has(rpcId)) return
+    const question = parseCodexUserQuestion(params)
+    if (!this._processReady || !question
+        || (question.threadId === this._threadId && this._endedNativeTurnIds.has(question.turnId))
+        || this._nativeQuestions.size >= MAX_PENDING_NATIVE_QUESTIONS) {
+      this._rememberClosedNativeQuestion(rpcId)
+      this._client.respondError(rpcId, -32602, 'unsupported user question')
+      return
+    }
+
+    const toolUseId = createCodexQuestionToolUseId()
+    this._nativeQuestions.set(rpcId, { ...question, rpcId, toolUseId })
+    if (question.isBlocking) this._clearResultTimeout()
+    this.emit('user_question', { toolUseId, questions: question.questions })
+  }
+
+  _rememberClosedNativeQuestion(rpcId) {
+    this._closedNativeQuestionIds.add(rpcId)
+    if (this._closedNativeQuestionIds.size > MAX_RECENT_NATIVE_QUESTION_IDS) {
+      this._closedNativeQuestionIds.delete(this._closedNativeQuestionIds.values().next().value)
+    }
+  }
+
+  _closeNativeQuestion(pending, answered = false) {
+    if (!this._nativeQuestions.delete(pending.rpcId)) return
+    this._rememberClosedNativeQuestion(pending.rpcId)
+    this.emit('permission_resolved', {
+      toolUseId: pending.toolUseId,
+      reason: 'resolved',
+      decision: answered ? 'allow' : 'deny',
+      resolvedBy: { kind: answered ? 'user' : 'cleared' },
+      historyQuestions: pending.questions,
+    })
+    if (pending.isBlocking && this._processReady && !this._destroying && !this._permissions.hasPendingPrompt()) {
+      this._resumeResultTimeoutForPermission()
+    }
+  }
+
+  _clearNativeQuestions(threadId, turnId) {
+    for (const pending of this._nativeQuestions.values()) {
+      if (turnId === undefined || (pending.threadId === threadId && pending.turnId === turnId)) {
+        this._closeNativeQuestion(pending)
+      }
+    }
   }
 
   // Bridge one codex approval RPC → a Chroxy permission_request and back. Mirrors
@@ -2481,8 +2556,17 @@ export class CodexAppServerSession extends BaseSession {
     return this._permissions.respondToPermission(requestId, decision, editedInput, reason, scope, resolvedBy)
   }
 
-  respondToQuestion(text, answers, toolUseId) {
-    // #8460: same shared manager, same id check as SDK/BYOK.
+  respondToQuestion(text, answers, toolUseId, opts) {
+    if (toolUseId === undefined && this._nativeQuestions.size > 0) return false
+    if (isCodexQuestionToolUseId(toolUseId)) {
+      const pending = [...this._nativeQuestions.values()].find(question => question.toolUseId === toolUseId)
+      if (!pending || this._destroying || !this._processReady || !this._client) return false
+      const response = buildCodexUserQuestionResponse(pending.fields, text, answers, opts?.freeformText)
+      if (!response) return false
+      const sent = this._client.respond(pending.rpcId, response) === true
+      this._closeNativeQuestion(pending, sent)
+      return sent
+    }
     return this._permissions.respondToQuestion(text, answers, toolUseId)
   }
 
@@ -2538,6 +2622,7 @@ export class CodexAppServerSession extends BaseSession {
     const detail = error ? error.message : `code=${code}${signal ? ` signal=${signal}` : ''}`
     ;(this._log || log).warn(`codex app-server exited unexpectedly (${detail})`)
     this._processReady = false
+    this._clearNativeQuestions()
     // #6708 — app-server has no respawn, so an unexpected exit IS the terminal
     // signal. If the child died because its binary was quarantined/removed out
     // from under the running daemon, name the cause + fix instead of a bare
@@ -2564,6 +2649,8 @@ export class CodexAppServerSession extends BaseSession {
     // pending permission_request resolves (deny → decline) immediately, instead
     // of leaving the turn wedged until the 5-min timeout (#6611 review).
     this._endTurnAbort()
+    // This RPC targets only the parent turn and can be refused. Native question
+    // bindings remain answerable until Codex confirms their own closure.
     if (this._client && this._activeTurn?.turnId) {
       try { await this._client.request('turn/interrupt', { threadId: this._threadId, turnId: this._activeTurn.turnId }) }
       catch (err) { (this._log || log).debug(`turn/interrupt failed: ${err.message}`) }
@@ -2614,6 +2701,8 @@ export class CodexAppServerSession extends BaseSession {
     this._clearReconnectWatchdog() // #6629 — never leave the reconnect timer armed past teardown
     this._clearReconnectDeadline() // #6856 — never leave the suppression deadline armed past teardown
     this._endTurnAbort() // resolve any in-flight approval as a deny before teardown
+    this._clearNativeQuestions()
+    this._closedNativeQuestionIds.clear()
     try { this._permissions?.destroy() } catch { /* noop */ }
     // #6609 — drop the materialized-attachment temp dir.
     if (this._attachDir) { try { rmSync(this._attachDir, { recursive: true, force: true }) } catch { /* noop */ } this._attachDir = null }

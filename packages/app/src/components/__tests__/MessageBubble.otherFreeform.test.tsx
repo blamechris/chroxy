@@ -23,6 +23,8 @@ import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/types';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+import { useConnectionStore } from '../../store/connection';
+import { createEmptySessionState } from '../../store/utils';
 
 // #5699 — the freeform Send + Enter (onSubmitEditing) paths gate on a live
 // connection. These tests exercise the connected submit, so set that.
@@ -48,7 +50,7 @@ function makePromptWithOther(): ChatMessage {
   } as ChatMessage;
 }
 
-function render(message: ChatMessage, onSelectOption: jest.Mock) {
+function render(message: ChatMessage, onSelectOption: jest.Mock, questionGated = false) {
   let tree!: renderer.ReactTestRenderer;
   act(() => {
     tree = renderer.create(
@@ -60,6 +62,7 @@ function render(message: ChatMessage, onSelectOption: jest.Mock) {
         onPress={() => {}}
         onOpenDetail={() => {}}
         onSelectOption={onSelectOption}
+        questionGated={questionGated}
       />,
     );
   });
@@ -67,6 +70,156 @@ function render(message: ChatMessage, onSelectOption: jest.Mock) {
 }
 
 describe('MessageBubble Other / freeform answer (#4755)', () => {
+  it.each([
+    { label: 'a permission card', requestId: 'perm-1', toolUseId: 'ask-codex-test', gated: false },
+    { label: 'a question awaiting consent', requestId: undefined, toolUseId: 'ask-codex-test', gated: true },
+    { label: 'a question missing its route', requestId: undefined, toolUseId: undefined, gated: false },
+  ])('withholds zero-option free text for $label', ({ requestId, toolUseId, gated }) => {
+    const onSelectOption = jest.fn();
+    const question = 'Name this layout';
+    const tree = render({
+      id: 'zero-option', type: 'prompt', content: question, timestamp: 1,
+      requestId, toolUseId, options: [], questions: [{ question, options: [] }],
+    }, onSelectOption, gated);
+    try {
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-input' })).toHaveLength(0);
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-send' })).toHaveLength(0);
+      expect(onSelectOption).not.toHaveBeenCalled();
+    } finally {
+      act(() => tree.unmount());
+    }
+  });
+
+  it('submits a native zero-option answer as a question response with its exact id and displays the recorded text', () => {
+    const toolUseId = 'ask-codex-free-text';
+    const question = 'Name this layout';
+    const message: ChatMessage = {
+      id: 'native-free-text', type: 'prompt', content: question, timestamp: 1,
+      toolUseId, options: [], questions: [{ question, options: [] }],
+    };
+    const prior = useConnectionStore.getState();
+    const sent: unknown[] = [];
+    useConnectionStore.setState({
+      socket: { readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) } as unknown as WebSocket,
+      activeSessionId: 'native-session',
+      sessionStates: { 'native-session': { ...createEmptySessionState(), messages: [message] } },
+    });
+    const answer = 'Compact list';
+    const onSelectOption = jest.fn((value: string, messageId: string, requestId: undefined, id: string) => {
+      expect(requestId).toBeUndefined();
+      const state = useConnectionStore.getState();
+      expect(state.sendUserQuestionResponse(value, id)).toBe('sent');
+      state.markPromptAnswered(messageId, value);
+    });
+    let tree: renderer.ReactTestRenderer | undefined;
+    let answeredTree: renderer.ReactTestRenderer | undefined;
+    try {
+      tree = render(message, onSelectOption);
+      const input = tree.root.findAllByProps({ testID: 'approval-freetext-input' })[0];
+      expect(input).toBeDefined();
+      expect(tree.root.findAllByProps({ testID: 'approval-freetext-cancel' })).toHaveLength(0);
+      act(() => input.props.onChangeText(`  ${answer}  `));
+      const send = tree.root.findByProps({ testID: 'approval-freetext-send' });
+      expect(send.props.disabled).toBe(false);
+      act(() => send.props.onPress());
+      expect(onSelectOption).toHaveBeenCalledTimes(1);
+      expect(onSelectOption).toHaveBeenCalledWith(answer, message.id, undefined, toolUseId);
+      expect(sent).toEqual([{ type: 'user_question_response', answer, toolUseId }]);
+      const answered = useConnectionStore.getState().sessionStates['native-session'].messages[0];
+      expect(answered.answered).toBe(answer);
+      answeredTree = render(answered, onSelectOption);
+      expect(JSON.stringify(answeredTree.toJSON())).toContain(answer);
+      expect(answeredTree.root.findAllByProps({ testID: 'approval-freetext-input' })).toHaveLength(0);
+    } finally {
+      act(() => { tree?.unmount(); answeredTree?.unmount(); });
+      useConnectionStore.setState(prior);
+    }
+  });
+
+  it.each(['closed', 'throwing'] as const)(
+    'retries a definite %s socket failure on the same mounted free-text question and sends once',
+    (failure) => {
+      const prior = useConnectionStore.getState();
+      const priorLifecycle = useConnectionLifecycleStore.getState();
+      const toolUseId = 'ask-codex-retry';
+      const question = 'Name this layout';
+      const message: ChatMessage = {
+        id: 'native-retry', type: 'prompt', content: question, timestamp: 1,
+        toolUseId, options: [], questions: [{ question, options: [] }],
+      };
+      const failedSend = jest.fn(() => { throw new Error('socket closing'); });
+      const disconnected = { readyState: failure === 'closed' ? WebSocket.CLOSED : WebSocket.OPEN, send: failedSend };
+      const sent: unknown[] = [];
+      const live = { readyState: WebSocket.OPEN, send: (data: string) => sent.push(JSON.parse(data)) };
+      useConnectionStore.setState({
+        socket: disconnected as unknown as WebSocket,
+        activeSessionId: 'native-session',
+        sessionStates: { 'native-session': { ...createEmptySessionState(), messages: [message] } },
+      });
+      const onSelectOption = jest.fn((answer: string, messageId: string, requestId: undefined, id: string) => {
+        expect(requestId).toBeUndefined();
+        const state = useConnectionStore.getState();
+        const result = state.sendUserQuestionResponse(answer, id);
+        if (result === 'sent') state.markPromptAnswered(messageId, answer);
+        return result !== false;
+      });
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const tree = render(message, onSelectOption);
+      const input = () => tree.root.findAllByProps({ testID: 'approval-freetext-input' })[0];
+      const send = () => tree.root.findByProps({ testID: 'approval-freetext-send' });
+      const answer = 'Compact list';
+      try {
+        act(() => input().props.onChangeText(answer));
+        act(() => failure === 'closed' ? send().props.onPress() : input().props.onSubmitEditing());
+        expect(onSelectOption).toHaveReturnedWith(false);
+        expect(failedSend).toHaveBeenCalledTimes(failure === 'closed' ? 0 : 1);
+        expect(useConnectionStore.getState().sessionStates['native-session'].messages[0].answered).toBeUndefined();
+
+        act(() => useConnectionLifecycleStore.setState({ connectionPhase: 'reconnecting' }));
+        expect(send().props.disabled).toBe(true);
+        act(() => {
+          useConnectionStore.setState({ socket: live as unknown as WebSocket });
+          useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+        });
+        expect(input().props.value).toBe(answer);
+        act(() => send().props.onPress());
+        expect(sent).toEqual([{ type: 'user_question_response', answer, toolUseId }]);
+        expect(useConnectionStore.getState().sessionStates['native-session'].messages[0].answered).toBe(answer);
+
+        // The mounted bubble has not received the new answered prop yet.
+        act(() => {
+          send().props.onPress();
+          input().props.onSubmitEditing();
+        });
+        expect(onSelectOption).toHaveBeenCalledTimes(2);
+        expect(sent).toHaveLength(1);
+      } finally {
+        act(() => tree.unmount());
+        useConnectionStore.setState(prior);
+        useConnectionLifecycleStore.setState(priorLifecycle);
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it('keeps the one-shot latch for a legacy void callback', () => {
+    const message = { ...makePromptWithOther(), options: [] };
+    const onSelectOption = jest.fn();
+    const tree = render(message, onSelectOption);
+    try {
+      const input = tree.root.findAllByProps({ testID: 'approval-freetext-input' })[0];
+      act(() => input.props.onChangeText('Compact list'));
+      const send = tree.root.findByProps({ testID: 'approval-freetext-send' });
+      act(() => {
+        send.props.onPress();
+        send.props.onPress();
+      });
+      expect(onSelectOption).toHaveBeenCalledTimes(1);
+    } finally {
+      act(() => tree.unmount());
+    }
+  });
+
   it('shows the freeform input when the user picks the Other option', () => {
     // Step 1 of the freeform flow: tapping Other must hide the option
     // buttons and surface the text input keyed by `approval-freetext-input`.

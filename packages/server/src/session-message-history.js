@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
 import { redactBounded, sanitizeToolInput, isSanitizedToolInput, MAX_INPUT_CHARS, RECORD_DESCRIPTION_MAX } from './redaction.js'
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { isCodexQuestionToolUseId, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 
@@ -525,11 +525,9 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
-   * #8470 -- record that a newer question REPLACED this one, so nobody answered it
-   * and nobody will. `permission_resolved` is transient, so without this a client
-   * that was not watching live (a fresh dashboard, a full rebuild, a reconnect)
-   * replays the question as unanswered and stamps it "(resolved)", which reads as
-   * answered.
+   * Record that a question stopped waiting, because a newer one replaced it
+   * (#8470) or Codex's native request closed. `permission_resolved` is transient,
+   * so replay needs its own copy of the verdict.
    *
    * Two writes, for the same reason the restore-time sweep makes two (#8336): the
    * entry is flagged IN PLACE (a full rebuild receives the question where it was
@@ -541,21 +539,28 @@ export class SessionMessageHistory extends EventEmitter {
    *
    * @param {string} sessionId
    * @param {string} toolUseId - the question's id (the `ask-...` id on its frame)
+   * @param {'superseded'|'resolved'} reason
+   * @param {object[]} [historyQuestions] - the validated Codex form, if the original row was evicted
    * @returns {boolean} true when an entry was newly marked (the caller persists)
    */
-  markQuestionSuperseded(sessionId, toolUseId) {
+  markQuestionClosed(sessionId, toolUseId, reason, historyQuestions) {
+    if (reason !== 'superseded' && reason !== 'resolved') return false
     const history = this._messageHistory.get(sessionId)
     if (!Array.isArray(history) || typeof toolUseId !== 'string') return false
     for (let i = history.length - 1; i >= 0; i--) {
       const entry = history[i]
       if (!entry || entry.type !== 'user_question' || entry.toolUseId !== toolUseId) continue
-      if (entry.superseded === true || entry.answered === true) return false
-      entry.superseded = true
+      if (entry.superseded === true || entry.resolved === true || entry.answered === true) return false
+      entry[reason] = true
       const { _seq: _dropped, ...copy } = entry
       this._pushHistory(history, copy, sessionId)
       return true
     }
-    return false
+    // A reconnecting client may still hold a card that aged out of our ring.
+    // Append its verdict with a new sequence even when the original row is gone.
+    if (reason !== 'resolved' || !isCodexQuestionToolUseId(toolUseId) || !Array.isArray(historyQuestions)) return false
+    this._pushHistory(history, { type: 'user_question', toolUseId, questions: historyQuestions, timestamp: Date.now(), resolved: true }, sessionId)
+    return true
   }
 
   /**
@@ -581,18 +586,20 @@ export class SessionMessageHistory extends EventEmitter {
    * that a delta replay for a client whose cursor is already past the question
    * still delivers the mark. Other entries are passed through. A question carrying
    * `answered: true` (#8362: the server accepted an answer before the restart) is
-   * passed through unmarked, as is one carrying `superseded: true` (#8470: a newer
-   * question replaced it, which is its own verdict).
+   * passed through unmarked, as are questions already superseded or resolved.
+   * A live native Codex question can have no tool start in history. Its local
+   * request binding expires with the daemon, so restore records it as resolved.
    *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
-   *   - history with no tool_start entries (returns a shallow copy)
-   *   - history with all tool_starts already matched (returns a shallow copy)
+   *   - history with no tool_start entries or all tool_starts already matched
    *
    * @param {Array} history
+   * @param {{nativeQuestionCorrections?: Array}} [options] - collect native question
+   *   tail copies separately when the caller must first restore the old seq reservation
    * @returns {Array}
    */
-  static sweepUnresolvedToolStarts(history) {
+  static sweepUnresolvedToolStarts(history, { nativeQuestionCorrections } = {}) {
     if (!Array.isArray(history) || history.length === 0) return history
     const resolved = new Set()
     for (const entry of history) {
@@ -626,16 +633,24 @@ export class SessionMessageHistory extends EventEmitter {
       // tool_start it was recorded on. A question names its tool by
       // `sourceToolUseId` when it has one (SDK, BYOK: `toolUseId` is chroxy's
       // own `ask-...` id there), else by `toolUseId` itself (CLI, TUI).
-      const questionToolId = rawEntry && rawEntry.type === 'user_question'
+      const pendingQuestion = rawEntry?.type === 'user_question' && rawEntry.answered !== true
+        && rawEntry.superseded !== true && rawEntry.resolved !== true
+      const questionToolId = pendingQuestion
         ? (typeof rawEntry.sourceToolUseId === 'string' ? rawEntry.sourceToolUseId : rawEntry.toolUseId)
         : undefined
       // #8362: a question the server accepted an answer for is not cut off even
       // though its tool_result has not arrived yet (cli/tui deliver the answer
       // first). The tool_start is still swept below -- the TOOL was in flight.
-      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId) && rawEntry.answered !== true && rawEntry.superseded !== true)
-        ? { ...rawEntry, interrupted: true }
-        : rawEntry
-      if (entry !== rawEntry) redelivered.push({ ...entry })
+      let entry = rawEntry
+      if (pendingQuestion && isCodexQuestionToolUseId(rawEntry.toolUseId)) {
+        entry = { ...rawEntry, resolved: true }
+      } else if (typeof questionToolId === 'string' && interruptedIds.has(questionToolId)) {
+        entry = { ...rawEntry, interrupted: true }
+      }
+      if (entry !== rawEntry) {
+        const tail = entry.resolved === true && nativeQuestionCorrections ? nativeQuestionCorrections : redelivered
+        tail.push({ ...entry })
+      }
       out.push(entry)
       if (
         entry
@@ -692,6 +707,16 @@ export class SessionMessageHistory extends EventEmitter {
     // price of never losing the verdict.
     for (const copy of redelivered) out.push(copy)
     return out
+  }
+
+  /** Append native closure copies after the caller restores the old reservation. */
+  appendRestoredQuestionCorrections(sessionId, corrections) {
+    if (corrections.length === 0) return
+    const history = this._messageHistory.get(sessionId)
+    if (!this._seqReserved.has(sessionId)) {
+      this._seqCounters.set(sessionId, (this._seqCounters.get(sessionId) || 1) + RESTART_SEQ_GAP)
+    }
+    for (const { _seq: _oldSeq, ...entry } of corrections) this._pushHistory(history, entry, sessionId)
   }
 
   /**

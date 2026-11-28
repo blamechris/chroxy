@@ -286,11 +286,11 @@ describe('MessageBubble question cut off by a restart (#8336)', () => {
   });
 });
 
-// #8470 -- the two more ways a question ends with no answer.
 describe('MessageBubble question that ended with no answer (#8470)', () => {
   it.each([
     ['(superseded)', 'question-superseded', 'Replaced by a newer question'],
     ['(not delivered)', 'question-notDelivered', 'Answer not delivered'],
+    ['(no longer pending)', 'question-resolved', 'Question is no longer pending'],
   ])('%s: says so, instead of echoing the token or showing an answer chip', (token, testId, text) => {
     const tree = render(multiQuestionPrompt({ answered: token }), { allowMultiQuestion: true });
     expect(String(first(tree, testId).props.children)).toContain(text);
@@ -303,6 +303,41 @@ describe('MessageBubble question that ended with no answer (#8470)', () => {
     const tree = render(multiQuestionPrompt({ answered: '(not delivered)', questions: undefined }));
     expect(present(tree, 'question-notDelivered')).toBe(true);
     expect(JSON.stringify(tree.toJSON())).not.toContain('(not delivered)');
+  });
+
+  it('renders literal closure text as a recorded human answer', () => {
+    const answer = '(no longer pending)';
+    const tree = render(multiQuestionPrompt({
+      toolUseId: 'ask-codex-1', answered: answer, answeredAt: 0,
+      answeredAnswers: {
+        'Q1 — deploy to production?': answer,
+        'Q2 — which areas to verify?': ['app'],
+        'Q3 — rollback strategy?': 'auto-rollback',
+      },
+    }), { allowMultiQuestion: true });
+    expect(present(tree, 'question-resolved')).toBe(false);
+    expect(present(tree, 'question-multi-summary-0')).toBe(true);
+    expect(JSON.stringify(tree.toJSON())).toContain(answer);
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+  });
+
+  it('omits options on true closure even when one option matches the closure text', () => {
+    const answer = '(no longer pending)';
+    const message = multiQuestionPrompt({
+      toolUseId: 'ask-codex-1', questions: undefined, answered: answer,
+      options: [{ label: answer, value: answer }, { label: 'Next', value: 'Next' }],
+    });
+    const closed = render(message);
+    expect(present(closed, 'question-resolved')).toBe(true);
+    expect(present(closed, `approval-button-${answer}`)).toBe(false);
+    expect(present(closed, 'approval-button-Next')).toBe(false);
+    expect(present(closed, 'approval-freetext-input')).toBe(false);
+    expect(present(closed, 'approval-freetext-send')).toBe(false);
+
+    const answered = render({ ...message, answeredAt: 0 });
+    expect(present(answered, 'question-resolved')).toBe(false);
+    expect(first(answered, `approval-button-${answer}`).props.accessibilityState).toEqual({ disabled: true, selected: true });
+    expect(first(answered, 'approval-button-Next').props.accessibilityState).toEqual({ disabled: true, selected: false });
   });
 });
 

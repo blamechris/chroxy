@@ -309,6 +309,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           options={storeMsg.options}
           questions={storeMsg.questions}
           answered={storeMsg.answered}
+          answeredAt={storeMsg.answeredAt}
           // #4735 / #4731 — SDK / BYOK / Codex / Gemini sessions get the
           // interactive MultiQuestionForm; TUI / CLI sessions keep the
           // #4666 deferred notice (their permission-hook still denies

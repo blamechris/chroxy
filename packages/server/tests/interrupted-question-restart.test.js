@@ -9,7 +9,7 @@ import { ClaudeByokSession } from '../src/byok-session.js'
 import { PermissionManager } from '../src/permission-manager.js'
 import { buildToolStartData } from '../src/claude-stream-parser.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
-import { resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
+import { CAPABILITY_HISTORY_QUESTION_RESOLVED, replayHistory, resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
 import { inputHandlers } from '../src/handlers/input-handlers.js'
 
 /**
@@ -275,6 +275,37 @@ describe('history sequence survives a restart (#8336)', () => {
     mgr._history.recordHistory(sid, 'message', { type: 'user_input', content: 'next', timestamp: 9 })
     assert.equal(mgr.getHistory(sid).at(-1)._seq, mgr.getLatestHistorySeq(sid))
     assert.ok(mgr.getLatestHistorySeq(sid) >= 11)
+  })
+
+  it('replays a native closure beyond the old reservation to a cursor ahead of saved history', () => {
+    const toolUseId = 'ask-codex-restart-fixture'
+    const { mgr, sid } = boot({
+      historyLastSeq: 100,
+      seqReservedThrough: 1100,
+      turnInFlight: true,
+      history: [{ type: 'user_question', toolUseId, questions: [Q], timestamp: 3 }],
+    }, 50)
+    const first = mgr.getHistory(sid)[0]
+    assert.deepEqual([first._seq, first.resolved], [100, true], 'the original row keeps its persisted number')
+
+    const ws = { readyState: 1, bufferedAmount: 0 }
+    const client = { clientCapabilities: new Set([CAPABILITY_HISTORY_QUESTION_RESOLVED]), historyCursors: { [sid]: 105 } }
+    const frames = []
+    replayHistory({ sessionManager: mgr, clients: new Map([[ws, client]]), send: (_ws, frame) => frames.push(frame) }, ws, sid)
+    assert.equal(frames[0].fullHistory, false, 'the previously issued cursor still receives a delta')
+    const correction = frames.find(frame => frame.type === 'user_question' && frame.toolUseId === toolUseId)
+    assert.ok(correction?.resolved, 'the closure copy is visible to the actual replay')
+    assert.ok(correction.historySeq > 1100, 'the new event is above the previous reservation')
+    const result = frames.find(frame => frame.type === 'result')
+    assert.ok(result?.historySeq > correction.historySeq, 'the existing interruption marker comes after the closure copy')
+
+    const stored = mgr.serializeState().sessions.find(entry => entry.id === sid)
+    const again = boot(stored, 50)
+    const afterSecondRestore = []
+    client.historyCursors = { [again.sid]: 105 }
+    replayHistory({ sessionManager: again.mgr, clients: new Map([[ws, client]]), send: (_ws, frame) => afterSecondRestore.push(frame) }, ws, again.sid)
+    assert.ok(afterSecondRestore.some(frame => frame.toolUseId === toolUseId && frame.resolved === true),
+      'the next serialization and restore also delivers the closure to the held cursor')
   })
 
   it('the cursor-ahead-of-latest guard (#5555.3) still forces a full replay', () => {

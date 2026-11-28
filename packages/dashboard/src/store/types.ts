@@ -623,6 +623,7 @@ export interface SessionNotification {
   message: string;
   timestamp: number;
   requestId?: string;
+  toolUseId?: string;
   /**
    * #4890 — Slack-style read/unread tracking. Set to `Date.now()` when the
    * operator has acknowledged the alert via an explicit action: clicking a

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { matchesQuestionNotice } from '@chroxy/store-core';
 import type { ServerError, SessionNotification } from './types';
 
 interface TimeoutWarning {
@@ -74,8 +75,12 @@ export const useNotificationStore = create<NotificationState>((set) => ({
 
   addSessionNotification: (notification) =>
     set((state) => {
-      const filtered = state.sessionNotifications.filter(
-        (n) => !(n.sessionId === notification.sessionId && n.eventType === notification.eventType),
+      const { toolUseId, sessionId, eventType } = notification;
+      if (toolUseId && state.sessionNotifications.some((n) => matchesQuestionNotice(n, toolUseId, sessionId))) {
+        return state;
+      }
+      const filtered = toolUseId ? state.sessionNotifications : state.sessionNotifications.filter(
+        (n) => n.sessionId !== sessionId || n.eventType !== eventType || n.toolUseId !== undefined,
       );
       // UX landmine #7: persist to activity history (survives app kill)
       const entry: ActivityEntry = {

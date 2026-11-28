@@ -6,6 +6,7 @@ import { join } from 'path'
 import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
 import { SessionManager } from '../src/session-manager.js'
 import { BaseSession } from '../src/base-session.js'
+import { CAPABILITY_HISTORY_QUESTION_RESOLVED } from '../src/ws-history.js'
 import { createMockSessionManager, nsCtx } from './test-helpers.js'
 
 const handler = conversationHandlers.request_full_history
@@ -80,6 +81,19 @@ function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, sourc
 }
 
 const client = () => ({ id: 'c1', activeSessionId: 'sess-1' })
+
+it('explicit full-history replay publishes the current native pending IDs before re-sending questions', async () => {
+  const { ws, ctx, sends, order } = build([])
+  ctx.sessions.sessionManager.getSession('sess-1').session.getPendingQuestions = () => [{
+    toolUseId: 'ask-codex-full-history', questions: [{ question: 'Which target?', options: [] }],
+  }]
+  const capable = { ...client(), clientCapabilities: new Set([CAPABILITY_HISTORY_QUESTION_RESOLVED]) }
+  await handler(ws, capable, { type: 'request_full_history' }, ctx)
+  const end = sends.find(frame => frame.type === 'history_replay_end')
+  assert.deepEqual(end?.pendingQuestionToolUseIds, ['ask-codex-full-history'])
+  assert.equal(end.sessionId, 'sess-1')
+  assert.deepEqual(order, ['permissions', 'questions'])
+})
 
 /** Yield the event loop `n` times so setImmediate-scheduled chunks can run. */
 async function turn(n = 5) {

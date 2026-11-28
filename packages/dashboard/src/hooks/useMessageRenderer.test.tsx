@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, renderHook, fireEvent, within } from '@testing-library/react'
-import { deriveGatedQuestionIds, type ChatMessage } from '@chroxy/store-core'
+import { deriveGatedQuestionIds, toChatViewMessage, type ChatMessage } from '@chroxy/store-core'
 import { useMessageRenderer, permissionPromptDescription, type UseMessageRendererArgs } from './useMessageRenderer'
 import type { ChatViewMessage } from '../components/ChatView'
 
@@ -477,6 +477,27 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
     render(<>{result.current({ id: 'q1', type: 'prompt', content: question.content, timestamp: 0 } as unknown as ChatViewMessage)}</>)
     expect(screen.getByText('Red or blue?')).toBeInTheDocument()
     expect(screen.getByText('Red')).toBeInTheDocument()
+  })
+})
+
+describe('useMessageRenderer — native question closure', () => {
+  it.each([
+    { answeredAt: 0, expected: 'question-answered-summary', absent: 'question-resolved' },
+    { answeredAt: undefined, expected: 'question-resolved', absent: 'question-answered-summary' },
+  ])('uses answer provenance for literal closure text ($expected)', ({ answeredAt, expected, absent }) => {
+    const message: ChatMessage = {
+      id: 'q-native', type: 'prompt', content: 'What text?', timestamp: 0, options: [],
+      toolUseId: 'ask-codex-1', answered: '(no longer pending)', answeredAt,
+    }
+    const args = makeArgs({ storeMsgMap: new Map([[message.id, message]]), storeMessages: [message] })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current(toChatViewMessage(message))}</>)
+    expect(screen.getByTestId(expected)).toHaveTextContent(answeredAt === undefined
+      ? 'Question is no longer pending'
+      : '(no longer pending)')
+    expect(screen.queryByTestId(absent)).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 })
 

@@ -40,6 +40,18 @@ export const CODEX_DEFAULT_SANDBOX: CodexSandboxMode = 'workspace-write'
  * control on exactly this string. */
 export const CODEX_PROVIDER = 'codex'
 
+/** Namespace for Chroxy question IDs minted from native Codex input requests. */
+export const CODEX_QUESTION_ID_PREFIX = 'ask-codex-'
+
+export function isCodexQuestionToolUseId(value: unknown): boolean {
+  return typeof value === 'string' && value.startsWith(CODEX_QUESTION_ID_PREFIX)
+}
+
+/** Text shown by a client for a native choice. Its wire value is still the label. */
+export function formatCodexQuestionOptionLabel(label: string, description?: string): string {
+  return description ? `${label} — ${description}` : label
+}
+
 /**
  * UI-facing metadata for the sandbox selector: a short label and a one-line
  * description per mode. Kept next to the canonical list so a new mode can't be

@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { EventEmitter } from 'events'
+import { StringDecoder } from 'node:string_decoder'
 import { createLogger } from './logger.js'
 
 const log = createLogger('codex-app-server')
@@ -36,7 +37,7 @@ function jsonRpcError(error) {
  * handshake, correlates client requests to their responses by id, and surfaces:
  *   - `notification` { method, params } — server → client events (streaming, items)
  *   - `serverRequest` { id, method, params } — server → client REQUESTS that need a
- *     reply (approvals / elicitation); the caller answers with respond()/respondError()
+ *     reply (approvals, elicitation, user questions); the caller answers with respond()/respondError()
  *   - `exit` { code, signal, error? } — the child went away
  *
  * Protocol validated against codex-cli 0.128.0. This is pure transport — it maps
@@ -56,6 +57,7 @@ export class CodexAppServerClient extends EventEmitter {
     this._spawn = typeof spawnFn === 'function' ? spawnFn : spawn
     this._child = null
     this._buf = ''
+    this._stdoutDecoder = new StringDecoder('utf8')
     this._nextId = 1
     this._pending = new Map() // id -> { resolve, reject }
     this._closed = false
@@ -103,10 +105,10 @@ export class CodexAppServerClient extends EventEmitter {
     this._write({ jsonrpc: '2.0', method, params })
   }
 
-  /** Answer a server → client request (e.g. an approval) with a result. */
+  /** Answer a server → client request. Returns whether the write was accepted. */
   respond(id, result) {
-    if (this._closed) return
-    this._write({ jsonrpc: '2.0', id, result })
+    if (this._closed) return false
+    return this._write({ jsonrpc: '2.0', id, result })
   }
 
   /** Answer a server → client request with a JSON-RPC error. */
@@ -116,12 +118,21 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   _write(msg) {
-    try { this._child?.stdin.write(JSON.stringify(msg) + '\n') }
-    catch (err) { this._log.warn(`codex app-server write failed: ${err.message}`) }
+    const stdin = this._child?.stdin
+    if (!stdin || stdin.writable === false) return false
+    try {
+      stdin.write(JSON.stringify(msg) + '\n')
+      // Writable.write's return value is backpressure, not delivery failure.
+      return true
+    } catch (err) {
+      this._log.warn(`codex app-server write failed: ${err.message}`)
+      return false
+    }
   }
 
   _onData(d) {
-    this._buf += String(d)
+    if (this._closed) return
+    this._buf += typeof d === 'string' ? d : this._stdoutDecoder.write(d)
     let nl
     while ((nl = this._buf.indexOf('\n')) >= 0) {
       // trim() strips a trailing '\r' too, so CRLF-framed lines parse cleanly
@@ -146,7 +157,7 @@ export class CodexAppServerClient extends EventEmitter {
       else pend.resolve(m.result)
       return
     }
-    // Server → client REQUEST (id + method): approvals / elicitation. Needs a reply.
+    // Server → client REQUEST (id + method): approvals, elicitation, or questions.
     if (m.id !== undefined && m.method) {
       this.emit('serverRequest', { id: m.id, method: m.method, params: m.params || {} })
       return
@@ -176,6 +187,9 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   _rejectAllPending(err) {
+    // Closing the transport abandons an incomplete last line or code point.
+    this._buf = ''
+    this._stdoutDecoder.end()
     for (const { reject } of this._pending.values()) reject(err)
     this._pending.clear()
   }

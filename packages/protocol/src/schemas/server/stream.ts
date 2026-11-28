@@ -8,6 +8,7 @@
 import { z } from 'zod'
 
 import { MAX_SANE_DURATION_MS } from './connection.ts'
+import { isCodexQuestionToolUseId } from '../../codex.ts'
 import { TURN_OUTCOMES } from '../../turn-outcome.ts'
 import { PermissionScopeSchema, CreateSessionRequestIdSchema } from '../client.ts'
 import type { ServerPermissionRequestMessage } from './messages.ts'
@@ -821,11 +822,9 @@ export const ServerPermissionExpiredSchema = z.object({
 // timeout, auto-mode, clearAll); the client dismisses the prompt on every
 // connected client and marks the bubble answered. Emitted by the
 // event-normalizer `permission_resolved` mapping (event-normalizer.js) for the
-// `requestId` (permission-prompt) variant, and, since #8470, for ONE
-// AskUserQuestion case: a question a newer one superseded (`toolUseId` set,
-// `reason: 'superseded'`), because nobody answered it and no round-trip is coming
-// to dismiss its card. Every other question resolution (answered / timeout /
-// aborted / cleared) still emits NO wire message (routing-map cleanup only).
+// `requestId` (permission-prompt) variant and when a question stops waiting
+// (`toolUseId` set, `reason: 'superseded'` or `'resolved'`). A native Codex
+// question can stop waiting after a human answer or provider cleanup.
 //   - `requestId` — the resolved permission's id; present on the permission-prompt
 //     variant, absent on the question variant.
 //   - `toolUseId` (#8470) — the resolved QUESTION's id (the `ask-...` id on its
@@ -879,17 +878,19 @@ export const ServerPermissionResolvedSchema = z.object({
   sessionId: z.string().optional(),
 }).superRefine((m, ctx) => {
   // Exactly one non-empty id: a permission prompt names a `requestId`, a
-  // superseded question a `toolUseId`, and a frame naming both (or an empty one)
+  // question a `toolUseId`, and a frame naming both (or an empty one)
   // is neither.
   const ids = [m.requestId, m.toolUseId].filter((id) => id !== undefined)
   if (ids.length !== 1 || ids[0] === '') {
     ctx.addIssue({ code: 'custom', message: 'permission_resolved needs exactly one non-empty id: a requestId (permission prompt) or a toolUseId (question)' })
     return
   }
-  // The question variant exists for ONE case (#8470); any other shape keyed by a
-  // toolUseId is not something the server sends.
-  if (m.toolUseId !== undefined && !(m.decision === 'deny' && m.reason === 'superseded')) {
-    ctx.addIssue({ code: 'custom', message: "the toolUseId variant of permission_resolved is only the superseded question: decision 'deny', reason 'superseded'" })
+  if (m.toolUseId !== undefined) {
+    const superseded = m.reason === 'superseded' && m.decision === 'deny'
+    const resolved = m.reason === 'resolved' && (m.decision === 'deny' || m.decision === 'allow')
+    if (!superseded && !resolved) {
+      ctx.addIssue({ code: 'custom', message: 'permission_resolved with a toolUseId needs a supported question resolution' })
+    }
   }
 })
 
@@ -1140,6 +1141,15 @@ export function buildPermissionRequestMessage(fields: {
   return result.data
 }
 
+export const ServerHistoryReplayEndSchema = z.object({
+  type: z.literal('history_replay_end'),
+  sessionId: z.string().min(1),
+  latestSeq: z.number().int().nonnegative().optional(),
+  // The native questions still awaiting a response for this exact session.
+  // [] is authoritative. Omission is unknown or unsupported by the client.
+  pendingQuestionToolUseIds: z.array(z.string().max(256).refine(isCodexQuestionToolUseId)).optional(),
+})
+
 export const ServerUserQuestionSchema = z.object({
   type: z.literal('user_question'),
   toolUseId: z.string(),
@@ -1162,6 +1172,9 @@ export const ServerUserQuestionSchema = z.object({
   // history when it supersedes it); absent on live frames. Clients render it as
   // "replaced by a newer question" rather than "(resolved)".
   superseded: z.boolean().optional(),
+  // A native provider question closed with nobody waiting for further input.
+  // Replayed history retains that status if the live clear was missed.
+  resolved: z.boolean().optional(),
 })
 
 export const ServerAgentBusySchema = z.object({

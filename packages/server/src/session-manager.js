@@ -4443,8 +4443,9 @@ export class SessionManager extends EventEmitter {
       // dangling tool_start. Without this, an unresolved tool_use from
       // before shutdown re-enters `activeTools` on replay and never gets
       // cleared — the footer shows "Running X · Nh Mm" forever.
+      const nativeQuestionCorrections = []
       if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
-        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history, { nativeQuestionCorrections })
         // #8336: carry the previous run's numbering across the restart. The
         // persisted entries were contiguous and ended at `historyLastSeq`, so the
         // first one had `historyLastSeq - length + 1`; a state file without the
@@ -4465,6 +4466,7 @@ export class SessionManager extends EventEmitter {
       this._restoringHistory = (this._restoringHistory || 0) + 1
       try {
         this._history.restoreSeqReservation(sessionId, saved.seqReservedThrough)
+        this._history.appendRestoredQuestionCorrections(sessionId, nativeQuestionCorrections)
         if (saved.turnInFlight === true) {
           this._history.recordInterruptedTurn(sessionId)
         }
@@ -6770,11 +6772,11 @@ export class SessionManager extends EventEmitter {
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
           if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? permissionDecisionToken(data.decision, data.scope) : undefined)
-          // #8470: a question a newer one replaced has no requestId, so the outcome
-          // journal above never sees it. Its verdict is recorded on the question's
-          // own history entry instead.
-          if (event === 'permission_resolved' && data?.reason === 'superseded' && typeof data.toolUseId === 'string') {
-            if (this._history.markQuestionSuperseded(sessionId, data.toolUseId)) this._schedulePersist()
+          // Question closures have no requestId. Keep their verdict on the
+          // question's history entry so full and cursor replays agree.
+          if (event === 'permission_resolved' && typeof data?.toolUseId === 'string'
+              && (data.reason === 'superseded' || data.reason === 'resolved')) {
+            if (this._history.markQuestionClosed(sessionId, data.toolUseId, data.reason, data.historyQuestions)) this._schedulePersist()
           }
         }
         // Not journaled yet: a BYOK Task subagent's prompts, which reach this

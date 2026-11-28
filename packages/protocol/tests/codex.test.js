@@ -43,6 +43,23 @@ describe('@chroxy/protocol codex constants (#6689)', () => {
     assert.ok(mod.CODEX_SANDBOX_MODE_META, 'CODEX_SANDBOX_MODE_META re-exported')
   })
 
+  it('recognizes only the native Codex question namespace from the main entry point', async () => {
+    const { CODEX_QUESTION_ID_PREFIX, isCodexQuestionToolUseId } = await import('../src/index.ts')
+    assert.equal(CODEX_QUESTION_ID_PREFIX, 'ask-codex-')
+    assert.equal(isCodexQuestionToolUseId(`${CODEX_QUESTION_ID_PREFIX}fixture`), true)
+    for (const id of [null, 7, 'ask-claude-fixture', 'prefix-ask-codex-fixture', 'ask-codexish-fixture']) {
+      assert.equal(isCodexQuestionToolUseId(id), false)
+    }
+  })
+
+  it('formats the displayed option separately from its canonical response label', async () => {
+    const { formatCodexQuestionOptionLabel } = await import('../src/index.ts')
+    assert.equal(formatCodexQuestionOptionLabel('Résumé'), 'Résumé')
+    assert.equal(formatCodexQuestionOptionLabel('API', ''), 'API')
+    assert.equal(formatCodexQuestionOptionLabel('API', 'client — stable'), 'API — client — stable')
+    assert.equal(formatCodexQuestionOptionLabel('API — client', 'stable'), 'API — client — stable')
+  })
+
   it('create_session schema accepts every canonical sandbox mode', async () => {
     const { CreateSessionSchema, CODEX_SANDBOX_MODES } = await import('../src/index.ts')
     for (const mode of CODEX_SANDBOX_MODES) {

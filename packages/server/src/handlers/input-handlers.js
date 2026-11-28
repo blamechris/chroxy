@@ -1547,8 +1547,6 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     return
   }
 
-  if (msg.toolUseId) ctx.permissions.questionSessionMap.delete(msg.toolUseId)
-
   const entry = ctx.sessions.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
     // #9242: a person answering a session's question is taking part in its
@@ -1613,12 +1611,22 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // longer the one being asked, so it must not mark anything answered.
     if (delivered === false) {
       // #8470: and the sender must be told, or its card keeps reading answered.
+      // A provider can reject a malformed answer and keep the same question
+      // pending. Leave that exact route live so another viewer can answer it.
+      if (msg.toolUseId && !entry.session.getPendingQuestions?.().some(question => question.toolUseId === msg.toolUseId)) {
+        ctx.permissions.questionSessionMap.delete(msg.toolUseId)
+      }
       sendQuestionNotDelivered(ws, msg, questionSessionId || undefined, ctx)
-    } else if (msg.answer.length > 0 || hasAnswers) {
-      ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
-      // #8470: remember WHAT landed, so a duplicate of it is not called lost.
-      if (typeof msg.toolUseId === 'string') ctx.permissions.questionSessionMap.noteAnswered?.(msg.toolUseId, answerDigest(msg))
+    } else {
+      if (msg.toolUseId) ctx.permissions.questionSessionMap.delete(msg.toolUseId)
+      if (msg.answer.length > 0 || hasAnswers) {
+        ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
+        // #8470: remember WHAT landed, so a duplicate of it is not called lost.
+        if (typeof msg.toolUseId === 'string') ctx.permissions.questionSessionMap.noteAnswered?.(msg.toolUseId, answerDigest(msg))
+      }
     }
+  } else if (msg.toolUseId) {
+    ctx.permissions.questionSessionMap.delete(msg.toolUseId)
   }
 }
 

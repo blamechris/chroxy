@@ -1139,6 +1139,7 @@ export function SessionScreen() {
       const summary = freeform ? value.freeformText : value;
       markPromptAnswered(messageId, summary);
     }
+    return sent !== false;
   };
 
   // #4973 — submit handler for the multi-question AskUserQuestion form.

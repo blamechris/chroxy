@@ -85,6 +85,7 @@ export interface QuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
+  answeredAt?: number
   /**
    * #4685 — when true, an `AskUserQuestion` permission_request for the
    * owning session is still unresolved (the user has NOT clicked Allow
@@ -146,7 +147,7 @@ export interface QuestionPromptProps {
   onSelect: (answer: string | MultiQuestionAnswersMap | OtherFreeformAnswer) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, answeredAt, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
   // #4685 — gate ALL interactive question content (text, options, multi-question
   // form, deferred notice, free-text input) behind the `pendingPermission`
   // flag: nothing of the question can be answered until the user has clicked
@@ -200,6 +201,7 @@ export function QuestionPrompt({ question, options, answered, questions, allowMu
       question={question}
       options={options}
       answered={answered}
+      answeredAt={answeredAt}
       onSelect={onSelect}
     />
   )
@@ -261,10 +263,8 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   const [singleSelectByIdx, setSingleSelectByIdx] = useState<Record<number, string>>({})
   const [multiSelectByIdx, setMultiSelectByIdx] = useState<Record<number, string[]>>({})
   const submittedRef = useRef(false)
-  // #4624 — stable id prefix for aria-labelledby. Each question text gets
-  // `${labelIdPrefix}-${idx}` so duplicate question texts don't collide
-  // and screen readers can announce the group label.
-  const labelIdPrefix = useId()
+  // Scope labels and radio groups to this form when several are open.
+  const formId = useId()
 
   // #5800 — selection state + answersMap-builder + canSubmit derivation
   // now live in `@chroxy/store-core` (shared with the app's
@@ -290,19 +290,18 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
     <div className="question-prompt question-prompt--multi" data-testid="question-prompt-multi">
       {questions.map((q, idx) => {
         const isMultiSelect = q.multiSelect === true
-        const labelId = `${labelIdPrefix}-q-${idx}`
+        const questionId = `${formId}-q-${idx}`
         return (
         <div key={`q-${idx}`} className="question-prompt-multi-row" data-testid={`question-multi-row-${idx}`}>
-          <div className="question-text" id={labelId}>{q.question}</div>
+          <div className="question-text" id={questionId}>{q.question}</div>
           <div
             className={`question-options${isMultiSelect ? ' question-options--multi' : ''}`}
             role={isMultiSelect ? 'group' : 'radiogroup'}
-            aria-labelledby={labelId}
+            aria-labelledby={questionId}
             {...(isMultiSelect ? {} : { 'aria-required': true })}
           >
-            {q.options.map((opt) => {
-              const inputId = `q-${idx}-${opt.value}`
-              const inputName = `q-${idx}`
+            {q.options.map((opt, optionIdx) => {
+              const inputId = `${questionId}-option-${optionIdx}`
               const isMulti = q.multiSelect === true
               const isChecked = isMulti
                 ? (multiSelectByIdx[idx] || []).includes(opt.value)
@@ -317,7 +316,7 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
                   <input
                     id={inputId}
                     type={isMulti ? 'checkbox' : 'radio'}
-                    name={inputName}
+                    name={questionId}
                     checked={isChecked}
                     onChange={() => isMulti ? handleCheckboxToggle(idx, opt.value) : handleRadioChange(idx, opt.value)}
                   />
@@ -347,10 +346,11 @@ interface SingleQuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
+  answeredAt?: number
   onSelect: (value: string | OtherFreeformAnswer) => void
 }
 
-function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQuestionPromptProps) {
+function SingleQuestionPrompt({ question, options, answered, answeredAt, onSelect }: SingleQuestionPromptProps) {
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
   // #4651 — when the user clicks the Other option button, stash the option's
@@ -445,7 +445,7 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
   // it). It is NOT answered, so it gets no "✓" and none of the answered-summary
   // chrome (the options it would list were never chosen): just the question and an
   // honest notice. Placed after every hook above, so the hook order is unchanged.
-  const ended = questionEndedNotice(answered)
+  const ended = questionEndedNotice(answered, answeredAt)
   if (ended) {
     return (
       <div className={`question-prompt question-prompt--${ended.kind}`} data-testid="question-prompt">
