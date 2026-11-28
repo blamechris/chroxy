@@ -204,6 +204,38 @@ proves(
 )
 
 proves(
+  'every value put in an item text is cut to the configured length: the state, the trigger, the written time and the seed scope too',
+  (M) => {
+    const max = 12
+    const long = 'w'.repeat(200)
+    const fieldOf = (text, label) => text.split('\n').find((l) => l.startsWith(label + ': '))
+    const cut = (line, label) => {
+      assert.ok(line, `${label} is there`)
+      assert.ok(Array.from(line).length - label.length - 2 <= max, `${label} is cut to ${max}: ${Array.from(line).length}`)
+      assert.ok(line.endsWith('…'), `${label} says it was cut`)
+    }
+    const state = { reports: new Map([['r1', { body: { last_report_at: T0, state: long } }]]) }
+    const attention = { open: true, origin: 'attention', reportId: 'r1', session: { source: 'src', native_id: 'id' }, condition: { trigger: long }, asks: new Map(), carried: [] }
+    const text = M.renderItem(state, attention, { max }).text
+    cut(fieldOf(text, 'State'), 'State')
+    cut(fieldOf(text, 'Trigger'), 'Trigger')
+    const seed = { open: true, origin: 'seed', seed: { scope: long, written_at: T0 }, session: null, asks: new Map(), carried: [] }
+        // The headline is also what an echo names the item by, with no outer cut.
+    const title = M.headline(seed, max)
+    assert.equal(title, `a seed to paste for ${'w'.repeat(max - 1)}…`, 'the seed scope is cut')
+    // The written time is a fixed-length ISO stamp; cut it to a length shorter than that and it is cut like the rest.
+    const written = M.renderItem({ reports: new Map() }, seed, { max: 8 }).text.split('\n').find((l) => l.startsWith('Written: '))
+    cut(written, 'Written')
+  },
+  {
+    'state not cut': [edit('render.js', "field('State', rep?.state, max)", "`State: ${rep?.state}`")],
+    'trigger not cut': [edit('render.js', "field('Trigger', item.condition?.trigger, max)", "`Trigger: ${item.condition?.trigger}`")],
+    'written not cut': [edit('render.js', "field('Written', item.seed ? iso(item.seed.written_at) : null, max)", "`Written: ${iso(item.seed.written_at)}`")],
+    'seed scope not cut': [edit('render.js', 'a seed to paste for ${clean(item.seed?.scope, max)}', 'a seed to paste for ${item.seed?.scope}')],
+  },
+)
+
+proves(
   'clean: format characters (bidi overrides and isolates, zero-width) are removed and a cut never splits a surrogate pair',
   (M) => {
     assert.equal(M.clean('a\u202eb\u200bc\u2066d\ufeffe', 50), 'a b c d e')

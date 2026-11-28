@@ -34,6 +34,8 @@ export function clean(value, max) {
   if (value === null || value === undefined) return ''
   // Control characters and every Unicode format character (bidi overrides and
   // isolates, zero-width characters) become a space.
+  // That includes ZWJ and the soft hyphen, so an emoji ZWJ sequence splits: by design,
+  // safety in operator-visible text wins over emoji rendering.
   const flat = String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim()
   // Cut by code point, so a surrogate pair is never split.
   const points = Array.from(flat)

@@ -35,6 +35,14 @@
  * most `max_rejects_per_tick` rejections recorded. A line is acted on once
  * ever: its disposition is a ledger record under the line's hash.
  *
+ * A line an echo cap holds back (per item per tick, or per episode) is not
+ * taken: it is not recorded, is seen again next tick, and does not spend the
+ * new-line budget, so one capped item cannot starve the acks behind it. A line
+ * whose echo could not be written is taken and does spend it. The work a held
+ * line costs is bounded by the file: at most `max_file_bytes` is read, so at
+ * most that many bytes' worth of lines, each held before any echo or outbox
+ * write (the once-per-episode echo_cap echo apart).
+ *
  * Nothing here sends. The one thing it writes outside the ledger is the outbox.
  */
 
@@ -45,7 +53,7 @@ import { effectiveState } from './derive.js'
 import { put } from './checks.js'
 import { itemKey, recId, headline, renderItem, renderDigest, stepLine, ECHO, ALERT, REFUSAL_TEXT, DIGEST_KEY } from './render.js'
 import { outboxRecord, openOutbox } from './outbox.js'
-import { readInput, parseReceipt, parseAck } from './inbox.js'
+import { readInput, inputIdentity, parseReceipt, parseAck } from './inbox.js'
 import { DISMISSABLE, planOwnerEvent, planQueue, sweepUnknownDeliveries } from './queue.js'
 import { ownerAckKey, systemKey } from './keys.js'
 
@@ -61,11 +69,21 @@ export function createExchange({ dir }) {
 const sys = (event, ids, detail, now) => put({ kind: 'system', id: systemKey(event, ids), body: { event, detail: { ids, ...detail } } }, now)
 
 /** The attempts by the outbox line each one was delivered as. */
+const attemptIndex = new WeakMap()
 function attemptsByRec(state) {
+  // Attempts are only ever added, and each is changed in place, so the index
+  // is good for as long as the count is the same. Held lines make many lookups
+  // in one tick; each would otherwise walk every attempt.
+  const hit = attemptIndex.get(state.attempts)
+  if (hit && hit.size === state.attempts.size) return hit.map
   const m = new Map()
   for (const a of state.attempts.values()) m.set(recId('attempt', a.id), a)
+  attemptIndex.set(state.attempts, { size: state.attempts.size, map: m })
   return m
 }
+
+/** What a handler returns for a line it held back: not recorded, seen again next tick, not spent from the new-line budget. */
+const HELD = Symbol('held')
 
 /** The message an item has currently delivered: its latest delivered attempt of this episode. */
 export function currentMessage(state, item) {
@@ -88,8 +106,10 @@ function unconfirmedFor(state, item) {
 function* ingest(ctx, ex, { input, parse, handle, now }) {
   const lim = exchangeLimits(ctx.state.config)
   const { lines, problem } = readInput(ex.files[input], { maxFileBytes: lim.max_file_bytes, maxLineBytes: lim.max_line_bytes })
-  // Once per file, not once per tick: a rotated file starts a new one.
-  if (problem) yield sys('input_limit', [input, problem, lines[0]?.id ?? ''], { input, problem }, now)
+  // Once per file, not once per tick: a rotated file starts a new one. An
+  // oversize file is known by its first line; one with no lines (a link, an
+  // unreadable file) by its identity, so a replacement is recorded again.
+  if (problem) yield sys('input_limit', [input, problem, lines[0]?.id ?? inputIdentity(ex.files[input])], { input, problem }, now)
   let fresh = 0
   let rejects = 0
   for (const ln of lines) {
@@ -100,8 +120,8 @@ function* ingest(ctx, ex, { input, parse, handle, now }) {
       if (++rejects <= lim.max_rejects_per_tick) yield sys('input_line', [input, ln.id], { input, disposition: 'rejected', reason: parsed.reason }, now)
       continue
     }
-    if (++fresh > lim.max_new_lines_per_tick) break
-    yield* handle(parsed, ln.id, now)
+    if (fresh >= lim.max_new_lines_per_tick) break
+    if ((yield* handle(parsed, ln.id, now)) !== HELD) fresh++
   }
 }
 
@@ -169,10 +189,14 @@ function* handleAck(ctx, ex, a, lid, now) {
   if (!judged) {
     if ((st.echoCounts.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_episode) {
       const id = ['acks', 'echo_cap', it.itemId, it.episode]
-      if (!st.index.has(systemKey('input_limit', id)) && echo(ex, recId('echo_cap', it.itemId, it.episode), ECHO.capped(headline(it, lim.text_field_max)), it, now)) yield sys('input_limit', id, { input: 'acks', problem: 'echo_cap', item_id: it.itemId, episode: it.episode }, now)
-      return
+      if (!st.index.has(systemKey('input_limit', id))) {
+        // A failed echo is tried again next tick, so that line is taken and spends the budget.
+        if (!echo(ex, recId('echo_cap', it.itemId, it.episode), ECHO.capped(headline(it, lim.text_field_max)), it, now)) return
+        yield sys('input_limit', id, { input: 'acks', problem: 'echo_cap', item_id: it.itemId, episode: it.episode }, now)
+      }
+      return HELD
     }
-    if ((ex.tickEchoes.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_item_per_tick) return
+    if ((ex.tickEchoes.get(itemKeyStr) ?? 0) >= lim.max_echoes_per_item_per_tick) return HELD
     // Judge the line once, now, and keep the judgement: a retry after a crash or a
     // failed echo carries it out and never judges again, with a later time.
     const why = refusalFor(ctx, it, a, now)

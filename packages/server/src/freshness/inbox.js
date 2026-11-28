@@ -31,6 +31,20 @@ export function lineId(text) {
 }
 
 /**
+ * What names this file as against a replacement of it: device, inode and
+ * creation time of the path itself (a link is not followed). Empty when it
+ * cannot be told, which is then one identity for every such file.
+ */
+export function inputIdentity(file) {
+  try {
+    const st = fs.lstatSync(file)
+    return `${st.dev}:${st.ino}:${Math.trunc(st.birthtimeMs)}`
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Read the lines of one input file, bounded.
  *
  * Returns `{ lines, problem }`. `lines` are `{ id, text | null, tooLong }` in

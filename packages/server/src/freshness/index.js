@@ -14,7 +14,7 @@ export { EXCHANGE_FILES, createExchange, planExchange, writeToOutbox, currentMes
 export { OUTBOX_VERSION, OUTBOX_FIELDS, OUTBOX_OPS, OUTBOX_CLASSES, outboxRecord, openOutbox } from './outbox.js'
 export { RECEIPT_OUTCOMES, ACK_INTENTS, parseReceipt, parseAck, readInput } from './inbox.js'
 export { exchangeLimits, deferLimits } from './config.js'
-export { clean } from './render.js'
+export { clean, headline, renderItem } from './render.js'
 export { H, canonical, sha256 } from './hash.js'
 export * as keys from './keys.js'
 export * as ledger from './ledger.js'
