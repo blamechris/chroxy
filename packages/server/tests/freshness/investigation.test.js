@@ -415,6 +415,117 @@ describe('disappearance and outages', () => {
     assert.equal(h.sendsFor(id).filter((s) => s.step === 'shown').length, 3)
   })
 
+  describe('a read error that describes one file is not an outage (#9375)', () => {
+    const outageOf = (h) => h.openItems().filter((i) => i.origin === 'outage')
+    const srcInvs = (h) => [...h.ctx.state.investigations.values()].filter((i) => i.sourceLevel)
+    const twoSessions = () => {
+      const h = setup()
+      const a = session(h, 'chroxy', 'a')
+      const b = session(h, 'chroxy', 'b')
+      W.author(h.world, a.sk, T0, { state: 'running', next: 'a' })
+      W.author(h.world, b.sk, T0, { state: 'running', next: 'b' })
+      const t = ticks(h, 'chroxy', T0, 1)
+      return { h, a, b, t }
+    }
+    const err = (code) => ({ outcome: 'error', error_code: code })
+    const failing = (codeFor) => (a) => ({ ...a, read: (s) => err(codeFor(s, 'read')), reread: (s) => err(codeFor(s, 'reread')) })
+
+    it('every session window_exhausted on two ticks: no source-level investigation, no outage item', () => {
+      const { h, a, b, t } = twoSessions()
+      h.world.sources.chroxy.readError = 'window_exhausted'
+      ticks(h, 'chroxy', t, 4)
+      assert.equal(srcInvs(h).length, 0)
+      assert.equal(outageOf(h).length, 0)
+      assert.equal(h.ctx.state.sourceTrigger.get('chroxy')?.held ?? false, false)
+      // The per-session path took over: repeated_error investigations per session, none source-level.
+      for (const x of [a, b]) assert.ok(invs(h, x.sk).some((i) => i.trigger === 'repeated_error'))
+      // More ticks of the same failure: still at most two cycles per onset and one item per session.
+      ticks(h, 'chroxy', t + 4 * CAD * MIN, 8)
+      for (const x of [a, b]) {
+        assert.ok(invs(h, x.sk).filter((i) => i.trigger === 'repeated_error').length <= 2)
+        assert.ok(h.openItems().filter((i) => i.origin === 'attention' && i.session?.native_id === x.s.native_id).length <= 1)
+      }
+      assert.equal(h.openItems().filter((i) => i.origin === 'attention').length, 2, 'one attention item per session, no more')
+      assert.equal(outageOf(h).length, 0)
+    })
+
+    it('each of the five file-level codes is not an outage', () => {
+      for (const code of ['window_exhausted', 'tail_too_small', 'corrupt', 'bad_timestamp']) {
+        const { h, t } = twoSessions()
+        h.world.sources.chroxy.readError = code
+        ticks(h, 'chroxy', t, 3)
+        assert.equal(outageOf(h).length, 0, code)
+        assert.equal(srcInvs(h).length, 0, code)
+      }
+    })
+
+    it('every session unreadable on two ticks: the outage still happens', () => {
+      for (const code of ['unreadable', 'source_missing', 'unsupported', 'adapter_fault', 'shape_changed', 'parse_failed', 'too_large', 'brand_new_code']) {
+        const { h, t } = twoSessions()
+        h.world.sources.chroxy.readError = code
+        ticks(h, 'chroxy', t, 3)
+        assert.equal(outageOf(h).length, 1, code)
+        assert.equal(srcInvs(h)[0].classification, 'source_unreachable', code)
+      }
+    })
+
+    it('every session errored but one error is file-level: no source-level trigger', () => {
+      const { h, t } = twoSessions()
+      const codeFor = (s) => (s.native_id === 'a' ? 'window_exhausted' : 'unreadable')
+      let now = t
+      for (let i = 0; i < 4; i++) {
+        now += CAD * MIN
+        h.tick('chroxy', now, { reads: failing(codeFor) })
+      }
+      assert.equal(srcInvs(h).length, 0)
+      assert.equal(outageOf(h).length, 0)
+    })
+
+    it('the previous check counts too: a file-level error then a source-level one is not a source failure', () => {
+      const { h, t } = twoSessions()
+      let now = t
+      const codes = ['window_exhausted', 'unreadable']
+      for (const code of codes) {
+        now += CAD * MIN
+        h.tick('chroxy', now, { reads: failing(() => code) })
+      }
+      assert.equal(srcInvs(h).length, 0)
+      assert.equal(outageOf(h).length, 0)
+      now += CAD * MIN
+      h.tick('chroxy', now, { reads: failing(() => 'unreadable') })
+      assert.equal(outageOf(h).length, 1)
+    })
+
+    it('a re-read that fails on a file-level code in the retry too: inconclusive; on a source code: unreachable', () => {
+      for (const [reread, want, outages] of [['corrupt', 'inconclusive', 0], ['unreadable', 'source_unreachable', 1]]) {
+        const { h, t } = twoSessions()
+        let now = t
+        for (let i = 0; i < 3; i++) {
+          now += CAD * MIN
+          h.tick('chroxy', now, { reads: failing((s, kind) => (kind === 'read' ? 'unreadable' : reread)) })
+        }
+        const si = srcInvs(h)
+        assert.ok(si.length > 0)
+        assert.ok(si.every((i) => i.classification === want), reread)
+        assert.equal(outageOf(h).length, outages, reread)
+      }
+    })
+
+    it('a source-level investigation whose re-read fails only on the file read is inconclusive, not an outage', () => {
+      const { h, t } = twoSessions()
+      const codeFor = (s, kind) => (kind === 'read' ? 'unreadable' : 'window_exhausted')
+      let now = t
+      for (let i = 0; i < 3; i++) {
+        now += CAD * MIN
+        h.tick('chroxy', now, { reads: failing(codeFor) })
+      }
+      const si = srcInvs(h)
+      assert.ok(si.length > 0, 'the source-level trigger held')
+      assert.ok(si.every((i) => i.classification === 'inconclusive'))
+      assert.equal(outageOf(h).length, 0)
+    })
+  })
+
   it('a session whose only declaration is an api write of running, and which is dead, is surfaced after two cycles', () => {
     const h = setup()
     const c = session(h, 'chroxy', 'c')

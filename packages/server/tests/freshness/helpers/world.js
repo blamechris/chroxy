@@ -20,7 +20,7 @@ export const SOURCES = Object.freeze(['chroxy', 'codex', 'claude-desktop'])
  * sessions can both have an event '1' (as some hosts do).
  */
 export function createWorld({ perSessionIds = false } = {}) {
-  const src = () => ({ up: true, clockOffsetMs: 0, answering: true })
+  const src = () => ({ up: true, clockOffsetMs: 0, answering: true, readError: null })
   return {
     perSessionIds,
     sources: { chroxy: src(), codex: src(), 'claude-desktop': src() },
@@ -191,6 +191,7 @@ function readOne(world, session, now, { tickRead }) {
   const src = world.sources[session.source]
   if (!src.up) return { outcome: 'error', error_code: 'unreachable' }
   if (!w || !w.listed) return { listed: false }
+  if (src.readError) return { outcome: 'error', error_code: src.readError }
   if (tickRead && w.flickerDrop) {
     w.flickerDrop = false
     return { listed: false }

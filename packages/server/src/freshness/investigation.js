@@ -12,6 +12,7 @@ import { sourceCaps } from './config.js'
 import { onsetOf, sessionsOf } from './derive.js'
 import { put, planRead } from './checks.js'
 import { H } from './hash.js'
+import { isFileLevelReadError, isSourceLevelError } from './read-errors.js'
 import {
   READ_NO,
   checkInvestigationKey,
@@ -25,11 +26,15 @@ function sessionEnvOf(s) {
   return { source: s.session.source, native_id: s.session.native_id, incarnation: s.session.incarnation ?? null }
 }
 
-/** Whether every tracked session of the source failed its last two tick checks. */
+/**
+ * Whether every tracked session of the source failed its last two tick checks
+ * with an error that describes the source. An error that describes the one file
+ * read (see read-errors.js) is the session's own trouble and never counts.
+ */
 export function sourceAllFailed(st, source, tickId) {
   const ss = sessionsOf(st, source)
   if (ss.length === 0) return false
-  return ss.every((s) => s.cur && s.cur.tickId === tickId && s.cur.outcome === 'error' && s.prev && s.prev.outcome === 'error')
+  return ss.every((s) => s.cur && s.cur.tickId === tickId && isSourceLevelError(s.cur) && isSourceLevelError(s.prev))
 }
 
 function firstCheckOfTick(st, source, tickId) {
@@ -285,7 +290,9 @@ function* runCandidate(ctx, cand, { tickId, now, world }) {
       trigger: cand.trigger,
       cycle: cand.cycle,
       sourceLevel: Boolean(cand.sourceLevel),
-      rereadFailed: failed,
+      // A source-level re-read that failed only on the one file it read says
+      // nothing about the source: not an outage.
+      rereadFailed: failed && !(cand.sourceLevel && isFileLevelReadError(latest.body.error_code)),
       rungBlocked,
       confirmListed,
       canConfirmGone: caps.can_confirm_gone,

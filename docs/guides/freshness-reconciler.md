@@ -248,6 +248,33 @@ second only after `inconclusive` or `running_claim_unverified`), and one
 source-level investigation when every session of a source fails. Investigations
 happen only inside a tick, so the cadence bounds how often.
 
+#### Read errors: the source or one file
+
+Only an error that describes the source counts towards "every session of a
+source failed", the trigger of the source-level investigation and so of a
+`source_unreachable` outage item. An error that describes the one file that was
+read is that session's own trouble: it never counts, and a source-level re-read
+that fails only that way is `inconclusive`, not an outage. The session is handled
+by the per-session path (`repeated_error`, at most one attention item per onset).
+
+File-level codes (they do not count towards an outage):
+
+- `window_exhausted`
+- `tail_too_small`
+- `corrupt`
+- `bad_timestamp`
+
+Every other code counts as describing the source, including the codes the
+adapters emit today: `unreachable`, `source_missing`, `unreadable`, `too_large`,
+`parse_failed`, `shape_changed`, `clock_skew`, `adapter_shape`, `adapter_fault`,
+`unsupported`, `ambiguous_id`, `invalid_source`, `not_regular` and `file_changed`;
+a missing code; and any code not named above, including one added later.
+`shape_changed`, `parse_failed` and `too_large` count because the state-file and
+registry adapters emit them for the whole source (a changed format, a file that
+does not parse, one that is too large), which is a real outage. The list is an allowlist so that an unknown
+code keeps the old behaviour. It lives in `src/freshness/read-errors.js`, and a
+test holds this list and that set equal.
+
 The result is the investigation's `close` record: trigger, onset, cycle,
 classification, the age it decided on and what it would surface. Each rung names
 the check it read and the evidence class of that read, taken from the ledger's
