@@ -563,12 +563,6 @@ describe('ToolBubble', () => {
       fireEvent.click(screen.getByRole('button'))
       fireEvent.click(screen.getByTestId('tool-result-image-tu-img-7-0'))
       expect(screen.getByTestId('image-lightbox-img')).toBeInTheDocument()
-      // Modal ignores an Escape stamped before it opened (#8703). jsdom stamps
-      // events from the wall clock (Date.now) while Modal stamps its open time
-      // from performance.now(); fired in the same millisecond as the open, a
-      // fresh Escape can read as "earlier" and be dropped (#9374). Let the
-      // clock advance, as Modal.test does, so this is a genuinely later press.
-      const t0 = performance.now(); while (performance.now() - t0 < 5) { /* spin */ }
       fireEvent.keyDown(document, { key: 'Escape' })
       expect(screen.queryByTestId('image-lightbox-img')).not.toBeInTheDocument()
     })

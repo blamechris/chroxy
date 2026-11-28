@@ -38,6 +38,8 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
   // parent render), because moving the stamp forward would swallow an Escape
   // pressed while the main thread was busy.
   const attachedAtRef = useRef(0)
+  // The same instant on the Date.now() clock, for jsdom's epoch-stamped events.
+  const attachedAtEpochRef = useRef(0)
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     // #8703: ignore an event that was already in flight when the listener was
@@ -49,14 +51,16 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
     // time origin. Deliberately NOT `defaultPrevented`: that would change every
     // modal whose content preventDefaults Escape.
     // Browsers stamp events with a DOMHighResTimeStamp (performance.now() clock),
-    // far below `timeOrigin`, so the `epoch` branch is unreachable there: it
-    // exists for jsdom, which stamps events with epoch milliseconds (Date.now()).
-    // It normalises that form onto the performance clock. Epoch stamps are
-    // whole milliseconds, so one can read up to 1ms early against the fractional
-    // open time; allow that 1ms of slack for the epoch form only.
+    // far below `timeOrigin`; jsdom stamps them with epoch milliseconds
+    // (Date.now()). Each form is compared against the open time taken on its OWN
+    // clock (#9374). Converting one onto the other through `performance.timeOrigin`
+    // is wrong: Date.now() and timeOrigin + performance.now() drift apart over a
+    // long-lived worker, and a fresh press landing in the open's millisecond then
+    // read as earlier and was dropped. Epoch stamps are whole milliseconds, so
+    // only a strictly earlier millisecond counts as already in flight.
     const epoch = e.timeStamp > performance.timeOrigin
-    const eventTime = epoch ? e.timeStamp - performance.timeOrigin + 1 : e.timeStamp
-    if (eventTime < attachedAtRef.current) return
+    const openedAt = epoch ? attachedAtEpochRef.current : attachedAtRef.current
+    if (e.timeStamp < openedAt) return
     if (e.key === 'Escape') {
       // #9243 — a held Escape auto-repeats; a repeat must not dismiss the dialog
       // (nor re-open one through the composer), so one press closes once.
@@ -71,7 +75,10 @@ export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdro
 
   // Declared BEFORE the listener effect so the stamp is set first on open.
   useEffect(() => {
-    if (open) attachedAtRef.current = performance.now()
+    if (open) {
+      attachedAtRef.current = performance.now()
+      attachedAtEpochRef.current = Date.now()
+    }
   }, [open])
 
   useEffect(() => {
