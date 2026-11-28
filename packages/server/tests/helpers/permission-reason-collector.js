@@ -33,6 +33,15 @@ const LISTENER_METHODS = new Set(['on', 'once', 'off', 'addListener', 'prependLi
 /** Calls that forward an event as [eventIdx, payloadIdx]: the byok agent-event wrapper (`emit` is [0, 1]). */
 const WRAPPER_EMITTERS = new Map([['_emitAgentEvent', [1, 2]]])
 
+/**
+ * A repo-relative path as forward slashes, whatever separator produced it: `path.relative` gives
+ * `agent-control\\client.js` on Windows, and every roster key in the guard is written with `/`.
+ * Splits on BOTH separators (never `split(path.sep)` alone, which leaves the other one in place).
+ */
+export function toPosixRel(p) {
+  return p.split(/[\\/]+/).join('/')
+}
+
 export function parseSource(src, label) {
   try {
     return acornParse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowHashBang: true })
@@ -334,7 +343,8 @@ function passThroughParams(ancestors, builders) {
     const isListener = ancestors.slice(0, i).some(c => isListenerCall(c) && c.arguments.includes(fn))
     const name = enclosingName(fn, ancestors[i - 1])
     const tag = isListener ? 'listener' : builders.has(name) ? `builder:${name}` : null
-    if (tag) for (const q of fn.params) if (q.type === 'Identifier') m.set(q.name, tag)
+    // A listener forwards its event parameter(s); an allowlisted builder only its FIRST parameter (the handler's data).
+    if (tag) for (const q of (tag === 'listener' ? fn.params : fn.params.slice(0, 1))) if (q.type === 'Identifier') m.set(q.name, tag)
   })
   return m
 }
@@ -383,7 +393,13 @@ function spreadProblem(arg, ast, ctx = null, trusted = new Set()) {
   const objectsOf = e => {
     if (e.type === 'ObjectExpression') return [e]
     if (e.type === 'ConditionalExpression') { const a = objectsOf(e.consequent), b = objectsOf(e.alternate); return a && b ? [...a, ...b] : null }
-    if (e.type === 'LogicalExpression') return objectsOf(e.right)
+    if (e.type === 'LogicalExpression') {
+      // `a && b` spreads b (or a falsy value, which carries nothing); `a || b` / `a ?? b` spread a when it
+      // is truthy / non-null, so BOTH operands must be shown reason-free.
+      if (e.operator === '&&') return objectsOf(e.right)
+      const l = objectsOf(e.left), r = objectsOf(e.right)
+      return l && r ? [...l, ...r] : null
+    }
     return null
   }
   let objs = objectsOf(arg)
@@ -515,6 +531,8 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
   const dataNames = new Set([dataParam])
   const reasonNames = new Set()
   const keyIsReason = p => p.type === 'Property' && propName(p) === 'reason'
+  const patternNamesReason = pat => { let hit = false; walk(pat, [], q => { if (q.type === 'Property' && propName(q) === 'reason') hit = true }); return hit }
+  const unfollowable = []
   for (let changed = true; changed;) {
     changed = false
     walk(body, [], n => {
@@ -524,8 +542,13 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
         if (n.id.type === 'Identifier' && !dataNames.has(n.id.name)) { dataNames.add(n.id.name); changed = true }
         if (n.id.type === 'ObjectPattern') {
           for (const p of n.id.properties) {
-            if (keyIsReason(p) && p.value.type === 'Identifier' && !reasonNames.has(p.value.name)) { reasonNames.add(p.value.name); changed = true }
-            else if (p.type === 'RestElement') reasonNames.add('<rest>')
+            if (keyIsReason(p)) {
+              // `{ reason }`, `{ reason: r }`, `{ reason = 'x' }`, `{ reason: r = 'x' }`; anything else (a nested pattern) cannot be followed.
+              const target = p.value.type === 'AssignmentPattern' ? p.value.left : p.value
+              if (target.type === 'Identifier') { if (!reasonNames.has(target.name)) { reasonNames.add(target.name); changed = true } }
+              else unfollowable.push(p)
+            } else if (p.type === 'RestElement') reasonNames.add('<rest>')
+            else if (p.type === 'Property' && p.value.type !== 'Identifier' && identsIn(p.value).length && patternNamesReason(p.value)) unfollowable.push(p)
           }
         }
       }
@@ -537,7 +560,9 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
   }
   const problems = []
   let lookups = 0
+  let accepted = 0
   if (reasonNames.has('<rest>')) problems.push(`${label}: a rest element destructured from the event hides its reason`)
+  for (const p of unfollowable) problems.push(`${where(p)}: the event's reason is destructured into a pattern this guard cannot follow`)
   walk(body, [], (n, anc) => {
     const parent = anc[anc.length - 1]
     if (n.type === 'MemberExpression' && n.object.type === 'Identifier' && dataNames.has(n.object.name)) {
@@ -546,6 +571,7 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
       else if (name === 'reason') {
         const [cur, p, a] = chainUp(n, anc)
         const r = okReason(cur, p, a)
+        if (r) accepted++
         if (r === 'lookup') lookups++
         else if (!r) problems.push(`${where(n)}: the event's reason is read other than as the argument of ${LOOKUP}${suffix}`)
       }
@@ -555,7 +581,9 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
       if (parent?.type === 'VariableDeclarator' && parent.id === n) return
       if (parent?.type === 'Property' && parent.key === n && !parent.shorthand) return
       if (parent?.type === 'Property' && anc[anc.length - 2]?.type === 'ObjectPattern') return // the pattern's own binding
+      if (parent?.type === 'AssignmentPattern' && parent.left === n) return // `{ reason: r = 'x' }`: the binding, not a read
       const r = okReason(n, parent, anc)
+      if (r) accepted++
       if (r === 'lookup') lookups++
       else if (!r) problems.push(`${where(n)}: '${n.name}' (the event's reason) is used other than as the argument of ${LOOKUP}${suffix}`)
       return
@@ -570,7 +598,7 @@ function analyseReads(body, dataParam, label, { okReason, okData = () => false, 
       problems.push(`${where(n)}: the event ('${n.name}') is used as a ${parent.type}, so its reason could be read where this guard cannot see`)
     }
   })
-  return { problems, lookups }
+  return { problems, lookups, accepted }
 }
 
 /**
@@ -608,7 +636,7 @@ export function checkJournalReasonReads(src, label, fnName = 'permissionOutcomeF
   const r = analyseReads(fn.body, fn.params[1].name, label, { okReason: (n, parent) => (isLookupArg(n, parent) ? 'lookup' : false) })
   problems.push(...r.problems)
   if (r.lookups === 0) problems.push(`${label}: ${fnName} never passes the event's reason to ${LOOKUP}`)
-  return { problems, lookups: r.lookups }
+  return { problems, lookups: r.lookups, accepted: r.accepted }
 }
 
 /**
@@ -623,7 +651,8 @@ export function checkJournalReasonReads(src, label, fnName = 'permissionOutcomeF
  * Anything else is a problem. The event object may also be handed to `permissionOutcomeForEvent`, to
  * `this.emit(...)` inside an object payload, or used inside an (iii) branch.
  * Throws unless there is exactly one call to `permissionOutcomeForEvent(<event>, <data>)` in a callback.
- * @returns {{problems: string[], lookups: number}}
+ * `accepted` counts the reads that WERE allowed, so a caller that sees none can tell "clean" from "blind".
+ * @returns {{problems: string[], lookups: number, accepted: number}}
  */
 export function checkJournalCaller(src, label, { fnName = 'permissionOutcomeForEvent', toolUseIdOnly } = {}) {
   if (!toolUseIdOnly?.length) throw new Error(`REFUSE: ${label}: no toolUseId-only reasons given`)
@@ -661,7 +690,7 @@ export function checkJournalCaller(src, label, { fnName = 'permissionOutcomeForE
     okReason, okData,
     suffix: `, a strict comparison with a toolUseId-only reason (${toolUseIdOnly.join(', ')}), or a branch of another named event`,
   })
-  return { problems: r.problems, lookups: r.lookups }
+  return { problems: r.problems, lookups: r.lookups, accepted: r.accepted }
 }
 
 /**

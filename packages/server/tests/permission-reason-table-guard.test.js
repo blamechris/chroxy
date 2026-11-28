@@ -6,7 +6,9 @@
 // ways: a new literal, a `let`, an alias, a helper, a relay that edits its payload, a new file.
 // Deliberate obfuscation is out of scope (eval, a key built at run time, `'permission_' + 'resolved'`
 // in a file that never spells the literal). Where failing closed is cheap it fails closed instead
-// of enumerating bad shapes: unknown shapes are problems, not passes.
+// of enumerating bad shapes: unknown shapes are problems, not passes. Known limit: a frame mutated after
+// it is built (`Object.assign(frame, { reason })`, `frame.reason = ...`) is out of scope; only the reasons
+// in the frame's object literal and its spreads are read.
 //
 // WHAT IS COVERED. (1) every reason emitted in permission-manager.js is in the table or an allowlist;
 // (2) every 'permission_resolved' literal in every src file is classified, wire-frame reasons included
@@ -21,7 +23,7 @@ import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PERMISSION_NO_DECISION_REASON_OUTCOMES } from '@chroxy/protocol'
 import {
-  collectResolvedReasons, classifyResolvedUses, checkJournalReasonReads, checkJournalCaller, returnsReasonFreeObjects,
+  collectResolvedReasons, classifyResolvedUses, checkJournalReasonReads, checkJournalCaller, returnsReasonFreeObjects, toPosixRel,
 } from './helpers/permission-reason-collector.js'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
@@ -37,6 +39,10 @@ const TOOL_USE_ID_ONLY = ['superseded', 'answered']
 // entry when it is tabled or deliberately ruled a refusal. Tracking issue: #9372.
 const KNOWN_UNTABLED = ['cancelled']
 
+/** Roster keys, normalised the same way the scanned paths are, so neither side depends on a separator. */
+const posixKeys = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [toPosixRel(k), v]))
+const relKey = f => toPosixRel(relative(SRC, f))
+
 const TABLE = Object.keys(PERMISSION_NO_DECISION_REASON_OUTCOMES)
 const ACCOUNTED = new Set([...TABLE, ...REAL_DECISIONS, ...TOOL_USE_ID_ONLY, ...KNOWN_UNTABLED])
 
@@ -45,7 +51,7 @@ const ACCOUNTED = new Set([...TABLE, ...REAL_DECISIONS, ...TOOL_USE_ID_ONLY, ...
  * new file, a file that loses its use, or a file that gains a new kind of use fails. A `roster`
  * is a list of event names (it cannot emit); a `frame` is a wire frame `{ type: ... }`.
  */
-const KNOWN_USES = {
+const KNOWN_USES = posixKeys({
   'agent-control/client.js': 'comparison,roster',
   'agent-control/events.js': 'roster',
   'base-session.js': 'listener,roster',
@@ -59,7 +65,7 @@ const KNOWN_USES = {
   'sdk-session.js': 'listener',
   'session-manager.js': 'comparison,roster',
   'ws-server.js': 'comparison',
-}
+})
 /**
  * Frame builders (NOT permission_resolved listeners) that legitimately pass a handler parameter's
  * `reason` through into a wire frame. A pass-through is otherwise only allowed from a listener
@@ -69,7 +75,7 @@ const KNOWN_USES = {
  * (`{ permission_resolved: (data, ctx) => ... }`), not a listener. permission-resolver.js's
  * `buildLegacyResolvedBroadcast(result, requestId, decision)` passes nothing through.
  */
-const PASS_THROUGH_BUILDERS = { 'event-normalizer.js': ['permission_resolved'] }
+const PASS_THROUGH_BUILDERS = posixKeys({ 'event-normalizer.js': ['permission_resolved'] })
 // Imported helpers spread into a frame; each is VERIFIED reason-free below, never trusted blind.
 const TRUSTED_SPREAD_FNS = { resolvedByField: 'permission-resolved-by.js' }
 
@@ -231,6 +237,22 @@ describe('#9368 permission_resolved reasons are all accounted for', () => {
   })
 })
 
+describe('#9368 path keys are separator-agnostic (Windows reports agent-control\\client.js)', () => {
+  it('toPosixRel turns backslash, forward-slash and mixed paths into forward slashes', () => {
+    assert.equal(toPosixRel('agent-control\\client.js'), 'agent-control/client.js')
+    assert.equal(toPosixRel('agent-control/client.js'), 'agent-control/client.js')
+    assert.equal(toPosixRel('a\\b/c\\\\d.js'), 'a/b/c/d.js')
+    assert.equal(toPosixRel('permission-manager.js'), 'permission-manager.js')
+  })
+
+  it('a Windows-style relative path lands on the roster keys the scan compares against', () => {
+    for (const key of ['agent-control\\client.js', 'agent-control\\events.js']) {
+      assert.ok(toPosixRel(key) in KNOWN_USES, `${key} must resolve to a KNOWN_USES key`)
+      assert.ok(KNOWN_USES[toPosixRel(key)].includes('roster') || KNOWN_USES[toPosixRel(key)].includes('comparison'))
+    }
+  })
+})
+
 describe('#9368 every src file that spells permission_resolved is classified', () => {
   const files = srcFiles(SRC)
   const trusted = new Set()
@@ -239,7 +261,7 @@ describe('#9368 every src file that spells permission_resolved is classified', (
     trusted.add(fn)
   }
   const byFile = new Map(files.map(f => {
-    const rel = relative(SRC, f)
+    const rel = relKey(f)
     return [rel, classifyResolvedUses(readFileSync(f, 'utf8'), f, {
       allowEmitters: rel === 'permission-manager.js',
       allowRoster: KNOWN_USES[rel]?.includes('roster') === true,
@@ -308,6 +330,9 @@ describe('#9368 every src file that spells permission_resolved is classified', (
       'frame with an unknown spread': "send({ type: 'permission_resolved', ...x })",
       'S1 frame reason inside a conditional spread': "send({ type: 'permission_resolved', ...(d ? { reason: r } : {}) })",
       'S1 frame reason inside an object spread': "send({ type: 'permission_resolved', ...{ reason: r } })",
+      'S1 `||` spread with an unknown left': "send({ type: 'permission_resolved', ...(x || {}) })",
+      'S1 `??` spread with an unknown left': "send({ type: 'permission_resolved', ...(x ?? {}) })",
+      'S1 `||` spread with a reason on the right': "send({ type: 'permission_resolved', ...(x || { reason: r }) })",
       'N3 duplicate reason in a frame': "send({ type: 'permission_resolved', reason: 'superseded', reason: 'novel_dup' })",
       'S3 spread of a builder parameter': "function build(result) { return { type: 'permission_resolved', ...result } }",
       'S3 reason read from a builder parameter': "function build(result) { return { type: 'permission_resolved', reason: result.reason } }",
@@ -336,6 +361,12 @@ describe('#9368 every src file that spells permission_resolved is classified', (
     const spread = c("send({ type: 'permission_resolved', ...(d ? { reason: 'novel_f16' } : {}), ...{ reason: 'novel_f13' } })")
     assert.deepEqual(spread.problems, [])
     assert.deepEqual(spread.frameReasons.sort(), ['novel_f13', 'novel_f16'])
+    // `&&` spreads only its right operand, so a reason-free right (or `{}`) passes.
+    assert.deepEqual(c("send({ type: 'permission_resolved', ...(x && { scope: 'session' }) })").problems, [])
+    assert.deepEqual(c("send({ type: 'permission_resolved', ...({ a: 1 } || { b: 2 }), ...(y ?? {}) })").problems.length, 1, 'only the `??` left `y` is unknown')
+    // S3: an allowlisted builder passes through its FIRST parameter only.
+    const second = "const T = { permission_resolved: (data, ctx) => send({ type: 'permission_resolved', reason: ctx.reason }) }"
+    assert.ok(c(second, { passThroughBuilders: new Set(['permission_resolved']) }).problems.length > 0, "a builder's second parameter must not pass through")
     // S3: a builder's parameter passes through only when the builder is on the explicit allowlist.
     const build = "const T = { permission_resolved: (data) => send({ type: 'permission_resolved', ...(data.reason ? { reason: data.reason } : {}) }) }"
     assert.ok(c(build).problems.length > 0, 'unlisted builder')
@@ -373,6 +404,10 @@ describe('#9368 permissionOutcomeForEvent reads reason only through the shared t
       'destructured': ["const { reason } = data; if (reason === 'cleared') return 1", /'reason' \(the event's reason\) is used other than as the argument/],
       'destructured rename': ["const { reason: why } = data; return why === 'x' ? 1 : 2", /'why' \(the event's reason\) is used other than as the argument/],
       'rest destructure': ['const { ...rest } = data; return rest', /a rest element destructured from the event/],
+      'destructure with a shorthand default': ["const { reason = 'x' } = data; if (reason === 'cleared') return 1", /'reason' \(the event's reason\) is used other than as the argument/],
+      'destructure rename with a default': ["const { reason: rr = 'x' } = data; if (rr === 'cleared') return 1", /'rr' \(the event's reason\) is used other than as the argument/],
+      'destructure into a nested pattern': ['const { reason: { x } } = data; return x', /destructured into a pattern this guard cannot follow/],
+      'reason inside a nested destructure': ['const { a: { reason } } = data; return reason', /destructured into a pattern this guard cannot follow/],
       'data alias': ["const d = data; if (d.reason === 'cleared') return 1", /the event's reason is read other than as the argument/],
       'computed access': ["const k = 'reason'; return data[k]", /computed access on the event/],
       'spread': ['return mapIt({ ...data })', /the event \('data'\) is used as a SpreadElement/],
@@ -416,6 +451,9 @@ class M { wire(session, event) { session.on(event, (data) => {
   it('the live callback reads reason only through the table, a toolUseId-only comparison, or another event\'s branch', () => {
     const r = checkJournalCaller(real, 'session-manager.js', opts)
     assert.deepEqual(r.problems, [], r.problems.join('\n'))
+    // Not vacuous: the live callback really reads `data?.reason` (the superseded comparison, the thinking-level
+    // log), so an analyser that stopped seeing reads would report zero here instead of "clean".
+    assert.ok(r.accepted >= 1, `the live caller guard accepted ${r.accepted} reads of the event's reason; it is blind`)
   })
 
   it('the synthetic caller is clean, and each way of re-mapping a reason there is red', () => {
@@ -432,6 +470,11 @@ class M { wire(session, event) { session.on(event, (data) => {
       'destructured': ["const { reason } = data; if (reason === 'cleared') this.x()", /'reason' \(the event's reason\) is used other than/],
       'handed to a helper': ['mapIt(data)', /the event \('data'\) is used as a CallExpression/],
       'computed read': ["const k = 'reason'; data[k]", /computed access on the event/],
+      'destructure with a shorthand default': ["const { reason = 'x' } = data; if (reason === 'cleared') this.x()", /'reason' \(the event's reason\) is used other than/],
+      'destructure rename with a default': ["const { reason: rr = 'x' } = data; if (rr === 'cleared') this.x()", /'rr' \(the event's reason\) is used other than/],
+      'destructure into a nested pattern': ['const { reason: { x } } = data; this.x(x)', /destructured into a pattern this guard cannot follow/],
+      'reason inside a nested destructure': ['const { a: { reason } } = data; this.x(reason)', /destructured into a pattern this guard cannot follow/],
+      'rest element': ['const { ...rest } = data; this.x(rest)', /a rest element destructured from the event/],
     }
     for (const [name, [body, rx]] of Object.entries(bad)) {
       const r = checkJournalCaller(caller(body), 't', opts)
