@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { HOUR, MIN, REAL, T0, cleanupTmp, cleanupVariants, mustKill, tmp, xrig } from './helpers/harness.js'
+import { HOUR, MIN, REAL, T0, cleanupTmp, cleanupVariants, entry, mustKill, tmp, xrig } from './helpers/harness.js'
 
 afterEach(() => cleanupTmp())
 process.on('exit', cleanupVariants)
@@ -373,7 +373,7 @@ proves(
     assert.deepEqual(c.events('input_limit').map((x) => x.body.detail.problem), ['oversize'])
   },
   {
-    'no per-tick line cap': [edit('exchange.js', 'if (++fresh > lim.max_new_lines_per_tick) break', '')],
+    'no per-tick line cap': [edit('exchange.js', 'if (fresh >= lim.max_new_lines_per_tick) break', '')],
     'no rejection cap': [edit('exchange.js', 'if (++rejects <= lim.max_rejects_per_tick) yield', 'if (++rejects > 0) yield')],
     'a file read whole': [edit('inbox.js', 'const want = Math.min(open.size, maxFileBytes)', 'const want = open.size')],
     'an oversize file not noted': [edit('inbox.js', 'oversize = open.size > maxFileBytes', 'oversize = false')],
@@ -446,7 +446,126 @@ proves(
     for (const at of [5, 6, 7]) r.tick(T0 + at * MIN)
     assert.deepEqual(r.events('input_limit').map((x) => x.body.detail.problem), ['oversize'])
   },
-  { 'one record per tick': [edit('exchange.js', "[input, problem, lines[0]?.id ?? '']", '[input, problem, tickId]')] },
+  { 'one record per tick': [edit('exchange.js', '[input, problem, lines[0]?.id ?? inputIdentity(ex.files[input])]', '[input, problem, tickId]')] },
+)
+
+/**
+ * Two blocked sessions, both with a delivered message: the first is deferred
+ * (so the slot passes to the second), which leaves one active item and one
+ * that only answers a flood of lines with refusals.
+ */
+function twoShown(M, cfg) {
+  const r = xrig(M, cfg)
+  const block = (id, on) => entry(id, { state: 'blocked', blockedOn: on, decision: 'pick one', updatedAt: T0 - MIN })
+  r.writeState([block('s1', 'the deploy'), block('s2', 'the review')])
+  r.tick(T0)
+  const m1 = r.lines('item')[0]
+  assert.equal(r.lines('item').length, 1, 'one item holds the slot')
+  r.add('acks.jsonl', ack(m1, 'defer', { until: T0 + 2 * HOUR }))
+  r.tick(T0 + MIN)
+  const m2 = r.lines('item').find((l) => l.key !== m1.key)
+  assert.ok(m2, 'the second item was shown once the first was deferred')
+  return { r, m1, m2 }
+}
+const appliedFor = (r) => r.kinds('owner_ack').filter((x) => x.body.phase === 'ack' && x.body.intent === 'done').length
+
+proves(
+  'lines an echo cap holds back do not spend the new-line budget: the acks behind them for another item are read in the same tick',
+  (M) => {
+    // per episode: s1 may have 2 echoes, then every further valid ack for it is held
+    const a = twoShown(M, { exchange: { max_new_lines_per_tick: 3, max_echoes_per_episode: 2 } })
+    a.r.add('acks.jsonl', ...Array.from({ length: 10 }, (_, i) => ack(a.m1, 'defer', { until: T0 + 30 * HOUR + i })), ack(a.m2, 'done'))
+    a.r.tick(T0 + 5 * MIN)
+    assert.equal(appliedFor(a.r), 1, 'the other item\'s ack was applied in the first tick, behind ten held lines')
+    assert.deepEqual(a.r.events('input_limit').map((x) => x.body.detail.problem), ['echo_cap'])
+    for (const at of [10, 15, 20]) a.r.tick(T0 + at * MIN)
+    assert.equal(appliedFor(a.r), 1, 'and only once')
+    assert.deepEqual(a.r.conflicts(), [])
+
+    // per tick: s1 may have 2 echoes in a tick, the rest wait for the next tick
+    const b = twoShown(M, { exchange: { max_new_lines_per_tick: 3, max_echoes_per_item_per_tick: 2 } })
+    const echoes = b.r.lines('echo').length
+    b.r.add('acks.jsonl', ...Array.from({ length: 10 }, (_, i) => ack(b.m1, 'defer', { until: T0 + 30 * HOUR + i })), ack(b.m2, 'done'))
+    b.r.tick(T0 + 5 * MIN)
+    assert.equal(appliedFor(b.r), 1, 'the other item\'s ack was applied in the first tick')
+    b.r.tick(T0 + 10 * MIN)
+    assert.equal(b.r.lines('echo').length, echoes + 3 + 2, 'three echoes in the first tick, then two more of the held lines')
+  },
+  {
+    'held lines spend the budget': [edit('exchange.js', 'if ((yield* handle(parsed, ln.id, now)) !== HELD) fresh++', 'yield* handle(parsed, ln.id, now); fresh++')],
+    'the per-episode hold counted': [edit('exchange.js', '      return HELD\n    }\n    if ((ex.tickEchoes', '      return\n    }\n    if ((ex.tickEchoes')],
+    'the per-tick hold counted': [edit('exchange.js', '>= lim.max_echoes_per_item_per_tick) return HELD', '>= lim.max_echoes_per_item_per_tick) return')],
+  },
+)
+
+proves(
+  'a long-lived reconciler: an ack for a message delivered after an earlier tick read acks is applied, not lost as an unknown message',
+  (M) => {
+    const r = xrig(M)
+    const block = (id, on) => entry(id, { state: 'blocked', blockedOn: on, decision: 'pick one', updatedAt: T0 - MIN })
+    r.writeState([block('s1', 'the deploy'), block('s2', 'the review')])
+    const rec = r.open({ now: T0, config: r.cfg, exchangeDir: r.exchangeDir })
+    try {
+      const tick = (at) => rec.tick({ source: 'chroxy-state-file', slotStart: at, now: at })
+      tick(T0)
+      const m1 = r.lines('item')[0]
+      // This tick reads an ack (so the attempt index is built), then defers the
+      // first item, which delivers the second item's message after the read.
+      r.add('acks.jsonl', ack(m1, 'defer', { until: T0 + 2 * HOUR }))
+      tick(T0 + MIN)
+      const m2 = r.lines('item').find((l) => l.key !== m1.key)
+      assert.ok(m2, 'the second message was delivered after the ack was read')
+      r.add('acks.jsonl', ack(m2, 'done'))
+      tick(T0 + 2 * MIN)
+      assert.ok(!reasons(r, 'acks').includes('ignored:unknown_message'), 'the new message is known to the next tick')
+      assert.equal(appliedFor(r), 1, 'the ack for it was applied')
+    } finally {
+      rec.close()
+    }
+  },
+  { 'stale attempt index': [edit('exchange.js', 'if (hit && hit.size === state.attempts.size) return hit.map', 'if (hit) return hit.map')] },
+)
+
+proves(
+  'a line whose echo could not be written still spends the new-line budget, so a broken outbox cannot make a tick walk the whole file',
+  (M) => {
+    const { r, m1, m2 } = twoShown(M, { exchange: { max_new_lines_per_tick: 3 } })
+    r.add('acks.jsonl', ...Array.from({ length: 8 }, (_, i) => ack(m1, 'defer', { until: T0 + 30 * HOUR + i })), ack(m2, 'done'))
+    const judged = r.events('input_judged').length
+    fs.renameSync(r.outboxFile, r.outboxFile + '.keep')
+    fs.mkdirSync(r.outboxFile)
+    r.tick(T0 + 5 * MIN)
+    assert.equal(r.events('input_judged').length - judged, 3, 'three lines were taken, and no more')
+    assert.equal(appliedFor(r), 0, 'the ack behind them waits')
+    assert.deepEqual(reasons(r, 'acks'), ['applied:'], 'none finished but the setup line: each echo failed')
+  },
+  {
+    'a failed echo does not spend the budget': [edit('exchange.js', 'if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[judged.reason]), it, now)) return', 'if (!echo(ex, lid, ECHO.refused(title, REFUSAL_TEXT[judged.reason]), it, now)) return HELD')],
+  },
+)
+
+proves(
+  'an input problem with no line to name it is recorded again for a replacement file, not once ever',
+  (M) => {
+    const { r, m } = shown(M)
+    const real = path.join(r.root, 'real-acks.jsonl')
+    fs.writeFileSync(real, JSON.stringify(ack(m, 'done')) + '\n')
+    const link = path.join(r.exchangeDir, 'acks.jsonl')
+    fs.symlinkSync(real, link)
+    r.tick(T0 + 5 * MIN)
+    r.tick(T0 + 6 * MIN)
+    assert.deepEqual(r.events('input_limit').map((x) => x.body.detail.problem), ['unsafe'], 'once for the file, not once per tick')
+    fs.rmSync(link)
+    fs.symlinkSync(real, link + '.2')
+    fs.renameSync(link + '.2', link)
+    r.tick(T0 + 7 * MIN)
+    assert.deepEqual(r.events('input_limit').map((x) => x.body.detail.problem), ['unsafe', 'unsafe'], 'a replacement is recorded again')
+  },
+  {
+    'keyed by nothing': [edit('exchange.js', '[input, problem, lines[0]?.id ?? inputIdentity(ex.files[input])]', "[input, problem, lines[0]?.id ?? '']")],
+    'identity ignores the file': [edit('inbox.js', 'return `${st.dev}:${st.ino}:${Math.trunc(st.birthtimeMs)}`', "return ''")],
+  },
+  { skip: process.platform === 'win32' && 'links need privileges on Windows' },
 )
 
 describe('an input swapped for a FIFO after the check is refused, not waited on', { skip: process.platform === 'win32' && 'no FIFOs on Windows' }, () => {
