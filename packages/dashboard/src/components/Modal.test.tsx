@@ -120,6 +120,38 @@ describe('Modal', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  // #9374: jsdom stamps events from Date.now(); that clock drifts against
+  // performance.timeOrigin + performance.now() over a long-lived worker. A fresh
+  // Escape fired right after open must close the modal whichever way it drifts,
+  // and an event stamped before the open must still be ignored.
+  describe.each([
+    ['3ms behind', -3],
+    ['10ms behind', -10],
+    ['3ms ahead', 3],
+  ])('with Date.now() %s the real clock (#9374)', (_label, skew) => {
+    afterEach(() => { vi.restoreAllMocks() })
+
+    it('closes on a fresh Escape fired immediately after open', () => {
+      const realNow = Date.now.bind(Date)
+      vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew)
+      const onClose = vi.fn()
+      render(<Modal open onClose={onClose} title="T"><div>c</div></Modal>)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('still ignores an Escape stamped before the open', () => {
+      const realNow = Date.now.bind(Date)
+      vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew)
+      const onClose = vi.fn()
+      const inFlight = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+      const t0 = performance.now(); while (performance.now() - t0 < 5) { /* spin */ }
+      render(<Modal open onClose={onClose} title="T"><div>c</div></Modal>)
+      document.dispatchEvent(inFlight)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+  })
+
   it('a repeat Escape does not close, a fresh press does (#9243)', () => {
     const onClose = vi.fn()
     render(<Modal open onClose={onClose} title="T"><div>c</div></Modal>)
