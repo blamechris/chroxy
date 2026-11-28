@@ -43,7 +43,7 @@ describe('file-level read errors: the guide and the code agree', () => {
     const text = readFileSync(GUIDE, 'utf8')
     const doc = guideFileLevelCodes(text)
     const set = [...FILE_LEVEL_READ_ERRORS]
-    const withExtra = guideFileLevelCodes(text.replace('- `shape_changed`\n', '- `shape_changed`\n- `invented_code`\n'))
+    const withExtra = guideFileLevelCodes(text.replace('- `bad_timestamp`\n', '- `bad_timestamp`\n- `invented_code`\n'))
     assert.deepEqual(diff(withExtra, set), ['invented_code'])
     assert.deepEqual(diff(set, doc.filter((c) => c !== 'corrupt')), ['corrupt'])
   })

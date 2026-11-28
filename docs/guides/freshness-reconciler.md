@@ -263,11 +263,15 @@ File-level codes (they do not count towards an outage):
 - `tail_too_small`
 - `corrupt`
 - `bad_timestamp`
-- `shape_changed`
 
-Every other code counts as describing the source: `unreadable`, `source_missing`,
-`unsupported`, `adapter_fault`, `timeout`, a missing code, and any code not named
-above, including one added later. The list is an allowlist so that an unknown
+Every other code counts as describing the source, including the codes the
+adapters emit today: `unreachable`, `source_missing`, `unreadable`, `too_large`,
+`parse_failed`, `shape_changed`, `clock_skew`, `adapter_shape`, `adapter_fault`,
+`unsupported`, `ambiguous_id`, `invalid_source`, `not_regular` and `file_changed`;
+a missing code; and any code not named above, including one added later.
+`shape_changed`, `parse_failed` and `too_large` count because the state-file and
+registry adapters emit them for the whole source (a changed format, a file that
+does not parse, one that is too large), which is a real outage. The list is an allowlist so that an unknown
 code keeps the old behaviour. It lives in `src/freshness/read-errors.js`, and a
 test holds this list and that set equal.
 

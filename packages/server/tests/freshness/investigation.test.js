@@ -450,7 +450,7 @@ describe('disappearance and outages', () => {
     })
 
     it('each of the five file-level codes is not an outage', () => {
-      for (const code of ['window_exhausted', 'tail_too_small', 'corrupt', 'bad_timestamp', 'shape_changed']) {
+      for (const code of ['window_exhausted', 'tail_too_small', 'corrupt', 'bad_timestamp']) {
         const { h, t } = twoSessions()
         h.world.sources.chroxy.readError = code
         ticks(h, 'chroxy', t, 3)
@@ -460,7 +460,7 @@ describe('disappearance and outages', () => {
     })
 
     it('every session unreadable on two ticks: the outage still happens', () => {
-      for (const code of ['unreadable', 'source_missing', 'unsupported', 'adapter_fault', 'brand_new_code']) {
+      for (const code of ['unreadable', 'source_missing', 'unsupported', 'adapter_fault', 'shape_changed', 'parse_failed', 'too_large', 'brand_new_code']) {
         const { h, t } = twoSessions()
         h.world.sources.chroxy.readError = code
         ticks(h, 'chroxy', t, 3)
@@ -494,6 +494,21 @@ describe('disappearance and outages', () => {
       now += CAD * MIN
       h.tick('chroxy', now, { reads: failing(() => 'unreadable') })
       assert.equal(outageOf(h).length, 1)
+    })
+
+    it('a re-read that fails on a file-level code in the retry too: inconclusive; on a source code: unreachable', () => {
+      for (const [reread, want, outages] of [['corrupt', 'inconclusive', 0], ['unreadable', 'source_unreachable', 1]]) {
+        const { h, t } = twoSessions()
+        let now = t
+        for (let i = 0; i < 3; i++) {
+          now += CAD * MIN
+          h.tick('chroxy', now, { reads: failing((s, kind) => (kind === 'read' ? 'unreadable' : reread)) })
+        }
+        const si = srcInvs(h)
+        assert.ok(si.length > 0)
+        assert.ok(si.every((i) => i.classification === want), reread)
+        assert.equal(outageOf(h).length, outages, reread)
+      }
     })
 
     it('a source-level investigation whose re-read fails only on the file read is inconclusive, not an outage', () => {
