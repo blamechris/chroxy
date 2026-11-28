@@ -17,6 +17,9 @@
  *     the start of the window is dropped; an unterminated final line (a write
  *     still in flight) is ignored. A line in between that does not parse is a
  *     damaged transcript, which is an `error`, not a shorter one.
+ *   - A window that starts mid-file and holds no status block is an `error`
+ *     (`window_exhausted`), not `no_report`: a large tool result can push a
+ *     recent block out of the window. `no_report` means the whole file was read.
  *   - Authored: only top-level assistant entries count. A user entry, a tool
  *     result or a subagent (sidechain) entry that quotes a status block is not
  *     one the session authored.
@@ -159,7 +162,8 @@ function readTail(fd, expectedIdentity, maxTailBytes) {
       later = true
     }
   }
-  if (!last) return { outcome: 'no_report' }
+  // A window that began mid-file and found nothing has not shown the session never reported: an earlier block may lie before it.
+  if (!last) return start > 0 ? fail('window_exhausted') : { outcome: 'no_report' }
   if (last.badTime) return fail('bad_timestamp')
   return { outcome: 'ok', report: { ...last.report, later_unfootered_messages: later } }
 }
