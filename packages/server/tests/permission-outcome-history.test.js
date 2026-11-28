@@ -618,6 +618,13 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     }
   })
 
+  it('#9368: an auto-mode MCP trust-bypass deny is a decision, not a no-decision: it journals denied', () => {
+    const { session } = makeInProcessSession(mgr, 's-bypass')
+    session.emit('permission_request', { requestId: 'p1', tool: 'mcp__foo__bar', description: 'x', input: {} })
+    session.emit('permission_resolved', { requestId: 'p1', decision: 'deny', reason: 'auto_mode_mcp_trust_bypass' })
+    assert.equal(outcomes(mgr, 's-bypass')[0].outcome, 'denied')
+  })
+
   it('records "expired" for a session-level permission_expired event', () => {
     const { session, requestId } = raise('s1')
     session.emit('permission_expired', { requestId, message: 'Permission request expired (session timeout)' })
