@@ -499,6 +499,34 @@ proves(
 )
 
 proves(
+  'a long-lived reconciler: an ack for a message delivered after an earlier tick read acks is applied, not lost as an unknown message',
+  (M) => {
+    const r = xrig(M)
+    const block = (id, on) => entry(id, { state: 'blocked', blockedOn: on, decision: 'pick one', updatedAt: T0 - MIN })
+    r.writeState([block('s1', 'the deploy'), block('s2', 'the review')])
+    const rec = r.open({ now: T0, config: r.cfg, exchangeDir: r.exchangeDir })
+    try {
+      const tick = (at) => rec.tick({ source: 'chroxy-state-file', slotStart: at, now: at })
+      tick(T0)
+      const m1 = r.lines('item')[0]
+      // This tick reads an ack (so the attempt index is built), then defers the
+      // first item, which delivers the second item's message after the read.
+      r.add('acks.jsonl', ack(m1, 'defer', { until: T0 + 2 * HOUR }))
+      tick(T0 + MIN)
+      const m2 = r.lines('item').find((l) => l.key !== m1.key)
+      assert.ok(m2, 'the second message was delivered after the ack was read')
+      r.add('acks.jsonl', ack(m2, 'done'))
+      tick(T0 + 2 * MIN)
+      assert.ok(!reasons(r, 'acks').includes('ignored:unknown_message'), 'the new message is known to the next tick')
+      assert.equal(appliedFor(r), 1, 'the ack for it was applied')
+    } finally {
+      rec.close()
+    }
+  },
+  { 'stale attempt index': [edit('exchange.js', 'if (hit && hit.size === state.attempts.size) return hit.map', 'if (hit) return hit.map')] },
+)
+
+proves(
   'a line whose echo could not be written still spends the new-line budget, so a broken outbox cannot make a tick walk the whole file',
   (M) => {
     const { r, m1, m2 } = twoShown(M, { exchange: { max_new_lines_per_tick: 3 } })

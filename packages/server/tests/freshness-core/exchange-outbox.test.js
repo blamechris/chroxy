@@ -220,7 +220,7 @@ proves(
     cut(fieldOf(text, 'State'), 'State')
     cut(fieldOf(text, 'Trigger'), 'Trigger')
     const seed = { open: true, origin: 'seed', seed: { scope: long, written_at: T0 }, session: null, asks: new Map(), carried: [] }
-        // The headline is also what an echo names the item by, with no outer cut.
+    // The headline is also what an echo names the item by, with no outer cut.
     const title = M.headline(seed, max)
     assert.equal(title, `a seed to paste for ${'w'.repeat(max - 1)}…`, 'the seed scope is cut')
     // The written time is a fixed-length ISO stamp; cut it to a length shorter than that and it is cut like the rest.
