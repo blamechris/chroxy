@@ -196,8 +196,8 @@ export const PERMISSION_STOPPED_REASON = 'stopped'
 
 // PERMISSION_ABORTED_REASON and PERMISSION_TIMEOUT_REASON (below) are no longer read by this
 // handler (#8952: it reads PERMISSION_NO_DECISION_REASON_OUTCOMES). ABORTED stays a public export
-// of @chroxy/store-core (re-exported from src/index.ts); TIMEOUT is module-internal and unused,
-// kept beside it. Neither is read anywhere else in this repo.
+// of @chroxy/store-core (re-exported from src/index.ts); TIMEOUT is exported from this file only,
+// not from the package, and nothing reads it. Neither is read anywhere else in this repo.
 /**
  * #8374: the `permission_resolved` reason for every OTHER abort of the turn's
  * controller -- a dead provider process, a stalled stream's watchdog, a
