@@ -469,7 +469,7 @@ const SCHEDULER_FILE = path.join(SRC, 'freshness/investigation.js')
 describe('read-only: the investigation scheduler imports only the pure rule modules and names nothing that sends or writes', () => {
   it('holds on the shipped file', () => {
     const { specs, names } = scanScheduler(fs.readFileSync(SCHEDULER_FILE, 'utf8'))
-    assert.deepEqual(specs, ['./checks.js', './config.js', './derive.js', './hash.js', './keys.js'], 'no adapter, ledger file or I/O module')
+    assert.deepEqual(specs, ['./checks.js', './config.js', './derive.js', './hash.js', './keys.js', './read-errors.js'], 'no adapter, ledger file or I/O module')
     assert.deepEqual(names, [], 'no name that sends or writes')
   })
   // The scan itself, shown to fail on each thing added to the real file.
@@ -484,7 +484,7 @@ describe('read-only: the investigation scheduler imports only the pure rule modu
   })) {
     it(`the scan flags ${label}`, () => {
       const { specs, names } = scanScheduler(`${line}\n${real}`)
-      assert.ok(specs.length !== 5 || names.length > 0)
+      assert.ok(specs.length !== 6 || names.length > 0)
     })
   }
 })

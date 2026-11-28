@@ -153,6 +153,7 @@ function setCurrent(state, s, r) {
     seq: r.seq,
     tickId: r.refs?.tick ?? null,
     outcome: b.outcome,
+    errorCode: b.error_code ?? null,
     listed: b.listed !== false,
     freshness: b.freshness,
     freshnessReason: b.freshness_reason,
